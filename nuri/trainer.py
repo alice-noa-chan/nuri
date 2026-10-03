@@ -16,10 +16,10 @@ from typing import Callable
 
 import torch
 
-from nuri.checkpoint import save_pretrained, save_training_state
-from nuri.losses import contrastive_loss, length_loss, sample_mean_ce, token_mean_ce
-from nuri.model import NuriModel
-from nuri.schedule import WSDSchedule
+from .checkpoint import save_pretrained, save_training_state
+from .losses import contrastive_loss, length_loss, sample_mean_ce, token_mean_ce
+from .model import NuriModel
+from .schedule import WSDSchedule
 
 # ----- loss for each batch kind ------------------------------------------------------
 

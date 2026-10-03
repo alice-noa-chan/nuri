@@ -6,11 +6,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from nuri.config import NuriConfig
-from nuri.core import RecurrentReasoningCore
-from nuri.encoder import InputEncoder
-from nuri.moe import MoEFFN
-from nuri.readout import BidirectionalReadout, MemoryCache
+from .config import NuriConfig
+from .core import RecurrentReasoningCore
+from .encoder import InputEncoder
+from .moe import MoEFFN
+from .readout import BidirectionalReadout, MemoryCache
 
 
 def masked_mean(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -24,7 +24,7 @@ class NuriModel(nn.Module):
         self.config = config
         d = config.hidden_size
         self.embedding = nn.Embedding(config.vocab_size, d)
-        self.encoder = InputEncoder(config, self.embedding)
+        self.encoder = InputEncoder(config)
         self.core = RecurrentReasoningCore(config)
         self.readout = BidirectionalReadout(config)
         # Embedding head (§6): z_fast = P(u), z_reason = P(u + W_r r).
@@ -52,7 +52,7 @@ class NuriModel(nn.Module):
         valid = self.input_mask(input_ids) if attention_mask is None else attention_mask.bool()
         if not valid.any(dim=1).all():
             raise ValueError("every sample needs at least one valid input token")
-        return self.encoder(input_ids, valid), valid
+        return self.encoder(self.embedding(input_ids), valid), valid
 
     def reason(self, x: torch.Tensor, valid: torch.Tensor, steps: int | None = None, return_states: bool = False):
         steps = self.config.default_depth if steps is None else steps

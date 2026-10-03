@@ -6,8 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from nuri.config import NuriConfig
-from nuri.layers import SwiGLU
+from .config import NuriConfig
+from .layers import SwiGLU
 
 
 class MoEFFN(nn.Module):

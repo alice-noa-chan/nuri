@@ -6,13 +6,14 @@ from nuri.model import NuriModel
 from nuri.schedule import WSDSchedule
 
 
-def test_public_weights_roundtrip_with_shared_embedding(tmp_path):
+def test_public_weights_roundtrip(tmp_path):
     torch.manual_seed(0)
     moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,), readout_layers=(2,))
     model = NuriModel(tiny_config(moe=moe)).eval()
     save_pretrained(model, tmp_path, dtype=torch.float32)
     loaded = load_pretrained(tmp_path).eval()
-    assert loaded.embedding is loaded.encoder.embedding  # still one shared tensor
+    names = list(loaded.state_dict())
+    assert sum("embedding" in n for n in names) == 1  # one embedding, reused by the vocabulary head
     ids = torch.randint(3, 128, (2, 6))
     x1, valid = model.encode(ids)
     x2, _ = loaded.encode(ids)

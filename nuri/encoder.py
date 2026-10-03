@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from nuri.config import NuriConfig
-from nuri.layers import Attention, RMSNorm, rope_cache
-from nuri.moe import build_ffn
+from .config import NuriConfig
+from .layers import Attention, RMSNorm, rope_cache
+from .moe import build_ffn
 
 
 class RopeTables(nn.Module):
@@ -38,18 +38,23 @@ class EncoderBlock(nn.Module):
 
 
 class InputEncoder(nn.Module):
-    """X = E_phi(tokens). The token embedding is owned by the model and shared."""
+    """X = E_phi(tokens).
 
-    def __init__(self, config: NuriConfig, embedding: nn.Embedding):
+    It takes already embedded tokens. The token embedding lives in the model,
+    which shares it with the canvas input and the vocabulary head; keeping it
+    out of this module means the weight has exactly one name in checkpoints.
+    """
+
+    def __init__(self, config: NuriConfig):
         super().__init__()
-        self.embedding = embedding
         self.rope = RopeTables(config.head_dim, config.rope_theta)
         self.blocks = nn.ModuleList(EncoderBlock(config, i + 1) for i in range(config.input_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
 
-    def forward(self, input_ids: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-        h = self.embedding(input_ids)
-        rope = self.rope(input_ids.shape[1], input_ids.device)
+    def forward(self, embedded: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        """embedded: [B, N, D] token embeddings; valid: [B, N] real-token mask."""
+        h = embedded
+        rope = self.rope(h.shape[1], h.device)
         for block in self.blocks:
             h = block(h, valid, rope)
         return self.final_norm(h)

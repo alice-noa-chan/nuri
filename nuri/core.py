@@ -7,8 +7,8 @@ import math
 import torch
 from torch import nn
 
-from nuri.config import NuriConfig
-from nuri.layers import Attention, RMSNorm, SwiGLU
+from .config import NuriConfig
+from .layers import Attention, RMSNorm, SwiGLU
 
 
 class RecurrentReasoningCore(nn.Module):

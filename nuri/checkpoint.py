@@ -5,10 +5,8 @@ Two kinds of files are kept apart:
   are what gets released.
 - Training state: optimizer, step and RNG state for resuming. Never released.
 
-The token embedding is one tensor used under two names (`embedding.weight`
-and `encoder.embedding.weight`). safetensors refuses shared tensors, so only
-the first name of each tensor is written, and the aliases are filled back in
-on load because they point at the same module.
+The token embedding is stored once as `embedding.weight`; the vocabulary
+head reuses it at run time, so no tensor is shared under two names.
 """
 
 from __future__ import annotations
@@ -19,40 +17,22 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
-from nuri.config import NuriConfig
-from nuri.model import NuriModel
-
-
-def _unique_tensors(model: torch.nn.Module) -> tuple[dict[str, torch.Tensor], set[str]]:
-    """Split the state dict into first-seen names and alias names of shared tensors."""
-    unique, aliases, seen = {}, set(), set()
-    for name, tensor in model.state_dict().items():
-        key = (tensor.data_ptr(), tensor.shape, tensor.dtype)
-        if key in seen:
-            aliases.add(name)
-        else:
-            seen.add(key)
-            unique[name] = tensor
-    return unique, aliases
+from .config import NuriConfig
+from .model import NuriModel
 
 
 def save_pretrained(model: NuriModel, folder: str | Path, dtype: torch.dtype = torch.bfloat16) -> None:
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     model.config.save(folder / "config.json")
-    tensors, _ = _unique_tensors(model)
-    weights = {name: t.detach().to("cpu", dtype).contiguous() for name, t in tensors.items()}
+    weights = {name: t.detach().to("cpu", dtype).contiguous() for name, t in model.state_dict().items()}
     save_file(weights, str(folder / "model.safetensors"), metadata={"format": "pt"})
 
 
 def load_pretrained(folder: str | Path, device="cpu", dtype: torch.dtype = torch.float32) -> NuriModel:
     folder = Path(folder)
     model = NuriModel(NuriConfig.load(folder / "config.json"))
-    weights = load_file(str(folder / "model.safetensors"))
-    missing, unexpected = model.load_state_dict(weights, strict=False)
-    _, aliases = _unique_tensors(model)
-    if unexpected or set(missing) - aliases:
-        raise ValueError(f"checkpoint does not match the model: missing={missing}, unexpected={unexpected}")
+    model.load_state_dict(load_file(str(folder / "model.safetensors")))  # strict: every name must match
     return model.to(device=device, dtype=dtype)
 
 

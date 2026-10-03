@@ -20,10 +20,10 @@ from typing import Iterator
 
 import torch
 
-from nuri.config import NuriConfig
-from nuri.data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_pair_batch, build_span_batch,
+from .config import NuriConfig
+from .data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_pair_batch, build_span_batch,
                        has_mlm_target, usable_instruction)
-from nuri.trainer import Task
+from .trainer import Task
 
 
 def read_jsonl(path: str | Path) -> Iterator[dict]:

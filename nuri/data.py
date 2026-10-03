@@ -18,8 +18,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import torch
 
-from nuri.config import NuriConfig
-from nuri.corruption import corrupt_canvas, mask_for_mlm, pad_batch, split_span
+from .config import NuriConfig
+from .corruption import corrupt_canvas, mask_for_mlm, pad_batch, split_span
 
 ROLE_TOKENS = {"system": "<|system|>", "user": "<|user|>", "assistant": "<|assistant|>"}
 
