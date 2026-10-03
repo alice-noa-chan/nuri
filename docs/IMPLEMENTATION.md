@@ -223,6 +223,7 @@ are disabled; an enabled run with a missing dependency gives the install command
 | `batch/<kind>/targets` | Targets in the sampled batch: masked tokens for MLM/canvas tasks, positive pairs for embedding tasks. These units stay separate. |
 | `performance/tokens_per_second`, `/steps_per_second` | Work since the previous metric sample in this process divided by monotonic elapsed time. Includes batch building, logging and intervening saves. The first resumed sample counts only new work. |
 | `train/reasoning_depth`, `train/schedule_phase` | Active T (0 for MLM, which skips the core), and phase code 0=warmup, 1=stable, 2=decay. |
+| `train/reasoning_depth_mean`, `/min`, `/max` | Numeric depth summaries when an accumulated update samples several depths, rather than claiming one common T. |
 | `moe/balance`, `moe/z` | Router auxiliary terms when MoE is active. |
 | `moe/layer_<n>/expert_<e>_assignments` | Routed assignments for each expert in each auxiliary record of the sampled batch. Compare these within the same task. |
 
@@ -232,6 +233,13 @@ completed optimizer updates. Events contain explicit numeric measurements;
 raw input text, token IDs, data paths and full training settings are not copied
 into events. The writer flushes periodically and closes on completion or an
 exception, so the final available measurements remain readable.
+
+With gradient accumulation, loss components are means over the microbatches
+that contain that component, while target and expert-assignment counts are
+summed over the update. A mixed-task update gets a `loss/mixed/total` curve
+rather than assigning its mean to one individual task. The bar also shows the
+current microbatch index/count and its task/depth; it advances only after the
+optimizer update.
 
 To continue one graph after interruption, keep the original event directory
 and add the usual `--resume` flag. Events after the restored checkpoint are
@@ -405,8 +413,13 @@ python scripts/evaluate.py --checkpoint runs/nuri-base-embed/final `
 ```
 
 Use a separate evaluation corpus/pair file. The generated reasoning tasks use
-the task generator's evaluation split. Tokenizer files default to the checkpoint
-folder and must match its vocabulary and special IDs.
+two reported splits: `shared` reuses the training name/node pools with newly
+sampled chains, graphs and expressions; `eval` uses disjoint names as a stress
+test. Curves and R interventions use `shared` so an unseen answer vocabulary
+does not dominate the reasoning comparison. A distant seed creates new samples,
+but it does not guarantee that every sampled problem is absent from training.
+Tokenizer files default to the checkpoint folder and must match its vocabulary
+and special IDs.
 
 The generation report includes exact token match, missing EOS, and canvas
 length errors. It compares predicted and oracle lengths for IT; base models
@@ -442,7 +455,13 @@ run for all valid tokens, and shared experts are excluded from router losses.
 Router math stays FP32 inside an autocast-disabled scope. Padding is excluded
 from pooling, memory attention, and expert routing.
 
-Adaptive halting, GQA/MLA, local/global schedules, grouped hypothesis slots,
+Optional local/global input schedules use `attention_schedule` and
+`local_radius`; the implementation uses a dense attention mask, so no speedup
+is claimed. Greedy refinement remains the default, with optional temperature/
+top-k sampling available through the generation API. These options, activation
+checkpointing and compilation need measurements before release training.
+
+Adaptive halting, GQA/MLA, grouped hypothesis slots,
 draft feedback, sequence packing/unpadding, grouped-GEMM dispatch, and FP8
 remain separate experiments. Their effectiveness is not established by having
 the surrounding architecture in place.
