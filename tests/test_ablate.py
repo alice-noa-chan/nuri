@@ -23,3 +23,13 @@ def test_every_variant_trains_and_reports(tmp_path):
     assert by_name["core-moe"]["parameters"] > by_name["baseline"]["parameters"]
     saved = json.loads((tmp_path / "ablation.json").read_text(encoding="utf-8"))
     assert len(saved["results"]) == len(script.VARIANTS)
+
+
+def test_several_seeds_are_summarized(tmp_path):
+    script = load_script()
+    results = script.main(["--out", str(tmp_path), "--variants", "baseline", "--seeds", "0", "1", "--steps", "2",
+                           "--batch-size", "4", "--train-examples", "30", "--eval-examples", "4",
+                           "--vocab-size", "400", "--device", "cpu"])
+    assert [r["seed"] for r in results] == [0, 1]
+    summary = json.loads((tmp_path / "ablation.json").read_text(encoding="utf-8"))["summary"]
+    assert summary[0]["seeds"] == 2 and summary[0]["exact_match_predicted_std"] >= 0.0

@@ -3,13 +3,17 @@
 Usage
   python scripts/ablate.py --out runs/ablate --steps 2000
   python scripts/ablate.py --out runs/ablate --variants baseline gqa mla --steps 500 --device cuda
+  python scripts/ablate.py --out runs/ablate --steps 2000 --seeds 0 1 2   # mean and spread over seeds
 
 Every variant starts from the same base config (the "tiny" preset scaled up a
 little by default), the same seed and the same synthetic reasoning data
 (nuri/tasks.py, "train" split), and trains for the same number of steps.
 Each is then evaluated on the "shared" split with the oracle and the
 predicted length, together with the length-only baseline, so a variant is
-only "better" when it beats both its rivals and that baseline.
+only "better" when it beats both its rivals and that baseline. With
+several --seeds, each variant is trained once per seed (model init and
+batch order change, data stays fixed) and the summary reports the mean and
+standard deviation, so differences can be compared with seed noise.
 
 The tokenizer is a small byte-level BPE trained on the task texts, so the
 script needs no data. Results go to <out>/ablation.json and a table is
@@ -73,20 +77,21 @@ def base_config(vocab_size: int, **overrides):
     return tiny_config(**settings)
 
 
-def run_variant(name: str, overrides: dict, train_ex, eval_ex, vocab_size: int, args) -> dict:
-    torch.manual_seed(args.seed)
+def run_variant(name: str, overrides: dict, train_ex, eval_ex, vocab_size: int, args, seed: int) -> dict:
+    torch.manual_seed(seed)
     model = NuriModel(base_config(vocab_size, **overrides))
-    tasks, mix = instruction_stage(train_ex, model.config, args.batch_size, seed=args.seed)
-    settings = TrainSettings(out_dir=str(Path(args.out) / name), total_steps=args.steps, peak_lr=args.lr,
+    tasks, mix = instruction_stage(train_ex, model.config, args.batch_size, seed=seed)
+    settings = TrainSettings(out_dir=str(Path(args.out) / f"{name}-seed{seed}"), total_steps=args.steps,
+                             peak_lr=args.lr,
                              warmup_steps=max(1, args.steps // 20), log_every=max(1, args.steps // 10),
-                             mix=mix, seed=args.seed, progress=False, stage=name)
+                             mix=mix, seed=seed, progress=False, stage=name)
     started = time.time()
     records = train(model, tasks, settings, device=torch.device(args.device))
     seconds = time.time() - started
     model.eval()
     oracle = generation_accuracy(model, eval_ex, oracle_length=True)
     predicted = generation_accuracy(model, eval_ex)
-    return {"variant": name, "overrides": {k: str(v) for k, v in overrides.items()},
+    return {"variant": name, "seed": seed, "overrides": {k: str(v) for k, v in overrides.items()},
             "parameters": sum(p.numel() for p in model.parameters()), "train_seconds": round(seconds, 1),
             "final_loss": records[-1]["loss"], "exact_match_predicted": predicted["exact_match"],
             "exact_match_oracle": oracle["exact_match"], "length_only_baseline": oracle["length_only_accuracy"],
@@ -103,7 +108,8 @@ def main(argv=None) -> list[dict]:
     p.add_argument("--train-examples", type=int, default=8000)
     p.add_argument("--eval-examples", type=int, default=300)
     p.add_argument("--vocab-size", type=int, default=800)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=0, help="seed of the synthetic data")
+    p.add_argument("--seeds", type=int, nargs="+", default=[0], help="training seeds per variant")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args(argv)
 
@@ -117,16 +123,35 @@ def main(argv=None) -> list[dict]:
 
     results = []
     for name in args.variants:
-        results.append(run_variant(name, VARIANTS[name], train_ex, eval_ex, vocab_size, args))
-        print(f"{name:<16} params {results[-1]['parameters']:>9,}  loss {results[-1]['final_loss']:.3f}  "
-              f"exact(pred) {results[-1]['exact_match_predicted']:.3f}  exact(oracle) "
-              f"{results[-1]['exact_match_oracle']:.3f}  length-only {results[-1]['length_only_baseline']:.3f}  "
-              f"{results[-1]['train_seconds']:.0f}s", flush=True)
+        for seed in args.seeds:
+            results.append(run_variant(name, VARIANTS[name], train_ex, eval_ex, vocab_size, args, seed))
+            r = results[-1]
+            print(f"{name:<16} seed {seed}  params {r['parameters']:>9,}  loss {r['final_loss']:.3f}  "
+                  f"exact(pred) {r['exact_match_predicted']:.3f}  exact(oracle) {r['exact_match_oracle']:.3f}  "
+                  f"length-only {r['length_only_baseline']:.3f}  {r['train_seconds']:.0f}s", flush=True)
+    summary = summarize(results)
+    for row in summary:
+        print(f"{row['variant']:<16} exact(pred) {row['exact_match_predicted_mean']:.3f} "
+              f"+/- {row['exact_match_predicted_std']:.3f} over {row['seeds']} seed(s)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "ablation.json").write_text(json.dumps({"settings": vars(args), "results": results}, indent=2),
-                                       encoding="utf-8")
+    (out / "ablation.json").write_text(json.dumps({"settings": vars(args), "results": results, "summary": summary},
+                                                  indent=2), encoding="utf-8")
     return results
+
+
+def summarize(results: list[dict]) -> list[dict]:
+    """Mean and (population) standard deviation of each metric per variant."""
+    rows = []
+    for name in dict.fromkeys(r["variant"] for r in results):
+        runs = [r for r in results if r["variant"] == name]
+        row = {"variant": name, "seeds": len(runs)}
+        for key in ("exact_match_predicted", "exact_match_oracle", "final_loss"):
+            values = torch.tensor([float(r[key]) for r in runs])
+            row[f"{key}_mean"] = float(values.mean())
+            row[f"{key}_std"] = float(values.std(unbiased=False))
+        rows.append(row)
+    return rows
 
 
 if __name__ == "__main__":
