@@ -149,6 +149,19 @@ PAD/MASK/EOS IDs fails before training.
 
 ### Optional training memory and compilation settings
 
+`--corpus` accepts one folder or several `folder=weight` arguments. Keep
+private folder locations in environment variables; the weights control which
+corpus supplies each sampled document. A single unweighted folder preserves
+the original sampling behavior. Release plans can supply a list of these
+arguments under a stage's `corpus` key.
+
+`--pack-mlm` optionally fills base-stage MLM rows with multiple documents.
+Segment masks keep attention within each document, including local attention
+layers; span batches keep their original format. Progress token counts include
+valid positions rather than padding. Packing is opt-in, and its GPU throughput
+gain is unmeasured. Resume checks the saved batch construction, including the
+pack flag, when this metadata is present in the private state.
+
 `--grad-accum N` averages N microbatch losses before one optimizer update.
 `--batch-size` remains the size of a microbatch; the progress target and
 `--steps` count optimizer updates. This reduces the memory needed to accumulate
