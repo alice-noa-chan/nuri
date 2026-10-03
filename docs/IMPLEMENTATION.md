@@ -274,6 +274,44 @@ AutoClass configuration and relative-code packaging follow the
 The actual exported-folder load was also tested in a fresh Python process
 with its tokenizer, embeddings, and generation helper.
 
+## Evaluate a checkpoint
+
+Run the generation diagnostics on an IT checkpoint:
+
+```powershell
+python scripts/evaluate.py --checkpoint runs/nuri-base-it/final `
+  --suites reasoning curves interventions --examples 300 `
+  --output runs/eval/nuri-base-it.json
+
+python scripts/evaluate.py --checkpoint runs/nuri-base/final `
+  --suites mlm diagnostics --corpus $env:NURI_EVAL_CORPUS `
+  --output runs/eval/nuri-base.json
+
+python scripts/evaluate.py --checkpoint runs/nuri-base-embed/final `
+  --suites retrieval --pairs $env:NURI_EVAL_PAIRS `
+  --output runs/eval/nuri-base-embed.json
+```
+
+Use a separate evaluation corpus/pair file. The generated reasoning tasks use
+the task generator's evaluation split. Tokenizer files default to the checkpoint
+folder and must match its vocabulary and special IDs.
+
+The generation report includes exact token match, missing EOS, and canvas
+length errors. It compares predicted and oracle lengths for IT; base models
+use oracle length because their length head is untrained. The T curve uses
+one checkpoint at T=1/2/4/8/16. The S curve uses S=1/2/4/8. The R interventions
+zero the latent state or swap it between samples before length prediction and
+canvas readout. Use oracle length when you need to separate readout behavior
+from the effect on the length head.
+
+Retrieval reports Recall@k and MRR for matched query/document modes and supported
+embedding prefixes. Core diagnostics report state/update norms, slot cosine,
+and effective rank per recurrent step. Diagnostics characterize behavior;
+changing states, higher confidence, or unchanged floor-level accuracy do not
+establish reasoning. Depth curves also do not replace an independently trained
+comparison of recurrence. Mark inference depths outside the trained set when
+interpreting the report.
+
 ## What is implemented and what still needs experiments
 
 Implemented: pre-norm RMSNorm, bias-free projections, SwiGLU, RoPE on input
