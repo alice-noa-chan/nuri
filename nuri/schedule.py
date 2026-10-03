@@ -21,8 +21,18 @@ class WSDSchedule:
     decay_fraction: float = 0.15
     min_ratio: float = 0.0
 
+    def __post_init__(self):
+        if self.total_steps <= 0 or self.peak_lr <= 0:
+            raise ValueError("total_steps and peak_lr must be positive")
+        if not 0.0 <= self.decay_fraction <= 1.0 or not 0.0 <= self.min_ratio <= 1.0:
+            raise ValueError("decay_fraction and min_ratio must be in [0, 1]")
+        if not 0 <= self.warmup_steps <= self.decay_start:
+            # Otherwise the "pre-decay" checkpoint would be saved during warmup.
+            raise ValueError("warmup must end before the decay phase starts")
+
     @property
     def decay_start(self) -> int:
+        """First step of the decay phase."""
         return self.total_steps - int(round(self.total_steps * self.decay_fraction))
 
     def lr(self, step: int) -> float:

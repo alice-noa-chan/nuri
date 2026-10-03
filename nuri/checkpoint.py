@@ -13,6 +13,7 @@ on load because they point at the same module.
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import torch
@@ -64,13 +65,24 @@ def save_training_state(path: str | Path, model, optimizer, step: int, extra: di
         "step": step,
         "config": model.config.to_dict(),
         "torch_rng": torch.get_rng_state(),
+        "python_rng": random.getstate(),
         "extra": extra or {},
     }, path)
 
 
 def load_training_state(path: str | Path, model, optimizer) -> dict:
+    """Restore a run. Refuses a state saved with a different model config.
+
+    Equal tensor shapes are not enough: a different rope_theta, for example,
+    loads cleanly but silently changes what the model computes.
+    """
     state = torch.load(path, map_location="cpu", weights_only=False)
+    saved, current = state["config"], model.config.to_dict()
+    if saved != current:
+        changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
+        raise ValueError(f"training state config differs from the model config in: {changed}")
     model.load_state_dict(state["model"])
     optimizer.load_state_dict(state["optimizer"])
     torch.set_rng_state(state["torch_rng"])
+    random.setstate(state["python_rng"])
     return state

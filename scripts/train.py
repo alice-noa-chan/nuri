@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
+
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -80,6 +83,9 @@ def encode(tokenizer, text: str) -> list[int]:
 
 def main(argv=None):
     args = parse_args(argv)
+    # Seed before building the model so --seed fully fixes the initial weights.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if args.stage == "base":
         model = NuriModel(PRESETS[args.preset]())
     else:
