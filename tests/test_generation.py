@@ -64,3 +64,29 @@ def test_deterministic():
     a = generate(model, ids, canvas_len=8)
     b = generate(model, ids, canvas_len=8)
     assert torch.equal(a.canvas, b.canvas)
+
+
+def test_sampling_is_repeatable_and_differs_from_greedy():
+    model = make_model()
+    ids = prompt(model)
+    greedy = generate(model, ids, canvas_len=8)
+    assert torch.equal(greedy.canvas, generate(model, ids, canvas_len=8, temperature=0.0).canvas)
+    first = generate(model, ids, canvas_len=8, temperature=2.0, generator=torch.Generator().manual_seed(3))
+    again = generate(model, ids, canvas_len=8, temperature=2.0, generator=torch.Generator().manual_seed(3))
+    assert torch.equal(first.canvas, again.canvas)
+    assert not torch.equal(first.canvas, greedy.canvas)  # an untrained model is far from one-hot
+    assert not (first.canvas == model.config.mask_id).any()
+
+
+def test_top_1_sampling_equals_greedy():
+    model = make_model()
+    ids = prompt(model)
+    sampled = generate(model, ids, canvas_len=6, temperature=1.0, top_k=1, generator=torch.Generator().manual_seed(0))
+    assert torch.equal(sampled.canvas, generate(model, ids, canvas_len=6).canvas)
+
+
+@pytest.mark.parametrize("kwargs", [dict(temperature=-1.0), dict(temperature=1.0, top_k=0)])
+def test_bad_sampling_settings_are_rejected(kwargs):
+    model = make_model()
+    with pytest.raises(ValueError):
+        generate(model, prompt(model), canvas_len=4, **kwargs)

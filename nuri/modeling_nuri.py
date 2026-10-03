@@ -69,10 +69,14 @@ class NuriPreTrainedModel(PreTrainedModel):
         return self.model.embed(input_ids, attention_mask, mode=mode, steps=steps, dim=dim)
 
     def generate_refine(self, input_ids, attention_mask=None, T: int | None = None, S: int | None = None,
-                        max_len: int | None = None, canvas_len=None) -> GenerationResult:
-        """T = reasoning steps, S = refinement rounds. Base models need canvas_len."""
+                        max_len: int | None = None, canvas_len=None, temperature: float = 0.0,
+                        top_k: int | None = None, generator: torch.Generator | None = None) -> GenerationResult:
+        """T = reasoning steps, S = refinement rounds. Base models need canvas_len.
+
+        temperature 0 is greedy; above 0 samples (optionally top_k) with `generator`.
+        """
         return generate(self.model, input_ids, attention_mask, steps=T, rounds=S, canvas_len=canvas_len,
-                        max_len=max_len)
+                        max_len=max_len, temperature=temperature, top_k=top_k, generator=generator)
 
 
 class NuriHFModel(NuriPreTrainedModel):

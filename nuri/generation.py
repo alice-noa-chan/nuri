@@ -29,7 +29,9 @@ class GenerationResult:
 def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None,
              steps: int | None = None, rounds: int | None = None, canvas_len=None,
              max_len: int | None = None, keep_history: bool = False,
-             transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None) -> GenerationResult:
+             transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None,
+             temperature: float = 0.0, top_k: int | None = None,
+             generator: torch.Generator | None = None) -> GenerationResult:
     """Greedy refinement generation.
 
     steps: reasoning depth T (config default if None).
@@ -41,6 +43,12 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     transform_r: optional function applied to R_final before it is used, for
         intervention experiments (for example zeroing or shuffling R, §12).
         It affects both the length head and the readout memory.
+    temperature: 0 (default) picks the most likely token. Above 0, tokens are
+        sampled from softmax(logits / temperature), optionally restricted to
+        the top_k most likely ones; pass a torch.Generator to make it
+        repeatable. The stored confidence is the model's own probability of
+        the chosen token (at temperature 1), so re-masking still prefers to
+        revisit unlikely choices.
     """
     config = model.config
     steps = config.default_depth if steps is None else steps
@@ -48,6 +56,10 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     max_len = config.max_response_len if max_len is None else max_len
     _check_positive_int(rounds, "rounds")
     _check_positive_int(max_len, "max_len")
+    if temperature < 0:
+        raise ValueError("temperature must be >= 0")
+    if top_k is not None:
+        _check_positive_int(top_k, "top_k")
     if not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be an int >= 0")
     max_len = min(max_len, config.max_response_len)
@@ -74,7 +86,8 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         # MASK and PAD are not words; never write them into the answer.
         logits[:, [config.mask_id, config.pad_id]] = float("-inf")
         probs = logits.softmax(dim=-1)
-        best_prob, best_token = probs.max(dim=-1)
+        best_token = _pick_tokens(logits, temperature, top_k, generator)
+        best_prob = probs.gather(1, best_token[:, None]).squeeze(1)
         canvas[masked] = best_token
         # A token keeps the confidence it had when it was predicted from MASK;
         # we never re-score a visible token that can see itself.
@@ -90,6 +103,17 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         ended.append(config.eos_id in answer)
         tokens.append(answer[:answer.index(config.eos_id)] if config.eos_id in answer else answer)
     return GenerationResult(tokens, canvas, lengths, ended, history)
+
+
+def _pick_tokens(logits: torch.Tensor, temperature: float, top_k: int | None, generator) -> torch.Tensor:
+    """Greedy at temperature 0, otherwise a sample from the (top-k) tempered distribution."""
+    if temperature == 0:
+        return logits.argmax(dim=-1)
+    scaled = logits / temperature
+    if top_k is not None and top_k < scaled.shape[-1]:
+        cutoff = scaled.topk(top_k, dim=-1).values[:, -1:]
+        scaled = scaled.masked_fill(scaled < cutoff, float("-inf"))
+    return torch.multinomial(scaled.softmax(dim=-1), 1, generator=generator).squeeze(1)
 
 
 def _check_positive_int(value, name: str) -> None:
