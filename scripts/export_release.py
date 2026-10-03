@@ -86,6 +86,14 @@ def model_card(model: NuriModel, args) -> str:
         "it": "generate_refine(ids, T=4, S=4)  # the length head picks the answer length",
         "embed": 'encode(ids, mode="reasoning", dim=128)  # unit-length sentence embeddings',
     }[args.stage]
+    # Instruction-tuned models were trained on chat-formatted prompts ending with the assistant tag.
+    if args.stage == "it":
+        prompt = ('text = tokenizer.apply_chat_template([{"role": "user", "content": "..."}],\n'
+                  '                                     add_generation_prompt=True, tokenize=False)\n'
+                  'ids = tokenizer(text, add_special_tokens=False, return_tensors="pt").input_ids')
+    else:
+        prompt = 'ids = tokenizer("...", add_special_tokens=False, return_tensors="pt").input_ids'
+    decode = "" if args.stage == "embed" else "\nprint(tokenizer.decode(result.tokens[0]))"
     return f"""---
 license: mit
 language: [ko, en, ja]
@@ -120,8 +128,8 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 model = AutoModelForMaskedLM.from_pretrained("{args.name}", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained("{args.name}")
-ids = tokenizer("...", return_tensors="pt").input_ids
-result = model.{usage}
+{prompt}
+result = model.{usage}{decode}
 ```
 
 `T` is the number of reasoning steps and `S` the number of refinement rounds;

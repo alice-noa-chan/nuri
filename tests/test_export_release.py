@@ -41,6 +41,7 @@ def test_export_loads_with_transformers(tmp_path, stage):
     card = (out / "README.md").read_text()
     assert "license: mit" in card and f"nuri-{stage}" in card
     assert "1e6 tokens" in card and "0 GPU-hours" in card and "one GPU-day" not in card
+    assert ("apply_chat_template" in card) == (stage == "it")
     assert load_pretrained(out).config.length_head_trained == (stage == "it")  # Nuri loader reads it too
 
 
