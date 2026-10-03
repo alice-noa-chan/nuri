@@ -38,7 +38,7 @@ answer canvas [MASK MASK ...] ──► Readout (2 layers, reads [X; R]) ──�
    reused for every step.
 3. **Readout.** The answer starts as all `[MASK]`. Each round predicts every
    masked word at once, keeps the confident ones and re-masks the rest
-   (Mask-Predict). `X` and `R` are computed once per request.
+   (Mask-Predict). By default `X` and `R` are computed once per request.
 4. **Heads.** MLM on `X`, sentence embeddings (`fast` = from `X`,
    `reasoning` = from `X` and `R`), an answer length head, and an optional
    classification head.
@@ -74,27 +74,45 @@ falls back to fp32 on CPU.
 
 ## Train
 
-All data paths are passed as flags or environment variables.
+Keep raw datasets, downloads, prepared examples and token corpora under the
+Git-ignored `data/` directory. Keep the internal source/permission/checksum
+ledger only in `.private/`, which is also ignored. The local preparation tool
+reads a private plan, copies inputs without editing them, removes provenance
+from task records, and keeps related documents and duplicate records in the
+same train/evaluation split:
+
+```bash
+python tools/prepare_data.py --plan .private/data_plan.json
+```
+
+Pass actual data paths through environment variables or private plans.
+The following Bash examples assume those variables have been set. Choose
+the tokenizer using held-out per-language measurements; the examples do
+not preselect a vocabulary size.
 
 ```bash
 # 1. Train tokenizer variants and compare bytes per token per language
 python tools/train_tokenizer.py --input-file $NURI_TOKENIZER_INPUT --format jsonl \
-    --output-dir runs/tokenizer --vocab-sizes 32768 49152 65536
+    --eval-file $NURI_TOKENIZER_EVAL --eval-format jsonl \
+    --output-dir data/tokenizer --vocab-sizes 32768 49152 65536
 
 # 2. Tokenize raw text into a corpus folder (tokens.bin + offsets.npy)
-python scripts/tokenize_corpus.py --tokenizer runs/tokenizer/vocab-65536 --out corpus/ text.jsonl
+python scripts/tokenize_corpus.py --tokenizer "$NURI_TOKENIZER" \
+    --out "$NURI_TEXT_CORPUS" "$NURI_RAW_TEXT"
 
 # 3. Base stage: MLM + text span denoising
-python scripts/train.py --stage base --preset release-dense --corpus corpus/ \
+python scripts/train.py --stage base --preset release-dense --tokenizer "$NURI_TOKENIZER" \
+    --corpus "$NURI_TEXT_CORPUS" \
     --out runs/nuri-base --steps 20000 --batch-size 64 --save-every 2000
 
 # 4. Instruction tuning (adds synthetic reasoning tasks automatically)
-python scripts/train.py --stage it --init runs/nuri-base/final --tokenizer runs/tokenizer/vocab-65536 \
-    --instructions it.jsonl --corpus corpus/ --out runs/nuri-base-it --steps 3000
+python scripts/train.py --stage it --init runs/nuri-base/final \
+    --instructions "$NURI_IT_DATA" --corpus "$NURI_TEXT_CORPUS" \
+    --out runs/nuri-base-it --steps 3000
 
 # 5. Embedding training
-python scripts/train.py --stage embed --init runs/nuri-base/final --tokenizer runs/tokenizer/vocab-65536 \
-    --pairs pairs.jsonl --out runs/nuri-base-embed --steps 3000
+python scripts/train.py --stage embed --init runs/nuri-base/final \
+    --pairs "$NURI_PAIR_DATA" --out runs/nuri-base-embed --steps 3000
 ```
 
 Use `--preset release-moe` in step 3 for the MoE model. The base stage takes
@@ -184,6 +202,8 @@ z = model.embed(prompt, mode="reasoning", steps=4, dim=128)
 | `nuri/tokenizer.py` | tokenizer checks and copying tokenizer files into checkpoints |
 | `scripts/` | `train.py`, `tokenize_corpus.py` |
 | `tools/` | tokenizer training, GPU benchmark, text inference CLI, the shared-file watcher |
+| `data/` | private raw/prepared datasets, downloads, tokenizer variants and token corpora (ignored) |
+| `.private/` | internal source/permission/usage ledger, data plans and privacy markers (ignored) |
 | `docs/` | design spec, decision log, agent discussion |
 
 ## How this project is built

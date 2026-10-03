@@ -23,6 +23,61 @@ Use Python 3.10 or newer. Install a CUDA-enabled PyTorch build on the training
 machine. The Windows development environment used for the initial checks has
 CPU-only PyTorch, so CUDA memory and fused attention performance are unmeasured.
 
+## Prepare local datasets without publishing them
+
+Keep raw imports, downloads, prepared JSONL and token corpora under `data/`.
+This entire directory is ignored by Git. Source identities, original paths,
+licenses/permission labels, revisions, hashes and usage records belong only
+in `.private/`. Public model exports do not copy either directory.
+
+The preparation tool takes a private plan and makes independent local copies:
+
+```powershell
+python tools/prepare_data.py --plan .private/data_plan.json
+```
+
+The plan must be inside `.private/`. Its `allowed_source_roots` list bounds
+the source directories that may be read. Inputs specify an opaque `id`,
+`path`, `kind` (`text`, `instruction`, or `pairs`), `lang`, `split` (`train`
+or `eval`), and optional `namespace`, `group_field`, `sha256`, `format`
+(`jsonl` or `tsv`) and `fields` mappings. Pair inputs can filter a label
+through `positive_values`. A `job` names the output directory; `seed`,
+`eval_fraction`, `max_chars` and optional `min_chars` control preparation.
+Keep actual source locations and field mappings in the private plan.
+
+Outputs are under `data/prepared/<job>/`: `text/<lang>/{train,eval}.jsonl`,
+`instructions/{train,eval}.jsonl`, and `pairs/{train,eval}.jsonl`. Text rows
+have `text`/`lang`; instruction rows have `messages`/`response`; pair rows
+have `query`/`positive`. Only task content is kept; source metadata is removed.
+An instruction with no separate response uses its final assistant message
+as the target and keeps earlier turns as the prompt.
+
+Explicit evaluation inputs take precedence. Stable group splitting happens
+before long documents are chunked. Within each task kind, duplicate normalized
+content joins groups;
+if any connected group is held out, the connected records stay in evaluation.
+This can increase the final held-out fraction, so inspect actual split counts
+before training. The tool uses SQLite to bound memory, shows generic progress
+labels, writes detailed reports only in `.private/`, and creates `COMPLETE.json`
+only after a successful job. Existing output jobs are never overwritten.
+Source files are not moved, linked or edited. Supplemental downloads and
+their acquisition notes follow the same local-only layout.
+This does not detect near-duplicates or semantic overlap between different
+task kinds; split counts and held-out quality still need review.
+
+Local hooks can invoke the privacy checker before a commit/message/push.
+Its optional literal source markers live in `.private/provenance-markers.txt`;
+failures print counts and categories without the matched identities:
+
+```powershell
+python tools/check_private_files.py --pre-commit
+python tools/check_private_files.py --audit-head
+```
+
+The push check also scans outgoing historical trees and tag messages, so
+removing a file later does not hide it in an earlier commit. Generic examples
+and paths are allowed; real source identities never belong in tracked text.
+
 ## Train and compare tokenizer variants
 
 The tokenizer tool reads UTF-8 text or JSONL objects with a `text` field and
@@ -46,7 +101,7 @@ supplies an optional held-out input. The explicit equivalents are
 Each `vocab-N` folder contains `tokenizer.json`, the fast-tokenizer metadata,
 special-token metadata, an instruction chat template, and `metrics.json`.
 The report records the requested and actual vocabulary sizes and bytes per
-token overall and by language. Larger bytes per token means fewer tokens for
+token by language. Larger bytes per token means fewer tokens for
 the same bytes; evaluate each language separately. A tiny input may produce
 fewer merges than requested, so use the **actual** vocabulary size in the model.
 Metrics from the training input are labeled as such and must not be presented
@@ -62,8 +117,8 @@ python scripts/tokenize_corpus.py `
 
 The corpus consists of `tokens.bin` (`uint32` token IDs) and `offsets.npy`
 (`int64` document boundaries). Prefix/span splitting uses these boundaries;
-documents are not packed together for attention. Keep local corpora and their
-provenance under `.private/` or outside this repository.
+documents are not packed together for attention. Keep token corpora under
+ignored `data/` and provenance only under `.private/`.
 
 ## Benchmark before choosing a training batch size
 
@@ -99,9 +154,17 @@ allocated/reserved memory, T/S, dtype, parameter count, and sequence lengths.
 Input throughput counts input tokens once per request. Output sequence
 throughput counts a generated sequence once, rather than multiplying it by S.
 These definitions differ from a count of all intermediate canvas positions.
-Compare the same task, lengths, batch size, dtype, T, and S. The current MoE
-backend loops over experts in Python and is labeled `portable_expert_loop`;
-the matching active FFN width does not imply matching wall time.
+Compare the same task, lengths, batch size, dtype, T, and S. The default MoE
+backend loops over experts in Python. To test the optional grouped projections,
+set `MoEConfig.backend="grouped"` in the model config or use
+`--moe-backend grouped` with a MoE preset. The override fails for dense models.
+The report includes `moe_backend_requested`, the successful measured
+`moe_backend` (`portable_expert_loop`, `grouped_mm`, `mixed_grouped_and_loop`,
+`not_run`, or `dense`), and `moe_expert_paths_used`. Warmup calls do not count
+as measured execution. Unsupported kernels can use the loop; OOM and unknown
+kernel errors propagate. The conservative CUDA policy currently allows BF16
+on capability 9.0 or higher; verify newer support on the actual runtime.
+The matching active FFN width does not imply matching wall time.
 
 A CPU smoke benchmark uses much smaller settings:
 
@@ -136,6 +199,14 @@ Use `release-moe` for the MoE base. Step counts and batch sizes above are
 examples; choose them using the measured budget. IT JSONL objects contain
 `messages` (role/content objects) and `response`. Pair JSONL objects contain
 `query` and `positive`. No corpus sources are embedded in code or tracked files.
+
+Embedding training defaults to separate fast-mode and reasoning-mode losses.
+For the optional alignment between reasoning queries and fast documents, add
+`--cross-mode-weight 0.1` (an example weight, not a tuned recommendation).
+The release plan accepts `cross_mode_weight`; zero keeps the previous objective.
+JSON, tqdm and TensorBoard report the raw `cross_mode` component; the optimized
+total includes its configured weight. Exact resume preserves this setting,
+and older states without the field are interpreted as zero.
 
 The target answer never enters the prompt's bidirectional memory. IT appends
 EOS only to complete natural answers and excludes overlong answers. Base
@@ -185,6 +256,15 @@ the one-day run. Activation checkpointing and compilation are runtime options
 that may change on resume; numerical equivalence across GPU backends is not
 guaranteed.
 
+`--native-gqa` lets a supported SDPA runtime consume compact K/V heads for
+a model configured with `num_kv_heads < num_heads`. The portable repeated-head
+path remains the default. The model API is `model.set_native_gqa(True)`; this
+changes no weights or public model configuration. The training setting is
+checked on resume, and old states default to `False`. Benchmark the same
+checkpoint with and without this flag; the JSON records the execution choice.
+A native API or a smaller persistent cache does not guarantee a fused kernel
+or a GPU speed improvement. MHA models are unchanged by the switch.
+
 ## Monitor training and view TensorBoard
 
 The CLI prints which preparation step is running: loading the tokenizer,
@@ -230,7 +310,7 @@ are disabled; an enabled run with a missing dependency gives the install command
 | TensorBoard tag | Meaning |
 |---|---|
 | `loss/total`, `loss/<task>/total` | The optimized loss, including active weighted length and MoE terms; compare individual task curves because objectives have different scales. |
-| `loss/<task>/denoise`, `/length`, `/fast`, `/reasoning` | Available unweighted objective components for the sampled task. |
+| `loss/<task>/denoise`, `/length`, `/fast`, `/reasoning`, `/cross_mode` | Available unweighted objective components for the sampled task; cross-mode alignment is recorded under `loss/pairs/cross_mode`. |
 | `optimizer/lr`, `optimizer/grad_norm` | Current learning rate and gradient norm before clipping. |
 | `data/processed_tokens` | Cumulative valid input/canvas positions, or query/document positions for pairs, preserved on resume. Padding and repeated recurrent steps do not add tokens. |
 | `batch/<kind>/targets` | Targets in the sampled batch: masked tokens for MLM/canvas tasks, positive pairs for embedding tasks. These units stay separate. |
@@ -359,6 +439,11 @@ a prefix with `--dim`. Release embedding training supervises 64/128/256
 dimensions. Use the same mode for queries and indexed documents; similarity
 across modes needs its own alignment evaluation.
 
+The retrieval evaluator also reports reasoning-query/fast-document rows.
+Interpret them only after training and evaluating the optional cross-mode
+alignment; sharing a projection or printing the row does not establish a
+shared space.
+
 ## Build and verify a local release folder
 
 The export tool needs Transformers in addition to the core dependencies:
@@ -479,10 +564,31 @@ is claimed. Greedy refinement remains the default, with optional temperature/
 top-k sampling available through the generation API. These options, activation
 checkpointing and compilation need measurements before release training.
 
-Adaptive halting, GQA/MLA, grouped hypothesis slots,
-draft feedback, sequence packing/unpadding, grouped-GEMM dispatch, and FP8
-remain separate experiments. Their effectiveness is not established by having
-the surrounding architecture in place.
+Implemented experimental options include `num_kv_heads` (GQA),
+`kv_latent_dim` (an MLA-style projection bottleneck), `MoEConfig.core`,
+`slot_groups`, and inference `halt_tol`. They are OFF by default. GQA keeps
+reduced heads in the fixed-memory cache; the latent projection still stores
+expanded K/V. Grouped slots merge in the last scheduled step and cannot be
+combined with halting. Halting rejects NaN/negative tolerances, measures the
+relative update in FP32, and reports steps used per sample; it does not
+establish that the answer is correct. The `halting` evaluation suite measures
+accuracy against average steps.
+
+`draft_feedback=true` is an implemented, default-OFF model experiment. During
+training the core reads X plus the corrupted canvas; masked targets stay
+hidden. Length prediction uses a separate draft-free R. Generation computes
+that initial R, then restarts the core from its learned slots using the current
+draft before each refinement round and rebuilds readout memory K/V. The input
+encoder X stays fixed. Halting applies to each call; `reasoning_steps` reports
+the sum, including the initial call. Without halting this costs `(S+1)*T` core
+updates per sample. Train the feature consistently before assessing its
+quality; it changes the default fixed-R generation contract.
+
+Real unpadding/sparse attention kernels, learned stopping and FP8 remain
+future experiments. Isolated MLM packing is
+implemented, but its speed and every new option's quality need measurements.
+The strengths/limitations table in [ARCHITECTURE.md](ARCHITECTURE.md#encoder-strengths-and-the-remaining-gaps)
+explains which encoder techniques are retained and which gaps need training.
 
 Tests cover padding invariance, reused-cache gradients, masked targets,
 generation behavior, tokenizer round trips, checkpoint reload, and synthetic
