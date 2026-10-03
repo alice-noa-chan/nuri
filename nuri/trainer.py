@@ -199,7 +199,10 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
 
                 monitor.phase("backward")
                 (loss / settings.grad_accum).backward()
-                micro_batches.append((name, depth, result, aux, loss.detach()))
+                # Accumulated summaries log the depth the core actually ran (0 for MLM,
+                # which never runs the core); grad_accum = 1 keeps the sampled depth.
+                active = depth if settings.grad_accum == 1 or tasks[name].kind != "mlm" else 0
+                micro_batches.append((name, active, result, aux, loss.detach()))
                 totals["tokens"] += result["tokens"]
                 totals["targets"] += result["targets"]
             name, depth, result, aux, loss = _merge_micro_batches(micro_batches, tasks)
