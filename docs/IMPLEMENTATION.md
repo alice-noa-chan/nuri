@@ -417,7 +417,7 @@ python scripts/evaluate.py --checkpoint runs/nuri-base-it/final `
   --output runs/eval/nuri-base-it.json
 
 python scripts/evaluate.py --checkpoint runs/nuri-base/final `
-  --suites mlm diagnostics --corpus $env:NURI_EVAL_CORPUS `
+  --suites mlm denoise diagnostics --corpus $env:NURI_EVAL_CORPUS `
   --output runs/eval/nuri-base.json
 
 python scripts/evaluate.py --checkpoint runs/nuri-base-embed/final `
@@ -433,6 +433,11 @@ does not dominate the reasoning comparison. A distant seed creates new samples,
 but it does not guarantee that every sampled problem is absent from training.
 Tokenizer files default to the checkpoint folder and must match its vocabulary
 and special IDs.
+
+The `denoise` suite measures held-out span reconstruction through the recurrent
+core and readout: per-sample cross-entropy and masked-token accuracy at several
+mask ratios and reasoning depths. MLM accuracy measures the input encoder and
+vocabulary head, so report both when evaluating a base checkpoint.
 
 The generation report includes exact token match, missing EOS, and canvas
 length errors. It compares predicted and oracle lengths for IT; base models
