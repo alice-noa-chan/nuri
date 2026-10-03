@@ -87,3 +87,18 @@ def test_dry_run_prints_commands_only(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.count("train.py --stage") == 3
     assert not (tmp_path / "runs" / "base").exists()
+
+
+def test_plan_switches_reach_the_train_command(tmp_path, capsys):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["train"] = {"tensorboard": True, "gradient_checkpointing": True}
+    plan["stages"]["base"].update(grad_accum=2, compile=True)
+    plan["stages"]["it"]["gradient_checkpointing"] = False  # a stage can turn a plan-wide switch off
+    plan_path.write_text(json.dumps(plan))
+    load_script().main([str(plan_path), "--dry-run"])
+    lines = [line for line in capsys.readouterr().out.splitlines() if "train.py" in line]
+    base, it, embed = lines
+    assert "--grad-accum 2" in base and "--compile" in base and "--gradient-checkpointing" in base
+    assert "--tensorboard" in it and "--gradient-checkpointing" not in it
+    assert "--gradient-checkpointing" in embed

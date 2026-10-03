@@ -10,6 +10,9 @@ configs/release_plan.example.json). For each stage, in order, the runner:
 1. skips training if <out>/<stage>/final exists,
    resumes from the newest training_state/*.pt if the stage was interrupted,
    otherwise starts it;
+   Plan-wide switches in "train" (for example {"tensorboard": true,
+   "gradient_checkpointing": true}) apply to every stage unless the stage
+   sets its own value.
 2. evaluates the final checkpoint (scripts/evaluate.py) when the plan asks;
 3. exports a release folder (scripts/export_release.py) with the measured
    GPU-hours of that stage.
@@ -32,7 +35,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 
 # Plan keys passed straight through to scripts/train.py as --flags.
-TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples")
+TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
+               "grad_accum", "log_every", "tensorboard_dir")
+# Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
+TRAIN_SWITCHES = ("gradient_checkpointing", "compile", "tensorboard", "no_progress")
 DATA_FLAGS = {"base": ("corpus", "tokenizer"), "it": ("corpus", "tokenizer", "instructions"),
               "embed": ("tokenizer", "pairs")}
 
@@ -59,6 +65,9 @@ def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
     for key in TRAIN_FLAGS:
         if key in spec:
             command += [flag(key), str(spec[key])]
+    for key in TRAIN_SWITCHES:
+        if spec.get(key, plan.get("train", {}).get(key)):
+            command.append(flag(key))
     state = newest_state(stage_dir)
     if state is not None:
         command += ["--resume", str(state)]
