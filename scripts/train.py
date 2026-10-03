@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nuri.checkpoint import load_pretrained, training_state_config  # noqa: E402
 from nuri.config import PRESETS  # noqa: E402
-from nuri.data import TokenCorpus, chat_prompt_text  # noqa: E402
+from nuri.data import chat_prompt_text, open_corpus  # noqa: E402
 from nuri.model import NuriModel  # noqa: E402
 from nuri.pipeline import base_stage, embedding_stage, instruction_stage, read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
@@ -76,7 +76,8 @@ def parse_args(argv=None):
                    help="recompute block activations in backward: less memory, about one extra forward")
     p.add_argument("--compile", action="store_true", help="torch.compile the model blocks (GPU runs)")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--corpus", default=os.environ.get("NURI_TEXT_CORPUS"))
+    p.add_argument("--corpus", nargs="+", default=env_list("NURI_TEXT_CORPUS"),
+                   help='corpus folder(s); mix several as "folder=weight" (e.g. ko=35 en=45)')
     p.add_argument("--tokenizer", default=os.environ.get("NURI_TOKENIZER"),
                    help="tokenizer.json or its folder (it/embed default to the copy inside --init)")
     p.add_argument("--instructions", default=os.environ.get("NURI_IT_DATA"))
@@ -84,6 +85,12 @@ def parse_args(argv=None):
     p.add_argument("--reasoning-examples", type=int, default=20000,
                    help="synthetic reasoning examples for the it stage (0 = none)")
     return p.parse_args(argv)
+
+
+def env_list(name: str) -> list[str] | None:
+    """An environment variable holding one or more entries separated by os.pathsep."""
+    value = os.environ.get(name)
+    return [part for part in value.split(os.pathsep) if part] if value else None
 
 
 def require(value, flag):
@@ -126,7 +133,7 @@ def main(argv=None):
         check_tokenizer(tokenizer, config)
     if args.corpus:
         print(f"[{args.stage}] Opening the token corpus...", flush=True)
-    corpus = TokenCorpus(args.corpus) if args.corpus else None
+    corpus = open_corpus(args.corpus) if args.corpus else None
 
     print(f"[{args.stage}] Preparing training tasks...", flush=True)
     if args.stage == "base":

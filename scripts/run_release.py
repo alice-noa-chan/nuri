@@ -60,7 +60,9 @@ def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
         command += ["--init", str(init)]
     for key in DATA_FLAGS[spec["stage"]]:
         value = spec.get(key, plan.get("data", {}).get(key))
-        if value is not None:
+        if isinstance(value, list):  # e.g. several weighted corpora: ["ko=35", "en=45"]
+            command += [flag(key), *map(str, value)]
+        elif value is not None:
             command += [flag(key), str(value)]
     for key in TRAIN_FLAGS:
         if key in spec:

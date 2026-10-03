@@ -5,6 +5,9 @@ Corpus format (a folder):
 - offsets.npy  int64 array of length num_docs + 1; document i is
                tokens[offsets[i]:offsets[i + 1]]
 
+Several corpus folders can be mixed with weights (MixedCorpus), for example
+one folder per language with the planned language ratios.
+
 Dataset locations are always passed in from outside (CLI flags or
 environment variables); this module never names a dataset.
 """
@@ -24,7 +27,30 @@ from .corruption import corrupt_canvas, mask_for_mlm, pad_batch, split_span
 ROLE_TOKENS = {"system": "<|system|>", "user": "<|user|>", "assistant": "<|assistant|>"}
 
 
-class TokenCorpus:
+class _DocumentSampler:
+    """Shared sampling logic; subclasses provide random_document(rng)."""
+
+    def random_document(self, rng: random.Random) -> list[int]:
+        raise NotImplementedError
+
+    def sample(self, count: int, rng: random.Random, usable=None, max_draws_per_doc: int = 100) -> list[list[int]]:
+        """Draw `count` random documents (with replacement).
+
+        usable: optional test `document -> bool`. Documents that fail it are
+        skipped and redrawn. If too few usable documents turn up, a clear
+        error is raised instead of looping forever.
+        """
+        picked = []
+        for _ in range(count * max_draws_per_doc):
+            doc = self.random_document(rng)
+            if usable is None or usable(doc):
+                picked.append(doc)
+                if len(picked) == count:
+                    return picked
+        raise ValueError("the corpus has too few usable documents for this batch")
+
+
+class TokenCorpus(_DocumentSampler):
     """Read-only view of a tokenized corpus folder (memory-mapped, so it can be huge)."""
 
     def __init__(self, folder: str | Path):
@@ -39,21 +65,45 @@ class TokenCorpus:
         start, end = self.offsets[index], self.offsets[index + 1]
         return self.tokens[start:end].astype(np.int64).tolist()
 
-    def sample(self, count: int, rng: random.Random, usable=None, max_draws_per_doc: int = 100) -> list[list[int]]:
-        """Draw `count` random documents (with replacement).
+    def random_document(self, rng: random.Random) -> list[int]:
+        return self.document(rng.randrange(len(self)))
 
-        usable: optional test `document -> bool`. Documents that fail it are
-        skipped and redrawn. If too few usable documents turn up, a clear
-        error is raised instead of looping forever.
-        """
-        picked = []
-        for _ in range(count * max_draws_per_doc):
-            doc = self.document(rng.randrange(len(self)))
-            if usable is None or usable(doc):
-                picked.append(doc)
-                if len(picked) == count:
-                    return picked
-        raise ValueError("the corpus has too few usable documents for this batch")
+
+class MixedCorpus(_DocumentSampler):
+    """Several corpora sampled by weight: each document first picks a source.
+
+    Weights are relative (45/35/10 works as well as 0.45/0.35/0.10). They set
+    the share of sampled documents, not of tokens, so sources with longer
+    documents contribute more tokens per document.
+    """
+
+    def __init__(self, sources: list[tuple[TokenCorpus, float]]):
+        if not sources or any(weight <= 0 for _, weight in sources):
+            raise ValueError("MixedCorpus needs at least one source and positive weights")
+        self.corpora = [corpus for corpus, _ in sources]
+        self.weights = [weight for _, weight in sources]
+
+    def __len__(self) -> int:
+        return sum(len(corpus) for corpus in self.corpora)
+
+    def random_document(self, rng: random.Random) -> list[int]:
+        return rng.choices(self.corpora, self.weights)[0].random_document(rng)
+
+
+def open_corpus(specs: str | list[str]) -> TokenCorpus | MixedCorpus:
+    """Open one corpus folder, or mix several given as "folder" or "folder=weight".
+
+    A single folder without a weight returns a plain TokenCorpus, so existing
+    runs keep exactly the same sampling. Missing weights count as 1.
+    """
+    specs = [specs] if isinstance(specs, str) else list(specs)
+    if len(specs) == 1 and "=" not in specs[0]:
+        return TokenCorpus(specs[0])
+    sources = []
+    for spec in specs:
+        folder, _, weight = spec.rpartition("=") if "=" in spec else (spec, "", "1")
+        sources.append((TokenCorpus(folder), float(weight)))
+    return MixedCorpus(sources)
 
 
 def write_corpus(folder: str | Path, documents: Iterable[Sequence[int]]) -> int:

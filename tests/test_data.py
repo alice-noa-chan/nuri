@@ -77,3 +77,18 @@ def test_pair_batch_marks_duplicate_documents_and_queries():
         [True, False, False, False],
         [False, False, False, False],
     ]
+
+
+def test_mixed_corpus_follows_weights(tmp_path):
+    from nuri.data import MixedCorpus, open_corpus
+
+    write_corpus(tmp_path / "a", [[5, 5, 5]] * 10)
+    write_corpus(tmp_path / "b", [[6, 6, 6]] * 10)
+    assert isinstance(open_corpus(str(tmp_path / "a")), TokenCorpus)  # one folder: unchanged behavior
+    mixed = open_corpus([f"{tmp_path / 'a'}=3", f"{tmp_path / 'b'}=1"])
+    assert isinstance(mixed, MixedCorpus) and len(mixed) == 20
+    docs = mixed.sample(4000, random.Random(0))
+    share = sum(d[0] == 5 for d in docs) / len(docs)
+    assert 0.72 < share < 0.78
+    with pytest.raises(ValueError):
+        MixedCorpus([(TokenCorpus(tmp_path / "a"), 0.0)])
