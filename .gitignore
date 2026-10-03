@@ -6,3 +6,12 @@
 
 # Per-agent watcher snapshots
 /.watch/
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Training outputs
+/runs/
+/checkpoints/
