@@ -70,6 +70,11 @@ def parse_args(argv=None):
     p.add_argument("--tensorboard", action="store_true", help="write TensorBoard events to <out>/tensorboard")
     p.add_argument("--tensorboard-dir", help="custom event directory; also enables TensorBoard")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="micro-batches per optimizer step; effective batch = batch size x grad accum")
+    p.add_argument("--gradient-checkpointing", action="store_true",
+                   help="recompute block activations in backward: less memory, about one extra forward")
+    p.add_argument("--compile", action="store_true", help="torch.compile the model blocks (GPU runs)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", default=os.environ.get("NURI_TEXT_CORPUS"))
     p.add_argument("--tokenizer", default=os.environ.get("NURI_TOKENIZER"),
@@ -159,7 +164,9 @@ def main(argv=None):
     settings = TrainSettings(out_dir=args.out, total_steps=args.steps, peak_lr=peak_lr, warmup_steps=warmup,
                              save_every=args.save_every, log_every=args.log_every, seed=args.seed, mix=mix,
                              stage=args.stage, progress=not args.no_progress, tensorboard_dir=tensorboard_dir,
-                             tokenizer_dir=str(tokenizer_path) if tokenizer_path else None)
+                             tokenizer_dir=str(tokenizer_path) if tokenizer_path else None,
+                             grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
+                             compile=args.compile)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)

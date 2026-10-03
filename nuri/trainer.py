@@ -98,6 +98,9 @@ class TrainSettings:
     stage: str = "training"           # label only; the task mix defines the computation
     progress: bool = True
     tensorboard_dir: str | None = None  # None = no event files or TensorBoard import
+    grad_accum: int = 1               # micro-batches per optimizer step (each draws its own task and depth)
+    gradient_checkpointing: bool = False  # recompute block activations in backward (same results, less memory)
+    compile: bool = False             # torch.compile the blocks in place (same weights and names)
 
 
 @dataclass
@@ -142,8 +145,13 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     """
     if settings.log_every <= 0:
         raise ValueError("log_every must be positive")
+    if settings.grad_accum < 1:
+        raise ValueError("grad_accum must be >= 1")
     device = device or default_device()
     model.to(device).train()
+    model.set_gradient_checkpointing(settings.gradient_checkpointing)
+    if settings.compile:
+        _compile_blocks(model)
     out = Path(settings.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "train_settings.json").write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
@@ -169,27 +177,36 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
         for step in range(start_step, settings.total_steps):
             for group in optimizer.param_groups:
                 group["lr"] = schedule.lr(step)
-            name = rng.choices(names, weights)[0]
-            depth = rng.choice(model.config.train_depths)
             schedule_phase = "warmup" if step < schedule.warmup_steps else (
                 "stable" if step < schedule.decay_start else "decay")
-            monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
-            batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
-
-            monitor.phase("forward")
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
-                result = _task_loss(model, tasks[name].kind, batch, depth, settings)
-                aux = model.pop_moe_aux()
-                loss = result["loss"] + (aux["loss"] if aux["loss"] is not None else 0.0)
-
             optimizer.zero_grad(set_to_none=True)
-            monitor.phase("backward")
-            loss.backward()
+            step_losses = []
+            # With grad_accum > 1 the gradients of several micro-batches add up
+            # before one optimizer step; each loss is divided so the step uses
+            # their mean. grad_accum = 1 is exactly the plain loop.
+            for micro in range(settings.grad_accum):
+                name = rng.choices(names, weights)[0]
+                depth = rng.choice(model.config.train_depths)
+                if micro == 0:
+                    monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
+                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
+
+                monitor.phase("forward")
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
+                    result = _task_loss(model, tasks[name].kind, batch, depth, settings)
+                    aux = model.pop_moe_aux()
+                    loss = result["loss"] + (aux["loss"] if aux["loss"] is not None else 0.0)
+
+                monitor.phase("backward")
+                (loss / settings.grad_accum).backward()
+                step_losses.append(loss.detach())
+                totals["tokens"] += result["tokens"]
+                totals["targets"] += result["targets"]
+            loss = torch.stack(step_losses).mean()  # logged value: mean over the micro-batches
+
             monitor.phase("optimizer")
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
             optimizer.step()
-            totals["tokens"] += result["tokens"]
-            totals["targets"] += result["targets"]
             monitor.advance()
 
             if step % settings.log_every == 0 or step == settings.total_steps - 1:
@@ -201,6 +218,15 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
                         on_save=lambda name: monitor.phase(f"saving {name}", force=True))
     return records
+
+
+def _compile_blocks(model: NuriModel) -> None:
+    """torch.compile each block in place, so parameter names and checkpoints do not change.
+
+    dynamic=True avoids a recompile for every new batch length.
+    """
+    for block in [*model.encoder.blocks, model.core, *model.readout.blocks]:
+        block.compile(dynamic=True)
 
 
 def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
@@ -219,7 +245,7 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
 # Settings that may change between the interrupted and the resumed run; they
 # do not change what is computed. Everything else must match exactly.
 RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
-                        "stage", "progress", "tensorboard_dir")
+                        "stage", "progress", "tensorboard_dir", "gradient_checkpointing", "compile")
 
 
 def _comparable_settings(settings: TrainSettings) -> dict:
