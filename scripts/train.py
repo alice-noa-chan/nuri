@@ -77,6 +77,8 @@ def parse_args(argv=None):
     p.add_argument("--compile", action="store_true", help="torch.compile the model blocks (GPU runs)")
     p.add_argument("--native-gqa", action="store_true",
                    help="let supported SDPA backends use compact GQA heads; benchmark before enabling")
+    p.add_argument("--cross-mode-weight", type=float, default=0.0,
+                   help="embed stage: also align reasoning-mode queries with fast-mode documents (0 = off)")
     p.add_argument("--pack-mlm", action="store_true",
                    help="base stage: fill each MLM row with several documents (attention stays inside each one)")
     p.add_argument("--seed", type=int, default=0)
@@ -177,7 +179,7 @@ def main(argv=None):
                              stage=args.stage, progress=not args.no_progress, tensorboard_dir=tensorboard_dir,
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None,
                              grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
-                             compile=args.compile, native_gqa=args.native_gqa)
+                             compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)

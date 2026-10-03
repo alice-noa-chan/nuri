@@ -129,3 +129,12 @@ def test_halting_curve_reports_mean_core_steps():
     rows = halting_curve(model, EXAMPLES, tolerances=(None, float("inf")), steps=5, oracle_length=True)
     assert [r["halt_tol"] for r in rows] == [None, float("inf")]
     assert rows[0]["mean_core_steps"] == 5.0 and rows[1]["mean_core_steps"] == 1.0
+
+
+def test_cross_mode_retrieval_uses_both_modes():
+    model = make_model()
+    pairs = [(list(range(3 + i, 10 + i)), list(range(3 + i, 10 + i))) for i in range(5)]
+    same = retrieval_metrics(model, pairs, mode="reasoning")
+    cross = retrieval_metrics(model, pairs, mode="reasoning", doc_mode="fast")
+    assert same["doc_mode"] == "reasoning" and cross["doc_mode"] == "fast"
+    assert 0.0 <= cross["mrr"] <= 1.0

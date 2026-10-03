@@ -92,3 +92,18 @@ def test_false_negatives_are_left_out_of_the_softmax():
     plain = contrastive_loss(q, d, temperature=0.1)
     masked = contrastive_loss(q, d, temperature=0.1, false_negatives=duplicates)
     assert masked < plain  # the duplicate no longer pushes its twin away
+
+
+def test_pair_loss_adds_cross_mode_alignment_only_when_asked():
+    from nuri.config import tiny_config
+    from nuri.data import build_pair_batch
+    from nuri.model import NuriModel
+    from nuri.trainer import pair_loss
+
+    torch.manual_seed(0)
+    model = NuriModel(tiny_config())
+    batch = build_pair_batch([([5, 6], [7, 8]), ([9, 10], [11]), ([12], [13, 14])], model.config)
+    plain = pair_loss(model, batch, depth=2, dims=(16, 32), temperature=0.05)
+    aligned = pair_loss(model, batch, depth=2, dims=(16, 32), temperature=0.05, cross_mode_weight=0.5)
+    assert "cross_mode" not in plain and "cross_mode" in aligned
+    assert torch.allclose(aligned["loss"], plain["loss"] + 0.5 * aligned["cross_mode"], atol=1e-5)

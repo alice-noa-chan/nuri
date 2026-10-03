@@ -219,26 +219,34 @@ def span_denoising(model: NuriModel, documents: Sequence[list[int]], ratios=(0.1
 
 @torch.no_grad()
 def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "fast", steps: int | None = None,
-                      dim: int | None = None, ks=(1, 5, 10), batch_size: int = 64) -> dict:
-    """Each query should retrieve its own document among all documents in `pairs`."""
+                      dim: int | None = None, ks=(1, 5, 10), batch_size: int = 64,
+                      doc_mode: str | None = None) -> dict:
+    """Each query should retrieve its own document among all documents in `pairs`.
+
+    doc_mode (default: same as mode) embeds the documents with another mode,
+    e.g. reasoning queries against fast documents. Read such cross-mode
+    numbers only for models trained with cross-mode alignment (§6).
+    """
     model.eval()
     device = next(model.parameters()).device
+    doc_mode = doc_mode or mode
 
-    def embed(side: int) -> torch.Tensor:
+    def embed(side: int, side_mode: str) -> torch.Tensor:
         out = []
         for chunk in _batches([p[side][:model.config.max_input_len] for p in pairs], batch_size):
             ids, valid = pad_batch(chunk, model.config.pad_id)
-            out.append(model.embed(ids.to(device), valid.to(device), mode=mode, steps=steps, dim=dim))
+            out.append(model.embed(ids.to(device), valid.to(device), mode=side_mode, steps=steps, dim=dim))
         return torch.cat(out)
 
-    scores = embed(0) @ embed(1).T
+    scores = embed(0, mode) @ embed(1, doc_mode).T
     # Rank the documents of each query by score, breaking ties by document
     # order (stable sort). Tied scores therefore never all get rank 1.
     order = scores.float().sort(dim=1, descending=True, stable=True).indices
     gold = torch.arange(len(pairs), device=scores.device).unsqueeze(1)
     ranks = (order == gold).float().argmax(dim=1) + 1  # 1 = the right document came first
     result = {f"recall@{k}": float((ranks <= k).float().mean()) for k in ks}
-    result.update(mrr=float((1.0 / ranks.float()).mean()), pairs=len(pairs), mode=mode, dim=dim, steps=steps)
+    result.update(mrr=float((1.0 / ranks.float()).mean()), pairs=len(pairs), mode=mode, doc_mode=doc_mode, dim=dim,
+                  steps=steps)
     return result
 
 

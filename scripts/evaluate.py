@@ -121,6 +121,8 @@ def main(argv=None) -> dict:
         report["retrieval"] = [evaluation.retrieval_metrics(model, pairs, mode=mode, dim=dim)
                                for mode in ("fast", "reasoning") for dim in (64, 128, None)
                                if dim is None or dim <= model.config.embed_dim]
+        # Reasoning queries against fast documents; meaningful only after cross-mode alignment (§6).
+        report["retrieval"].append(evaluation.retrieval_metrics(model, pairs, mode="reasoning", doc_mode="fast"))
 
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:

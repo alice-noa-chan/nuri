@@ -57,23 +57,34 @@ def canvas_loss(model: NuriModel, batch: dict, depth: int, length_weight: float 
     return dict(result, loss=loss, tokens=tokens, targets=int(mask.sum()))
 
 
-def pair_loss(model: NuriModel, batch: dict, depth: int, dims: tuple[int, ...], temperature: float) -> dict:
+def pair_loss(model: NuriModel, batch: dict, depth: int, dims: tuple[int, ...], temperature: float,
+              cross_mode_weight: float = 0.0) -> dict:
     """Contrastive embedding loss, trained for both the fast and the reasoning mode.
 
-    Query and document always use the same mode, as the spec's default
-    retrieval does (§6). Each side is encoded once and its X is reused for
-    both modes, so the encoder runs twice per step, not four times.
+    Query and document use the same mode, as the spec's default retrieval
+    does (§6). Each side is encoded once and its X is reused for both modes,
+    so the encoder runs twice per step, not four times.
+
+    cross_mode_weight > 0 adds the cross-mode alignment of §6: reasoning-mode
+    queries against fast-mode documents, so documents can be indexed cheaply
+    with the fast mode while queries think. Off by default.
     """
     xq, vq = model.encode(batch["query_ids"], batch["query_valid"])
     xd, vd = model.encode(batch["doc_ids"], batch["doc_valid"])
-    losses = {}
+    embeddings, losses = {}, {}
     for mode in ("fast", "reasoning"):
-        q = model.embed_memory(xq, vq, mode=mode, steps=depth)
-        d = model.embed_memory(xd, vd, mode=mode, steps=depth)
-        losses[mode] = contrastive_loss(q, d, temperature, dims, batch.get("false_negatives"))
+        embeddings[mode] = (model.embed_memory(xq, vq, mode=mode, steps=depth),
+                            model.embed_memory(xd, vd, mode=mode, steps=depth))
+        losses[mode] = contrastive_loss(*embeddings[mode], temperature, dims, batch.get("false_negatives"))
+    loss = (losses["fast"] + losses["reasoning"]) / 2
+    result = {"fast": losses["fast"].detach(), "reasoning": losses["reasoning"].detach()}
+    if cross_mode_weight:
+        cross = contrastive_loss(embeddings["reasoning"][0], embeddings["fast"][1], temperature, dims,
+                                 batch.get("false_negatives"))
+        loss = loss + cross_mode_weight * cross
+        result["cross_mode"] = cross.detach()
     tokens = int(batch["query_valid"].sum() + batch["doc_valid"].sum())
-    return {"loss": (losses["fast"] + losses["reasoning"]) / 2, "fast": losses["fast"].detach(),
-            "reasoning": losses["reasoning"].detach(), "tokens": tokens, "targets": batch["query_ids"].shape[0]}
+    return dict(result, loss=loss, tokens=tokens, targets=batch["query_ids"].shape[0])
 
 
 # ----- training loop -----------------------------------------------------------------
@@ -95,6 +106,7 @@ class TrainSettings:
     length_weight: float = 0.1     # used by "instruction" batches
     embed_dims: tuple[int, ...] = (64, 128, 256)
     temperature: float = 0.05
+    cross_mode_weight: float = 0.0    # embed stage: align reasoning queries with fast documents (§6)
     mix: dict[str, float] = field(default_factory=dict)
     tokenizer_dir: str | None = None  # copied into every saved checkpoint
     stage: str = "training"           # label only; the task mix defines the computation
@@ -249,7 +261,7 @@ def _merge_micro_batches(micro_batches: list, tasks: dict[str, Task]) -> tuple:
 
     merged = {"loss": loss, "tokens": sum(r["tokens"] for r in results),
               "targets": sum(r["targets"] for r in results)}
-    for key in ("denoise", "length", "fast", "reasoning"):
+    for key in ("denoise", "length", "fast", "reasoning", "cross_mode"):
         values = [r[key] for r in results if key in r]
         if values:
             merged[key] = torch.stack([torch.as_tensor(v, dtype=torch.float32) for v in values]).mean()
@@ -345,7 +357,7 @@ def _task_loss(model, kind, batch, depth, settings) -> dict:
     if kind == "instruction":
         return canvas_loss(model, batch, depth, settings.length_weight)
     if kind == "pairs":
-        return pair_loss(model, batch, depth, settings.embed_dims, settings.temperature)
+        return pair_loss(model, batch, depth, settings.embed_dims, settings.temperature, settings.cross_mode_weight)
     raise ValueError(f"unknown task kind {kind!r}")
 
 
@@ -353,7 +365,7 @@ def _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, total
     record = {"step": step, "task": name, "depth": depth, "loss": float(loss.detach()), "lr": schedule.lr(step),
               "grad_norm": float(grad_norm), "tokens": totals["tokens"], "targets": totals["targets"],
               "seconds": round(time.time() - started, 1)}
-    for key in ("denoise", "length", "fast", "reasoning"):
+    for key in ("denoise", "length", "fast", "reasoning", "cross_mode"):
         if key in result:
             record[key] = float(result[key])
     if aux["loss"] is not None:
