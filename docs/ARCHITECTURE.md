@@ -95,7 +95,7 @@ h → RMSNorm → Q/K/V → RoPE(Q,K) → Bidirectional MHA → residual
 
 Linear projections have no bias. After a final RMSNorm we get `X = E_phi(tokens) [B,N,D]`. In v0 every input attention layer is global, to keep comparison and implementation simple.
 
-For long-input experiments a bidirectional local/global mix is added. For example, `G-L-L-G-L-G` over 6 layers is a candidate schedule for Nuri. The last global layer tests whether it helps to merge information before pooling and memory reading. The local window is defined as `abs(i-j) <= 64`, i.e. at most 129 keys for an interior position, instead of the ambiguous `window=128`. No speedup is assumed at length 512. [ModernBERT](https://arxiv.org/abs/2412.13663) is prior work that combines RoPE, GLU, local/global attention and unpadding; its global cadence is separate from Nuri's candidate schedule.
+For long-input experiments a bidirectional local/global mix is added. For example, `G-L-L-G-L-G` over 6 layers is a candidate schedule for Nuri. The last global layer tests whether it helps to merge information before pooling and memory reading. The local window is defined as `abs(i-j) <= 64`, i.e. at most 129 keys for an interior position, instead of the ambiguous `window=128`. No speedup is assumed at length 512. It is implemented as `attention_schedule` (one `G`/`L` per input layer, empty = all global) and `local_radius`; it uses a dense mask, so it changes what tokens see but is not faster, and every position may always attend to itself so long padding never produces an empty attention row. [ModernBERT](https://arxiv.org/abs/2412.13663) is prior work that combines RoPE, GLU, local/global attention and unpadding; its global cadence is separate from Nuri's candidate schedule.
 
 Read-only `X` means its values do not change during reasoning and output refinement. **It does not mean `detach()` or a frozen encoder.** Training is end-to-end by default, and gradients from every recurrent step reach the encoder.
 
@@ -251,7 +251,7 @@ Turning on every feature at once makes it impossible to tell causes and effects 
 | sparse MoE | reference OFF / release MoE ON | reference: input layers 3 and 6, 4 experts, top-2 candidate. release: the compute-matched setup below (D-011) |
 | recurrent core MoE | OFF | after the dense core's effect is confirmed; route per BK at each step, log load per step |
 | QK normalization | reference OFF / **release ON** (D-013) | per head after the projection, before RoPE; RMS form and scale defined. Public models turn it on without an A/B test |
-| local/global attention | OFF | mixes input layers only, for long inputs; latent K=16 keeps full attention |
+| local/global attention | OFF (implemented) | mixes input layers only, for long inputs; latent K=16 keeps full attention; `attention_schedule`, `local_radius` |
 | GQA | OFF | compare fixed memory K/V storage and projection cost against quality |
 | MLA | OFF | verify the gain/loss of the latent projection bottleneck separately |
 | adaptive halting | OFF | needs min/max T, benefit/correctness supervision, a compute penalty and calibration |
@@ -363,11 +363,21 @@ On the first day, the T curve, R interventions, S curve, predicted/oracle length
 
 Retrieval uses Recall@k and MRR, classification accuracy/F1, synthetic reasoning exact match and length/difficulty generalization, and generation exact match on short tasks plus format compliance and EOS errors. Natural-language answers include human-read samples. Every result carries the data split, training examples/tokens, input/output length, T/S, parameter count, measured latency and peak memory.
 
+### Evaluation hygiene
+
+CPU sanity runs and reviews found three ways the metrics above can look good or bad for the wrong reason. `nuri/evaluation.py` handles them, and reports must state them:
+
+- **Oracle length leaks the answer.** With the gold canvas length, a model can pick the most common answer of that length without reading the input (for example "yes" and "no" with different token counts: a tiny model scored 100% at every T, including T=0, while its predicted-length accuracy equaled the majority baseline). Oracle results therefore carry `length_only_accuracy`, and oracle exact match means something only well above it.
+- **Never-seen output tokens.** A token that never appears as a training target gets only negative gradient through the tied vocabulary head, so a model trained on the synthetic tasks alone scores 0% on the disjoint-name eval split even when it can copy. Run the synthetic evaluation on checkpoints that went through the base stage, where every token is an MLM target.
+- **Ties and degenerate batches.** Retrieval ranks break score ties by document order, so constant embeddings get recall@1 = 1/n, not 1. R interventions never use a batch of one (shuffling would be a no-op), and answers that do not fit M are excluded and counted, never cut.
+
+Every reasoning number is reported next to its chance, majority and (for oracle length) length-only baselines.
+
 State norm, step update norm, slot cosine/effective rank, attention entropy and expert load are diagnostics. `R_(t+1)≈R_t` alone is not called collapse, and a changing state alone does not prove reasoning. Rising answer confidence alone does not mean better accuracy.
 
 ## 13. Implementation boundaries
 
-The implementation units are `InputEncoder`, `RecurrentReasoningCore`, `BidirectionalReadout`, the embedding/task/length heads, the corruption samplers, the refinement sampler and `build_ffn` (dense/MoE). The model forward and the external sampling loop are separate, and cache lifetime is limited to one forward or one generation request.
+The implementation units are `InputEncoder`, `RecurrentReasoningCore`, `BidirectionalReadout`, the embedding/task/length heads (plus the R-only structure head), the corruption samplers, the refinement sampler, `build_ffn` (dense/MoE, with sorted expert dispatch) and the evaluation functions in `nuri/evaluation.py` (run with `scripts/evaluate.py`). The model forward and the external sampling loop are separate, and cache lifetime is limited to one forward or one generation request.
 
 Before training we check that gradients reach the source encoder, that masked targets never stay in the input, that packing never crosses boundaries, and that padding never enters pooling or attention. Eval results with and without the cache must match. The tests in `tests/` cover these checks.
 
