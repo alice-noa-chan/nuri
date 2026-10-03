@@ -1,6 +1,8 @@
 """Exercise text inference with a real local tokenizer and saved tied weights."""
 
 import json
+import io
+import sys
 
 import pytest
 import torch
@@ -86,3 +88,24 @@ def test_cli_loads_checkpoint_and_writes_json(checkpoint, capsys):
     assert result["dimension"] == 16
     assert len(result["embeddings"][0]) == 16
     assert '"task": "embed"' in capsys.readouterr().out
+
+
+def test_cli_keeps_unicode_answers_valid_on_an_ascii_terminal(checkpoint, monkeypatch):
+    from tools import infer_nuri
+
+    folder, _, _ = checkpoint
+
+    class AsciiTerminal(io.StringIO):
+        @property
+        def encoding(self):
+            return "ascii"
+
+        def write(self, value):
+            value.encode(self.encoding)
+            return super().write(value)
+
+    terminal = AsciiTerminal()
+    monkeypatch.setattr(sys, "stdout", terminal)
+    monkeypatch.setattr(infer_nuri, "infer", lambda *args, **kwargs: {"answers": ["한국어🙂"]})
+    assert main(["--checkpoint", str(folder), "--text", "Hello", "--canvas-len", "4"]) == 0
+    assert json.loads(terminal.getvalue())["answers"] == ["한국어🙂"]

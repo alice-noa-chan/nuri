@@ -143,7 +143,15 @@ def main(argv: list[str] | None = None) -> int:
         path = Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(output, encoding="utf-8")
-    print(output, end="")
+    console_output = output
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding:
+        try:
+            console_output.encode(encoding)
+        except UnicodeEncodeError:
+            # Keep stdout valid JSON on terminals that cannot print every Unicode character.
+            console_output = json.dumps(result, ensure_ascii=True, indent=2) + "\n"
+    print(console_output, end="")
     return 0
 
 
