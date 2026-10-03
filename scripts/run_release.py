@@ -38,7 +38,7 @@ PYTHON = sys.executable
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
                "grad_accum", "log_every", "tensorboard_dir")
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
-TRAIN_SWITCHES = ("gradient_checkpointing", "compile", "tensorboard", "no_progress")
+TRAIN_SWITCHES = ("gradient_checkpointing", "compile", "tensorboard", "no_progress", "pack_mlm")
 DATA_FLAGS = {"base": ("corpus", "tokenizer"), "it": ("corpus", "tokenizer", "instructions"),
               "embed": ("tokenizer", "pairs")}
 

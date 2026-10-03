@@ -75,6 +75,8 @@ def parse_args(argv=None):
     p.add_argument("--gradient-checkpointing", action="store_true",
                    help="recompute block activations in backward: less memory, about one extra forward")
     p.add_argument("--compile", action="store_true", help="torch.compile the model blocks (GPU runs)")
+    p.add_argument("--pack-mlm", action="store_true",
+                   help="base stage: fill each MLM row with several documents (attention stays inside each one)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", nargs="+", default=env_list("NURI_TEXT_CORPUS"),
                    help='corpus folder(s); mix several as "folder=weight" (e.g. ko=35 en=45)')
@@ -137,7 +139,7 @@ def main(argv=None):
 
     print(f"[{args.stage}] Preparing training tasks...", flush=True)
     if args.stage == "base":
-        tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed)
+        tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed, args.pack_mlm)
     elif args.stage == "it":
         require(tokenizer, "--tokenizer")
 

@@ -61,11 +61,13 @@ class NuriModel(nn.Module):
     def input_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
         return input_ids != self.config.pad_id
 
-    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None):
+    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None,
+               segments: torch.Tensor | None = None):
+        """X and the valid mask. segments marks documents of packed MLM rows (see InputEncoder)."""
         valid = self.input_mask(input_ids) if attention_mask is None else attention_mask.bool()
         if not valid.any(dim=1).all():
             raise ValueError("every sample needs at least one valid input token")
-        return self.encoder(self.embedding(input_ids), valid), valid
+        return self.encoder(self.embedding(input_ids), valid, segments), valid
 
     def reason(self, x: torch.Tensor, valid: torch.Tensor, steps: int | None = None, return_states: bool = False):
         steps = self.config.default_depth if steps is None else steps

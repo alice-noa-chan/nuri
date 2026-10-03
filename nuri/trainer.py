@@ -27,7 +27,7 @@ from .schedule import WSDSchedule
 
 def mlm_loss(model: NuriModel, batch: dict) -> dict:
     """Input MLM: predicts masked input tokens straight from X (no core, no readout)."""
-    x, _ = model.encode(batch["input_ids"], batch["input_valid"])
+    x, _ = model.encode(batch["input_ids"], batch["input_valid"], batch.get("segments"))
     mask = batch["target_mask"]
     loss = token_mean_ce(model.mlm_logits(x, mask), batch["labels"][mask])
     return {"loss": loss, "tokens": int(batch["input_valid"].sum()), "targets": int(mask.sum())}

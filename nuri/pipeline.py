@@ -21,8 +21,8 @@ from typing import Iterator
 import torch
 
 from .config import NuriConfig
-from .data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_pair_batch, build_span_batch,
-                       has_mlm_target, usable_instruction)
+from .data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
+                       build_span_batch, has_mlm_target, usable_instruction)
 from .trainer import Task
 
 
@@ -33,13 +33,22 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
                 yield json.loads(line)
 
 
-def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int) -> dict[str, Task]:
-    """MLM and span batches drawn from the corpus, skipping documents they cannot use."""
+def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
+                  pack_mlm: bool = False) -> dict[str, Task]:
+    """MLM and span batches drawn from the corpus, skipping documents they cannot use.
+
+    pack_mlm fills each MLM row with several documents (no padding waste for
+    short documents); span batches always hold one document per row.
+    """
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
+    mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
 
     def mlm_batch() -> dict:
-        docs = corpus.sample(batch_size, rng, usable=lambda d: has_mlm_target(d, config))
+        if pack_mlm:
+            return build_packed_mlm_batch(lambda: corpus.sample(1, rng, usable=mlm_usable)[0], batch_size,
+                                          config, rng, generator)
+        docs = corpus.sample(batch_size, rng, usable=mlm_usable)
         return build_mlm_batch(docs, config, rng, generator)
 
     def span_batch() -> dict:
@@ -47,7 +56,8 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
         return build_span_batch(docs, config, rng, generator)
 
     options = {"batch_size": batch_size, "corpus_documents": len(corpus),
-               "corpus_weights": getattr(corpus, "weights", None)}  # set for a MixedCorpus
+               "corpus_weights": getattr(corpus, "weights", None),  # set for a MixedCorpus
+               "pack_mlm": pack_mlm}
     return {"mlm": Task("mlm", mlm_batch, rng, generator, options),
             "span": Task("span", span_batch, rng, generator, options)}
 
@@ -69,8 +79,8 @@ def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int
                 {"batch_size": batch_size, "examples": len(examples)})
 
 
-def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0):
-    return _corpus_tasks(corpus, config, batch_size, seed), {"mlm": 0.5, "span": 0.5}
+def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False):
+    return _corpus_tasks(corpus, config, batch_size, seed, pack_mlm), {"mlm": 0.5, "span": 0.5}
 
 
 def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpus: TokenCorpus | None = None,

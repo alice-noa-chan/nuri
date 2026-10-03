@@ -138,22 +138,51 @@ def chat_prompt_text(messages: list[dict]) -> str:
 def build_mlm_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
                     generator: torch.Generator | None = None, rate: float = 0.3) -> dict:
     """Random windows of at most N tokens, masked for MLM."""
-    windows = []
     special = (config.pad_id, config.mask_id, config.eos_id)
-    for doc in documents:
-        # Anchor the window on a random maskable token so it always has a target.
-        maskable = [i for i, t in enumerate(doc) if t not in special]
-        anchor = rng.choice(maskable) if maskable else 0
-        lowest = max(0, anchor - config.max_input_len + 1)
-        highest = max(lowest, min(anchor, len(doc) - config.max_input_len))
-        start = rng.randint(lowest, highest)
-        windows.append(doc[start:start + config.max_input_len])
+    windows = [_mlm_window(doc, config.max_input_len, special, rng) for doc in documents]
     ids, valid = pad_batch(windows, config.pad_id)
     corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
     # A window made only of special tokens has nothing to predict; drop it.
     keep = targets.any(dim=1)
     return {"input_ids": corrupted[keep], "input_valid": valid[keep], "labels": ids[keep],
             "target_mask": targets[keep]}
+
+
+def _mlm_window(doc: list[int], length: int, special: tuple[int, ...], rng: random.Random) -> list[int]:
+    """At most `length` tokens of doc, anchored on a random maskable token so there is a target."""
+    maskable = [i for i, t in enumerate(doc) if t not in special]
+    anchor = rng.choice(maskable) if maskable else 0
+    lowest = max(0, anchor - length + 1)
+    highest = max(lowest, min(anchor, len(doc) - length))
+    start = rng.randint(lowest, highest)
+    return doc[start:start + length]
+
+
+def build_packed_mlm_batch(draw_document, rows: int, config: NuriConfig, rng: random.Random,
+                           generator: torch.Generator | None = None, rate: float = 0.3,
+                           min_piece: int = 16) -> dict:
+    """MLM rows filled with several documents, so short documents waste no padding.
+
+    draw_document() returns one usable document. Each row takes document
+    windows until less than min_piece tokens of room are left. "segments"
+    numbers the documents of a row (1, 2, ...; 0 = padding); the encoder uses
+    it to stop attention between documents.
+    """
+    special = (config.pad_id, config.mask_id, config.eos_id)
+    sequences, segment_rows = [], []
+    for _ in range(rows):
+        tokens, segments = [], []
+        while config.max_input_len - len(tokens) >= min(min_piece, config.max_input_len):
+            piece = _mlm_window(draw_document(), config.max_input_len - len(tokens), special, rng)
+            segments += [segments[-1] + 1 if segments else 1] * len(piece)
+            tokens += piece
+        sequences.append(tokens)
+        segment_rows.append(segments)
+    ids, valid = pad_batch(sequences, config.pad_id)
+    segment_ids, _ = pad_batch(segment_rows, 0)
+    corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
+    return {"input_ids": corrupted, "input_valid": valid, "labels": ids, "target_mask": targets,
+            "segments": segment_ids}
 
 
 def has_mlm_target(document: list[int], config: NuriConfig) -> bool:

@@ -38,6 +38,17 @@ def local_mask(valid: torch.Tensor, radius: int) -> torch.Tensor:
     return (band[None] & valid[:, None, :]) | itself[None]
 
 
+def segment_mask(segments: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    """[B, N, N] mask for packed rows: a token sees only valid tokens of its own document.
+
+    segments: [B, N] document number of each token (padding may hold any value).
+    Every position may also see itself, so no attention row is ever empty.
+    """
+    same = segments[:, :, None] == segments[:, None, :]
+    itself = torch.eye(segments.shape[1], dtype=torch.bool, device=segments.device)
+    return (same & valid[:, None, :]) | itself[None]
+
+
 class EncoderBlock(nn.Module):
     def __init__(self, config: NuriConfig, layer_number: int):
         super().__init__()
@@ -48,8 +59,9 @@ class EncoderBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.hidden_size, config.norm_eps)
         self.ffn = build_ffn(config, "input", layer_number)
 
-    def forward(self, h, valid, rope, local_keys=None):
-        keys = local_keys if self.local else valid
+    def forward(self, h, valid, rope, local_keys=None, global_keys=None):
+        """global_keys: optional per-query mask (packed rows); otherwise the padding mask is used."""
+        keys = local_keys if self.local else (global_keys if global_keys is not None else valid)
         h = h + self.attn(self.attn_norm(h), key_mask=keys, rope=rope)
         return h + self.ffn(self.ffn_norm(h), valid)
 
@@ -70,15 +82,27 @@ class InputEncoder(nn.Module):
         self.blocks = nn.ModuleList(EncoderBlock(config, i + 1) for i in range(config.input_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
 
-    def forward(self, embedded: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-        """embedded: [B, N, D] token embeddings; valid: [B, N] real-token mask."""
+    def forward(self, embedded: torch.Tensor, valid: torch.Tensor,
+                segments: torch.Tensor | None = None) -> torch.Tensor:
+        """embedded: [B, N, D] token embeddings; valid: [B, N] real-token mask.
+
+        segments: optional [B, N] document numbers for packed rows (several
+        documents in one row). Tokens then attend only within their own
+        document. RoPE is relative, so a document's offset in the row does
+        not matter.
+        """
         h = embedded
         rope = self.rope(h.shape[1], h.device)
-        # Built once per forward and shared by all local layers.
-        local_keys = local_mask(valid, self.local_radius) if any(b.local for b in self.blocks) else None
+        # Masks are built once per forward and shared by all layers.
+        global_keys = segment_mask(segments, valid) if segments is not None else None
+        local_keys = None
+        if any(b.local for b in self.blocks):
+            local_keys = local_mask(valid, self.local_radius)
+            if global_keys is not None:
+                local_keys = local_keys & global_keys
         for block in self.blocks:
             if self.gradient_checkpointing and torch.is_grad_enabled():
-                h = run_checkpointed(block, h, valid, rope, local_keys)
+                h = run_checkpointed(block, h, valid, rope, local_keys, global_keys)
             else:
-                h = block(h, valid, rope, local_keys)
+                h = block(h, valid, rope, local_keys, global_keys)
         return self.final_norm(h)
