@@ -14,8 +14,8 @@ class MoEFFN(nn.Module):
     """Routed SwiGLU experts plus always-on shared experts.
 
     Routing is dropless and computed in fp32. Padding tokens are neither
-    routed nor counted in the load statistics. Every forward appends one
-    record (balance loss, router z-loss, per-expert assignment counts) to
+    routed nor counted in the load statistics. Every training-mode forward
+    appends one record (balance loss, router z-loss, per-expert assignment counts) to
     `aux_records`. A training step can run the same layer several times
     (e.g. query and document in embedding training), so records pile up
     until the model collects and clears them with `pop_moe_aux()`.
@@ -78,7 +78,8 @@ class MoEFFN(nn.Module):
         load = counts.float() / (self.top_k * h.shape[0])
         balance = self.num_experts * (load * probs.mean(dim=0)).sum()
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
-        self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
+        if self.training:  # inference never collects them, so they would pile up forever
+            self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
         return out.view(shape)
 
 

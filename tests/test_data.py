@@ -49,3 +49,11 @@ def test_pair_batch_and_chat_prompt():
     assert batch["query_ids"].shape == (2, 2) and batch["doc_ids"].shape == (2, 3)
     text = chat_prompt_text([{"role": "user", "content": "hi"}])
     assert text == "<|user|>hi[EOS]<|assistant|>"
+
+
+def test_mlm_window_always_contains_a_target():
+    """A long document whose only real tokens sit far from the start still yields a target."""
+    doc = [CONFIG.eos_id] * 200 + [50]
+    for seed in range(20):
+        batch = build_mlm_batch([doc], CONFIG, random.Random(seed), torch.Generator().manual_seed(seed))
+        assert batch["target_mask"].shape[0] == 1 and batch["target_mask"].any()

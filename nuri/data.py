@@ -89,11 +89,16 @@ def build_mlm_batch(documents: list[list[int]], config: NuriConfig, rng: random.
                     generator: torch.Generator | None = None, rate: float = 0.3) -> dict:
     """Random windows of at most N tokens, masked for MLM."""
     windows = []
+    special = (config.pad_id, config.mask_id, config.eos_id)
     for doc in documents:
-        start = rng.randint(0, max(0, len(doc) - config.max_input_len))
+        # Anchor the window on a random maskable token so it always has a target.
+        maskable = [i for i, t in enumerate(doc) if t not in special]
+        anchor = rng.choice(maskable) if maskable else 0
+        lowest = max(0, anchor - config.max_input_len + 1)
+        highest = max(lowest, min(anchor, len(doc) - config.max_input_len))
+        start = rng.randint(lowest, highest)
         windows.append(doc[start:start + config.max_input_len])
     ids, valid = pad_batch(windows, config.pad_id)
-    special = (config.pad_id, config.mask_id, config.eos_id)
     corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
     # A window made only of special tokens has nothing to predict; drop it.
     keep = targets.any(dim=1)
