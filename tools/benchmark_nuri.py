@@ -17,9 +17,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nuri.config import NuriConfig, PRESETS
+from nuri.data import build_pair_batch
 from nuri.generation import generate
 from nuri.losses import sample_mean_ce, token_mean_ce
 from nuri.model import NuriModel
+from nuri.trainer import TrainSettings, make_optimizer, pair_loss
 
 
 def run_benchmark(
@@ -39,13 +41,17 @@ def run_benchmark(
     seed: int = 0,
     native_gqa: bool = False,
 ) -> dict:
-    if task not in {"mlm", "denoise", "embed-fast", "embed-reasoning", "generate"}:
+    if task not in {"mlm", "denoise", "pairs", "embed-fast", "embed-reasoning", "generate"}:
         raise ValueError("Unknown benchmark task")
-    if training and task not in {"mlm", "denoise"}:
-        raise ValueError("Training benchmarks support mlm and denoise tasks")
+    if training and task not in {"mlm", "denoise", "pairs"}:
+        raise ValueError("Training benchmarks support mlm, denoise, and pairs tasks")
+    if task == "pairs" and not training:
+        raise ValueError("Pairs benchmarks require --training")
+    if task == "pairs" and batch_size < 2:
+        raise ValueError("Pairs benchmarks require batch_size >= 2")
     if min(batch_size, input_length, output_length, iterations, rounds) < 1 or warmup < 0:
         raise ValueError("Lengths, batch size, iterations, and rounds must be positive; warmup may be zero")
-    if input_length > config.max_input_len or output_length > config.max_response_len:
+    if input_length > config.max_input_len or (task != "pairs" and output_length > config.max_response_len):
         raise ValueError("Benchmark lengths exceed the model config")
     steps = config.default_depth if steps is None else steps
     if steps < 0:
@@ -62,12 +68,22 @@ def run_benchmark(
     model = NuriModel(config).to(runtime_device)
     model.set_native_gqa(native_gqa)
     model.train(training)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4) if training else None
+    pair_settings = TrainSettings(out_dir="", total_steps=1, peak_lr=5e-5) if task == "pairs" else None
+    if pair_settings is not None:
+        optimizer = make_optimizer(model, pair_settings)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4) if training else None
     clean_input = torch.randint(3, config.vocab_size, (batch_size, input_length), device=runtime_device)
     valid_input = torch.ones_like(clean_input, dtype=torch.bool)
-    response = torch.randint(3, config.vocab_size, (batch_size, output_length), device=runtime_device)
-    valid_canvas = torch.ones_like(response, dtype=torch.bool)
-    response[:, -1] = config.eos_id
+    if task == "pairs":
+        documents = torch.randint(3, config.vocab_size, (batch_size, input_length), device=runtime_device)
+        # Row-aligned labels exercise the real pair loss; random text is not a quality test.
+        pairs = list(zip(clean_input.cpu().tolist(), documents.cpu().tolist()))
+        pair_batch = {key: value.to(runtime_device) for key, value in build_pair_batch(pairs, config).items()}
+    else:
+        response = torch.randint(3, config.vocab_size, (batch_size, output_length), device=runtime_device)
+        valid_canvas = torch.ones_like(response, dtype=torch.bool)
+        response[:, -1] = config.eos_id
 
     def autocast_context():
         if dtype == "bfloat16":
@@ -86,6 +102,10 @@ def run_benchmark(
             if task.startswith("embed-"):
                 model.embed(clean_input, valid_input, mode=task[6:], steps=steps)
                 loss = None
+            elif task == "pairs":
+                result = pair_loss(model, pair_batch, steps, pair_settings.embed_dims, pair_settings.temperature,
+                                   pair_settings.cross_mode_weight)
+                loss = result["loss"]
             elif task == "generate":
                 generate(model, clean_input, valid_input, steps=steps, rounds=rounds, canvas_len=output_length)
                 loss = None
@@ -134,7 +154,8 @@ def run_benchmark(
         if loss is not None and not torch.isfinite(loss.detach()):
             raise RuntimeError("Benchmark produced a nonfinite loss")
     total_seconds = sum(elapsed)
-    input_tokens = batch_size * input_length * iterations
+    input_sequences_per_sample = 2 if task == "pairs" else 1
+    input_tokens = batch_size * input_length * iterations * input_sequences_per_sample
     canvas_tokens = batch_size * output_length * iterations if task in {"denoise", "generate"} else 0
     sorted_times = sorted(elapsed)
     expert_backends = sorted({backend for layer in model.moe_layers() for backend in layer.used_backends})
@@ -153,8 +174,9 @@ def run_benchmark(
         "autocast_dtype": dtype,
         "batch_size": batch_size,
         "input_length": input_length,
+        "input_sequences_per_sample": input_sequences_per_sample,
         "output_length": output_length if canvas_tokens else None,
-        "reasoning_steps": steps if task in {"denoise", "generate", "embed-reasoning"} else 0,
+        "reasoning_steps": steps if task in {"denoise", "generate", "pairs", "embed-reasoning"} else 0,
         "refinement_rounds": rounds if task == "generate" else None,
         "warmup_iterations": warmup,
         "measured_iterations": iterations,
@@ -175,6 +197,7 @@ def run_benchmark(
         "notes": [
             "Training includes forward, backward, clipping, and an AdamW step.",
             "Input throughput counts observed input tokens once per measured iteration.",
+            "Pairs training counts query plus document tokens and includes both embedding modes; host batch building is excluded.",
             "Generation throughput counts each output sequence once, not one copy per refinement round.",
             "Compare tasks, lengths, T, S, batch size, and dtype before comparing throughput.",
         ],
@@ -185,14 +208,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=list(PRESETS), default="tiny")
     parser.add_argument("--config", help="Use a saved executable NuriConfig JSON instead of a preset")
-    parser.add_argument("--task", choices=["mlm", "denoise", "embed-fast", "embed-reasoning", "generate"], default="denoise")
+    parser.add_argument("--task", choices=["mlm", "denoise", "pairs", "embed-fast", "embed-reasoning", "generate"], default="denoise")
     parser.add_argument("--training", action="store_true")
     parser.add_argument("--native-gqa", action="store_true", help="use compact GQA heads in supported SDPA")
     parser.add_argument("--moe-backend", choices=["loop", "grouped"], help="override the configured expert backend")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--input-length", type=int, default=16)
+    parser.add_argument("--input-length", type=int, default=16, help="tokens per input sequence; applies to both sides of pairs")
     parser.add_argument("--output-length", type=int, default=8)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--rounds", type=int, default=4)

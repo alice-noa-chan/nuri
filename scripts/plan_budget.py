@@ -58,8 +58,9 @@ def load_benchmark(path: str) -> dict:
 
 
 def tokens_per_iteration(bench: dict) -> float:
-    """Processed tokens of one benchmark iteration: inputs plus canvas positions."""
-    return bench["batch_size"] * (bench["input_length"] + (bench.get("output_length") or 0))
+    """Observed input tokens (both sides for pairs) plus canvas positions."""
+    return bench["batch_size"] * (bench["input_length"] * bench.get("input_sequences_per_sample", 1)
+                                 + (bench.get("output_length") or 0))
 
 
 def budget_stage(name: str, stage: dict, budget: dict, overhead: float) -> dict:
