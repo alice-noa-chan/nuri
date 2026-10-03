@@ -147,6 +147,118 @@ saved checkpoint receives a copy of its tokenizer files. IT/embed can use
 that copy when `--tokenizer` is omitted. A mismatch in vocabulary size or
 PAD/MASK/EOS IDs fails before training.
 
+### Optional training memory and compilation settings
+
+`--grad-accum N` averages N microbatch losses before one optimizer update.
+`--batch-size` remains the size of a microbatch; the progress target and
+`--steps` count optimizer updates. This reduces the memory needed to accumulate
+more examples, but contrastive negatives still come from each individual
+microbatch. Accumulating embedding batches does not create the negative pool
+of one larger contrastive batch. Keep the accumulation count on resume because
+it changes the gradients, random draws and number of processed examples.
+
+`--gradient-checkpointing` recomputes input/readout block activations during
+backward instead of retaining all of them. It trades extra computation for
+lower activation memory; the shared recurrent core is not checkpointed.
+MoE auxiliary records are collected only on the original forward, so
+recomputation does not duplicate the router loss or expert-load counts.
+
+`--compile` asks PyTorch to compile the encoder blocks, recurrent core and
+readout blocks in place, preserving parameter and checkpoint names. It is
+opt-in. The first forward can take longer while compilation runs. This path
+has not been validated on the target A100/H100, and no speed gain is claimed;
+measure it with the actual sequence lengths and task mix before using it for
+the one-day run. Activation checkpointing and compilation are runtime options
+that may change on resume; numerical equivalence across GPU backends is not
+guaranteed.
+
+## Monitor training and view TensorBoard
+
+The CLI prints which preparation step is running: loading the tokenizer,
+creating/loading the model, opening the corpus, and preparing the task mix.
+Separate tqdm bars count instruction, structured-reasoning and pair examples
+as they are tokenized. The optimizer loop then shows the release stage
+(`base`, `it`, `embed`), sampled task, active reasoning depth T, WSD phase
+(`warmup`, `stable`, `decay`), and current operation (`batch`, `forward`,
+`backward`, `optimizer`, or `saving <checkpoint>`).
+
+The training bar counts **completed optimizer updates**, with percentage,
+elapsed time, speed and estimated time remaining. It starts at the saved
+number of completed updates when resuming. The postfix shows the most recent
+sampled loss, learning rate, gradient norm before clipping, cumulative
+processed tokens, and tokens/second. Task-specific denoising, length, fast/
+reasoning contrastive losses and MoE balance/z terms appear when available.
+Terminal refreshes are throttled; initial-step operations and checkpoint saves
+are displayed immediately. Metrics refresh every 10 updates by default, with
+the first and last update always recorded. Use `--log-every 1` to sample every
+update. Bars go to stderr, while setup/completion messages go to stdout.
+
+TensorBoard is optional. Install its extra and enable it on any stage:
+
+```powershell
+python -m pip install -e ".[tensorboard]"
+
+python scripts/train.py --stage base --preset release-dense `
+  --tokenizer $env:NURI_TOKENIZER --corpus $env:NURI_TEXT_CORPUS `
+  --out runs/nuri-base --steps 20000 --batch-size 32 `
+  --save-every 2000 --log-every 10 --tensorboard
+
+tensorboard --logdir runs
+```
+
+Open the local address printed by TensorBoard, usually `http://localhost:6006`.
+The default enabled event directory is `<out>/tensorboard`. To choose another
+directory, pass `--tensorboard-dir runs/metrics/base-dense`; this flag enables
+events even without `--tensorboard`. Use a separate directory for each run or
+stage. `--no-progress` hides all tqdm bars and keeps setup messages, JSON logs
+and any enabled TensorBoard events. TensorBoard is never imported when events
+are disabled; an enabled run with a missing dependency gives the install command.
+
+| TensorBoard tag | Meaning |
+|---|---|
+| `loss/total`, `loss/<task>/total` | The optimized loss, including active weighted length and MoE terms; compare individual task curves because objectives have different scales. |
+| `loss/<task>/denoise`, `/length`, `/fast`, `/reasoning` | Available unweighted objective components for the sampled task. |
+| `optimizer/lr`, `optimizer/grad_norm` | Current learning rate and gradient norm before clipping. |
+| `data/processed_tokens` | Cumulative valid input/canvas positions, or query/document positions for pairs, preserved on resume. Padding and repeated recurrent steps do not add tokens. |
+| `batch/<kind>/targets` | Targets in the sampled batch: masked tokens for MLM/canvas tasks, positive pairs for embedding tasks. These units stay separate. |
+| `performance/tokens_per_second`, `/steps_per_second` | Work since the previous metric sample in this process divided by monotonic elapsed time. Includes batch building, logging and intervening saves. The first resumed sample counts only new work. |
+| `train/reasoning_depth`, `train/schedule_phase` | Active T (0 for MLM, which skips the core), and phase code 0=warmup, 1=stable, 2=decay. |
+| `moe/balance`, `moe/z` | Router auxiliary terms when MoE is active. |
+| `moe/layer_<n>/expert_<e>_assignments` | Routed assignments for each expert in each auxiliary record of the sampled batch. Compare these within the same task. |
+
+JSON and TensorBoard use the same sampling cadence. The existing JSON `step`
+stays zero-based; TensorBoard's horizontal step is `step + 1`, the number of
+completed optimizer updates. Events contain explicit numeric measurements;
+raw input text, token IDs, data paths and full training settings are not copied
+into events. The writer flushes periodically and closes on completion or an
+exception, so the final available measurements remain readable.
+
+To continue one graph after interruption, keep the original event directory
+and add the usual `--resume` flag. Events after the restored checkpoint are
+hidden and replaced by resumed measurements; older points remain. A new event
+directory starts at the restored step without copying historical points.
+Changing progress visibility, event destination or log cadence is allowed on
+resume. An incompatible optimization setting is rejected before opening the
+writer, so it cannot purge valid event history. A finished checkpoint produces
+no extra optimizer steps or metric points.
+
+The implementation uses [tqdm](https://tqdm.github.io/docs/tqdm/) and PyTorch's
+[SummaryWriter](https://docs.pytorch.org/docs/stable/tensorboard.html).
+
+The multi-stage release runner accepts boolean `tensorboard` and `no_progress`
+options under the plan's `train` object, with per-stage overrides. Value options
+such as `log_every`, `tensorboard_dir` and `grad_accum` belong to each stage.
+Use a private plan based on `configs/release_plan.example.json`:
+
+```powershell
+python scripts/run_release.py .private/release-plan.json --dry-run
+python scripts/run_release.py .private/release-plan.json
+```
+
+With plan-wide `"train": {"tensorboard": true}`, each stage uses its own
+`<stage output>/tensorboard` directory. The runner invokes training, requested
+evaluations and local export in sequence and continues interrupted stages.
+
 ## Resume an interrupted stage
 
 Use the private optimizer checkpoint to continue the same run:
@@ -169,7 +281,7 @@ CUDA random state are restored where applicable.
 Resume reconstructs the model from the saved config; it does not guess the
 current preset, and IT/embed resume does not require `--init`. A changed
 optimization schedule, seed, task mix, or loss setting is rejected. Output
-location and log/save cadence may change. Resuming a state that already reached
+location, progress/event options and log/save cadence may change. Resuming a state that already reached
 the total target reports completion without taking another optimizer step.
 
 Public `model.safetensors` is exported in BF16 by default. It is suitable for

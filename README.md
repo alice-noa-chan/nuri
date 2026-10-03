@@ -14,7 +14,7 @@ Nuri is an **encoder-only language model** that can also reason in a hidden
 Languages: Korean and English first, some Japanese. License: MIT.
 
 > Status: the model code, training loop and tests are implemented and run on
-> CPU. No model has been trained yet. Numbers in the design documents are
+> CPU. No release model has been trained yet. Numbers in the design documents are
 > estimates until the GPU benchmark is done.
 
 ## How it works
@@ -66,7 +66,7 @@ has been trained yet.
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest          # ~130 tests, about 10 seconds on CPU
+python -m pytest          # Run the CPU correctness checks.
 ```
 
 Python 3.10+ and PyTorch 2.4+ are required. Training uses bf16 on CUDA and
@@ -109,6 +109,27 @@ continue an interrupted run exactly where it stopped. Data formats:
 Each run writes `train_log.jsonl` (loss, LR, tokens, MoE expert load, ...),
 public checkpoints (`step-N/`, `pre-decay/`, `final/`) and private resume
 state (`training_state/`).
+
+Training shows a tqdm bar with the stage, task, reasoning depth, warmup/stable/
+decay phase, current operation, completed steps and ETA. Its sampled metrics
+include loss, learning rate, gradient norm, processed tokens and tokens/second.
+Preparation bars also show instruction/reasoning/pair tokenization. Use
+`--log-every 1` for metrics after every update, or `--no-progress` to hide bars.
+
+To record and view TensorBoard metrics:
+
+```bash
+python -m pip install -e ".[tensorboard]"
+# Add --tensorboard to any of the training commands above.
+tensorboard --logdir runs
+```
+
+`--tensorboard` writes to `<out>/tensorboard`; `--tensorboard-dir PATH` enables
+events in a custom directory. Each run gets separate loss, optimizer, throughput
+and MoE expert-load curves. Resuming in the same event directory preserves
+completed-step indices and hides stale points beyond the restored checkpoint.
+See [the monitoring guide](docs/IMPLEMENTATION.md#monitor-training-and-view-tensorboard)
+for commands, metric definitions and resume behavior.
 
 ## Use a checkpoint
 
@@ -159,6 +180,7 @@ z = model.embed(prompt, mode="reasoning", steps=4, dim=128)
 | `nuri/generation.py` | the refinement sampler |
 | `nuri/corruption.py`, `nuri/data.py`, `nuri/tasks.py` | masking, corpus format, batch builders, synthetic reasoning tasks |
 | `nuri/losses.py`, `nuri/trainer.py`, `nuri/pipeline.py`, `nuri/schedule.py`, `nuri/checkpoint.py` | training, resume, checkpoints |
+| `nuri/monitoring.py` | tqdm training status and optional TensorBoard metrics |
 | `nuri/tokenizer.py` | tokenizer checks and copying tokenizer files into checkpoints |
 | `scripts/` | `train.py`, `tokenize_corpus.py` |
 | `tools/` | tokenizer training, GPU benchmark, text inference CLI, the shared-file watcher |
