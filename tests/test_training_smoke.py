@@ -86,3 +86,33 @@ def test_train_script_base_stage(tmp_path):
     script.main(["--stage", "base", "--preset", "tiny", "--corpus", str(tmp_path / "corpus"),
                  "--out", str(tmp_path / "run"), "--steps", "6", "--batch-size", "4"])
     assert (tmp_path / "run" / "final" / "config.json").exists()
+
+
+def test_resume_matches_uninterrupted_run(tmp_path):
+    """Stop at step 6, resume from the saved state: the result must equal a run without a stop."""
+    config = tiny_config(moe=MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,),
+                                       readout_layers=(2,)))
+    corpus = toy_corpus(tmp_path / "corpus")
+
+    def fresh_run():
+        torch.manual_seed(0)
+        model = NuriModel(config)
+        tasks, mix = base_stage(corpus, config, batch_size=4, seed=3)
+        settings = TrainSettings(out_dir=str(tmp_path / "unused"), total_steps=12, peak_lr=3e-3,
+                                 warmup_steps=2, save_every=6, log_every=1, mix=mix)
+        return model, tasks, settings
+
+    model, tasks, settings = fresh_run()
+    settings.out_dir = str(tmp_path / "full")
+    train(model, tasks, settings, device=torch.device("cpu"))
+
+    resumed, tasks, settings = fresh_run()
+    settings.out_dir = str(tmp_path / "resumed")
+    records = train(resumed, tasks, settings, device=torch.device("cpu"),
+                    resume_from=tmp_path / "full" / "training_state" / "step-6.pt")
+
+    assert records[0]["step"] == 6
+    for name, tensor in model.state_dict().items():
+        assert torch.equal(tensor, resumed.state_dict()[name]), name
+    full_last = json.loads((tmp_path / "full" / "train_log.jsonl").read_text().splitlines()[-1])
+    assert records[-1]["tokens"] == full_last["tokens"]

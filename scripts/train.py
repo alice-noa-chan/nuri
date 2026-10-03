@@ -9,6 +9,9 @@ Examples
   python scripts/train.py --stage it --init runs/nuri-base/final --tokenizer $NURI_TOKENIZER \
       --instructions $NURI_IT_DATA --corpus $NURI_TEXT_CORPUS --out runs/nuri-base-it --steps 3000
 
+  # continue an interrupted run (same flags plus --resume)
+  python scripts/train.py --stage base ... --resume runs/nuri-base/training_state/step-2000.pt
+
   # embedding training from the dense base checkpoint
   python scripts/train.py --stage embed --init runs/nuri-base/final --tokenizer $NURI_TOKENIZER \
       --pairs $NURI_PAIR_DATA --out runs/nuri-base-embed --steps 3000
@@ -52,6 +55,7 @@ def parse_args(argv=None):
     p.add_argument("--lr", type=float, default=None, help="peak LR (default 3e-4 base, 5e-5 it/embed)")
     p.add_argument("--warmup", type=int, default=None, help="warmup steps (default 2%% of steps)")
     p.add_argument("--save-every", type=int, default=0)
+    p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", default=os.environ.get("NURI_TEXT_CORPUS"))
     p.add_argument("--tokenizer", default=os.environ.get("NURI_TOKENIZER"))
@@ -116,7 +120,7 @@ def main(argv=None):
     settings = TrainSettings(out_dir=args.out, total_steps=args.steps, peak_lr=peak_lr, warmup_steps=warmup,
                              save_every=args.save_every, seed=args.seed, mix=mix)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}")
-    records = train(model, tasks, settings)
+    records = train(model, tasks, settings, resume_from=args.resume)
     print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
 
 

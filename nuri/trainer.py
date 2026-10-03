@@ -16,7 +16,7 @@ from typing import Callable
 
 import torch
 
-from .checkpoint import save_pretrained, save_training_state
+from .checkpoint import load_training_state, save_pretrained, save_training_state
 from .losses import contrastive_loss, length_loss, sample_mean_ce, token_mean_ce
 from .model import NuriModel
 from .schedule import WSDSchedule
@@ -97,9 +97,16 @@ class TrainSettings:
 
 @dataclass
 class Task:
-    """A named batch source. kind is "mlm", "span", "instruction" or "pairs"."""
+    """A named batch source. kind is "mlm", "span", "instruction" or "pairs".
+
+    rng and generator are the random sources next_batch draws from. The
+    trainer saves and restores them, so a resumed run sees the same batches
+    as an uninterrupted one.
+    """
     kind: str
     next_batch: Callable[[], dict]
+    rng: random.Random | None = None
+    generator: torch.Generator | None = None
 
 
 def default_device() -> torch.device:
@@ -119,8 +126,15 @@ def make_optimizer(model: NuriModel, settings: TrainSettings) -> torch.optim.Ada
     return torch.optim.AdamW(groups, lr=settings.peak_lr, betas=settings.betas)
 
 
-def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, device=None) -> list[dict]:
-    """Run the loop. Returns the logged records (also written to train_log.jsonl)."""
+def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, device=None,
+          resume_from: str | Path | None = None) -> list[dict]:
+    """Run the loop. Returns the logged records (also written to train_log.jsonl).
+
+    resume_from: a private training-state file saved by an earlier run with
+    the same settings. Training continues at the saved step with the same
+    weights, optimizer moments, token totals and random state, so the result
+    matches a run that was never interrupted.
+    """
     device = device or default_device()
     model.to(device).train()
     out = Path(settings.out_dir)
@@ -135,10 +149,13 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     weights = [settings.mix[n] for n in names]
     use_bf16 = device.type == "cuda"
     totals = {"tokens": 0, "targets": 0}
+    start_step = 0
+    if resume_from is not None:
+        start_step, totals = _resume(resume_from, model, optimizer, rng, tasks)
     records, started = [], time.time()
 
     with open(out / "train_log.jsonl", "a", encoding="utf-8") as log:
-        for step in range(settings.total_steps):
+        for step in range(start_step, settings.total_steps):
             for group in optimizer.param_groups:
                 group["lr"] = schedule.lr(step)
             name = rng.choices(names, weights)[0]
@@ -162,8 +179,35 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
                 records.append(record)
                 log.write(json.dumps(record) + "\n")
                 log.flush()
-            _maybe_save(model, optimizer, schedule, settings, step, totals, out)
+            _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks)
     return records
+
+
+def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
+    """Every random source that decides which batches come next."""
+    state = {"trainer_rng": rng.getstate(), "tasks": {}}
+    for name, task in tasks.items():
+        state["tasks"][name] = {
+            "rng": task.rng.getstate() if task.rng is not None else None,
+            "generator": task.generator.get_state() if task.generator is not None else None,
+        }
+    if torch.cuda.is_available():
+        state["cuda_rng"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _resume(path, model, optimizer, rng: random.Random, tasks: dict[str, Task]) -> tuple[int, dict]:
+    state = load_training_state(path, model, optimizer)  # also checks the config and restores torch/Python RNG
+    extra = state["extra"]
+    rng.setstate(extra["random"]["trainer_rng"])
+    for name, saved in extra["random"]["tasks"].items():
+        if saved["rng"] is not None:
+            tasks[name].rng.setstate(saved["rng"])
+        if saved["generator"] is not None:
+            tasks[name].generator.set_state(saved["generator"])
+    if "cuda_rng" in extra["random"] and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(extra["random"]["cuda_rng"])
+    return state["step"], dict(extra["totals"])
 
 
 def _task_loss(model, kind, batch, depth, settings) -> dict:
@@ -192,7 +236,7 @@ def _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, total
     return record
 
 
-def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path) -> None:
+def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks) -> None:
     last = step == settings.total_steps - 1
     names = []
     if settings.save_every and (step + 1) % settings.save_every == 0 and not last:
@@ -203,4 +247,5 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path) -
         names.append("final")
     for name in names:
         save_pretrained(model, out / name)
-        save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, dict(totals))
+        extra = {"totals": dict(totals), "random": _random_state(rng, tasks)}
+        save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, extra)
