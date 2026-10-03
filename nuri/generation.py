@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Callable
 
 import torch
 
@@ -27,7 +28,8 @@ class GenerationResult:
 @torch.no_grad()
 def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None,
              steps: int | None = None, rounds: int | None = None, canvas_len=None,
-             max_len: int | None = None, keep_history: bool = False) -> GenerationResult:
+             max_len: int | None = None, keep_history: bool = False,
+             transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None) -> GenerationResult:
     """Greedy refinement generation.
 
     steps: reasoning depth T (config default if None).
@@ -36,6 +38,9 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         models must pass it; instruction-tuned models may omit it and use the
         length head.
     max_len: upper bound for the canvas length (at most M).
+    transform_r: optional function applied to R_final before it is used, for
+        intervention experiments (for example zeroing or shuffling R, §12).
+        It affects both the length head and the readout memory.
     """
     config = model.config
     steps = config.default_depth if steps is None else steps
@@ -49,6 +54,8 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
 
     x, valid = model.encode(input_ids, attention_mask)
     r = model.reason(x, valid, steps)
+    if transform_r is not None:
+        r = transform_r(r)
     lengths = _choose_lengths(model, x, valid, r, canvas_len, input_ids.shape[0]).clamp(1, max_len)
     cache = model.generation_memory(x, valid, r)
 
