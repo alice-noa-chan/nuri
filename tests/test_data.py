@@ -67,3 +67,13 @@ def test_embedding_stage_drops_empty_pairs():
     tasks, _ = embedding_stage([([], [3]), ([4], [5]), ([6], [7])], CONFIG, batch_size=2)
     batch = tasks["pairs"].next_batch()
     assert batch["query_valid"].any(dim=1).all() and batch["doc_valid"].any(dim=1).all()
+
+
+def test_pair_batch_marks_duplicate_documents_and_queries():
+    batch = build_pair_batch([([5], [7]), ([6], [7]), ([5], [8]), ([9], [10])], CONFIG)
+    assert batch["false_negatives"].tolist() == [
+        [False, True, True, False],   # same document as row 1, same query as row 2
+        [True, False, False, False],
+        [True, False, False, False],
+        [False, False, False, False],
+    ]

@@ -148,10 +148,21 @@ def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config:
 
 
 def build_pair_batch(pairs: list[tuple[list[int], list[int]]], config: NuriConfig) -> dict:
-    """Query/document pairs for contrastive training; row i of each side is a positive pair."""
-    queries, q_valid = pad_batch([q[:config.max_input_len] for q, _ in pairs], config.pad_id)
-    documents, d_valid = pad_batch([d[:config.max_input_len] for _, d in pairs], config.pad_id)
-    return {"query_ids": queries, "query_valid": q_valid, "doc_ids": documents, "doc_valid": d_valid}
+    """Query/document pairs for contrastive training; row i of each side is a positive pair.
+
+    "false_negatives"[i, j] marks rows j != i that must not count as negatives
+    for row i: the same document text, or the same query text (whose
+    document is then also a valid answer for query i).
+    """
+    queries = [list(q[:config.max_input_len]) for q, _ in pairs]
+    documents = [list(d[:config.max_input_len]) for _, d in pairs]
+    n = len(pairs)
+    false_negatives = torch.tensor([[i != j and (documents[i] == documents[j] or queries[i] == queries[j])
+                                     for j in range(n)] for i in range(n)], dtype=torch.bool)
+    query_ids, q_valid = pad_batch(queries, config.pad_id)
+    doc_ids, d_valid = pad_batch(documents, config.pad_id)
+    return {"query_ids": query_ids, "query_valid": q_valid, "doc_ids": doc_ids, "doc_valid": d_valid,
+            "false_negatives": false_negatives}
 
 
 def _canvas_batch(sources, targets, config: NuriConfig, generator) -> dict:

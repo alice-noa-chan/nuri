@@ -32,12 +32,15 @@ def length_loss(length_logits: torch.Tensor, lengths: torch.Tensor) -> torch.Ten
 
 
 def contrastive_loss(query: torch.Tensor, document: torch.Tensor, temperature: float = 0.05,
-                     dims: tuple[int, ...] | None = None) -> torch.Tensor:
+                     dims: tuple[int, ...] | None = None,
+                     false_negatives: torch.Tensor | None = None) -> torch.Tensor:
     """Symmetric in-batch InfoNCE on unnormalized projections.
 
     Row i of `document` is the positive for row i of `query`; all other rows
-    are negatives. With `dims` (Matryoshka), the loss is averaged over the
-    prefixes z[:, :d], each renormalized.
+    are negatives, except where false_negatives[i, j] is True (duplicates of
+    the positive), which are left out of the softmax. With `dims`
+    (Matryoshka), the loss is averaged over the prefixes z[:, :d], each
+    renormalized.
     """
     dims = dims or (query.shape[-1],)
     labels = torch.arange(query.shape[0], device=query.device)
@@ -46,5 +49,8 @@ def contrastive_loss(query: torch.Tensor, document: torch.Tensor, temperature: f
         q = F.normalize(query[:, :d].float(), dim=-1)
         k = F.normalize(document[:, :d].float(), dim=-1)
         scores = q @ k.T / temperature
+        if false_negatives is not None:
+            # The mask is symmetric, so it also fits the document-to-query direction.
+            scores = scores.masked_fill(false_negatives.to(scores.device), float("-inf"))
         total = total + 0.5 * (F.cross_entropy(scores, labels) + F.cross_entropy(scores.T, labels))
     return total / len(dims)

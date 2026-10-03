@@ -83,3 +83,12 @@ def test_length_and_contrastive_losses():
     good = contrastive_loss(z, z, dims=(4, 8))
     bad = contrastive_loss(z, z.roll(1, dims=0), dims=(4, 8))
     assert good < bad
+
+
+def test_false_negatives_are_left_out_of_the_softmax():
+    q = torch.eye(3)
+    d = torch.stack([torch.eye(3)[0], torch.eye(3)[0], torch.eye(3)[2]])  # rows 0 and 1 share a document
+    duplicates = torch.tensor([[False, True, False], [True, False, False], [False, False, False]])
+    plain = contrastive_loss(q, d, temperature=0.1)
+    masked = contrastive_loss(q, d, temperature=0.1, false_negatives=duplicates)
+    assert masked < plain  # the duplicate no longer pushes its twin away

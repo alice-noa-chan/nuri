@@ -68,7 +68,7 @@ def pair_loss(model: NuriModel, batch: dict, depth: int, dims: tuple[int, ...], 
     for mode in ("fast", "reasoning"):
         q = model.embed_memory(xq, vq, mode=mode, steps=depth)
         d = model.embed_memory(xd, vd, mode=mode, steps=depth)
-        losses[mode] = contrastive_loss(q, d, temperature, dims)
+        losses[mode] = contrastive_loss(q, d, temperature, dims, batch.get("false_negatives"))
     tokens = int(batch["query_valid"].sum() + batch["doc_valid"].sum())
     return {"loss": (losses["fast"] + losses["reasoning"]) / 2, "fast": losses["fast"].detach(),
             "reasoning": losses["reasoning"].detach(), "tokens": tokens, "targets": batch["query_ids"].shape[0]}
