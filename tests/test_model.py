@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from nuri.config import MoEConfig, reference_config, release_dense_config, release_moe_config, tiny_config
@@ -132,3 +133,11 @@ def test_inference_does_not_keep_moe_records():
     for _ in range(3):
         model.encode(sample_inputs(model.config))
     assert all(not layer.aux_records for layer in model.moe_layers())
+
+
+def test_embed_rejects_invalid_dims():
+    model = make_model()
+    ids = sample_inputs(model.config)
+    for dim in (0, -1, model.config.embed_dim + 1, 2.5, True):
+        with pytest.raises(ValueError):
+            model.embed(ids, dim=dim)

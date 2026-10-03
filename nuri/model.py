@@ -88,6 +88,8 @@ class NuriModel(nn.Module):
             raise ValueError(f"unknown embedding mode {mode!r}")
         z = self.embed_proj(u)
         if dim is not None:
+            if isinstance(dim, bool) or not isinstance(dim, int) or not 1 <= dim <= self.config.embed_dim:
+                raise ValueError(f"dim must be an int in 1..{self.config.embed_dim}, got {dim!r}")
             z = z[:, :dim]  # Matryoshka prefix
         return F.normalize(z, dim=-1)
 
