@@ -180,15 +180,14 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             schedule_phase = "warmup" if step < schedule.warmup_steps else (
                 "stable" if step < schedule.decay_start else "decay")
             optimizer.zero_grad(set_to_none=True)
-            step_losses = []
+            micro_batches = []
             # With grad_accum > 1 the gradients of several micro-batches add up
             # before one optimizer step; each loss is divided so the step uses
             # their mean. grad_accum = 1 is exactly the plain loop.
-            for micro in range(settings.grad_accum):
+            for _ in range(settings.grad_accum):
                 name = rng.choices(names, weights)[0]
                 depth = rng.choice(model.config.train_depths)
-                if micro == 0:
-                    monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
+                monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
                 batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
 
                 monitor.phase("forward")
@@ -199,10 +198,10 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
 
                 monitor.phase("backward")
                 (loss / settings.grad_accum).backward()
-                step_losses.append(loss.detach())
+                micro_batches.append((name, depth, result, aux, loss.detach()))
                 totals["tokens"] += result["tokens"]
                 totals["targets"] += result["targets"]
-            loss = torch.stack(step_losses).mean()  # logged value: mean over the micro-batches
+            name, depth, result, aux, loss = _merge_micro_batches(micro_batches, tasks)
 
             monitor.phase("optimizer")
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
@@ -214,10 +213,46 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
                 records.append(record)
                 log.write(json.dumps(record) + "\n")
                 log.flush()
-                monitor.record(record, tasks[name].kind, result["targets"], schedule_phase)
+                kind = tasks[name].kind if name in tasks else "mixed"
+                monitor.record(record, kind, result["targets"], schedule_phase)
             _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
                         on_save=lambda name: monitor.phase(f"saving {name}", force=True))
     return records
+
+
+def _merge_micro_batches(micro_batches: list, tasks: dict[str, Task]) -> tuple:
+    """Summarize the micro-batches of one optimizer step for logging.
+
+    Losses and loss parts are means over the micro-batches that have them
+    (the step optimizes the mean loss); tokens, targets and expert counts are
+    sums. Task and depth are shown as one value when all micro-batches
+    agree, otherwise as "a+b" and a list.
+    """
+    names = [m[0] for m in micro_batches]
+    depths = [m[1] for m in micro_batches]
+    results = [m[2] for m in micro_batches]
+    auxes = [m[3] for m in micro_batches]
+    loss = torch.stack([m[4] for m in micro_batches]).mean()
+
+    merged = {"loss": loss, "tokens": sum(r["tokens"] for r in results),
+              "targets": sum(r["targets"] for r in results)}
+    for key in ("denoise", "length", "fast", "reasoning"):
+        values = [r[key] for r in results if key in r]
+        if values:
+            merged[key] = torch.stack([torch.as_tensor(v, dtype=torch.float32) for v in values]).mean()
+
+    with_aux = [a for a in auxes if a["loss"] is not None]
+    if with_aux:
+        aux = {"loss": torch.stack([a["loss"].detach() for a in with_aux]).mean(),
+               "balance": torch.stack([a["balance"] for a in with_aux]).mean(),
+               "z": torch.stack([a["z"] for a in with_aux]).mean(),
+               "counts": [sum(layer) for layer in zip(*(a["counts"] for a in with_aux))]}
+    else:
+        aux = {"loss": None, "counts": []}
+
+    name = names[0] if len(set(names)) == 1 else "+".join(sorted(set(names)))
+    depth = depths[0] if len(set(depths)) == 1 else depths
+    return name, depth, merged, aux, loss
 
 
 def _compile_blocks(model: NuriModel) -> None:
@@ -248,6 +283,11 @@ RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
                         "stage", "progress", "tensorboard_dir", "gradient_checkpointing", "compile")
 
 
+# Settings added after the first training states were written, with the value
+# that matches what older code did.
+LEGACY_SETTING_DEFAULTS = {"grad_accum": 1}
+
+
 def _comparable_settings(settings: TrainSettings) -> dict:
     data = {k: v for k, v in asdict(settings).items() if k not in RESUME_FREE_SETTINGS}
     return json.loads(json.dumps(data))  # tuples and lists compare equal after this
@@ -257,7 +297,9 @@ def _resume(path, model, optimizer, rng: random.Random, tasks: dict[str, Task],
             settings: TrainSettings) -> tuple[int, dict]:
     state = load_training_state(path, model, optimizer)  # also checks the config and restores torch/Python RNG
     extra = state["extra"]
-    saved, current = extra["settings"], _comparable_settings(settings)
+    # States written before a setting existed are read with its old behavior.
+    saved = {**LEGACY_SETTING_DEFAULTS, **extra["settings"]}
+    current = _comparable_settings(settings)
     if saved != current:
         changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
         raise ValueError(f"resume needs the same training settings; these differ: {changed}")
