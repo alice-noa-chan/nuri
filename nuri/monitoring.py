@@ -85,7 +85,7 @@ class TrainingMonitor:
         metrics = {"loss": f"{record['loss']:.4f}", "lr": f"{record['lr']:.2e}",
                    "grad": f"{record['grad_norm']:.2f}", "tokens": f"{record['tokens']:,}",
                    "tok/s": f"{tokens_per_second:.0f}"}
-        for key in ("denoise", "length", "fast", "reasoning", "moe_balance", "moe_z"):
+        for key in ("denoise", "length", "fast", "reasoning", "cross_mode", "moe_balance", "moe_z"):
             if key in record:
                 metrics[key] = f"{record[key]:.4f}"
         self.bar.set_postfix(metrics, refresh=False)
@@ -112,7 +112,7 @@ class TrainingMonitor:
             scalars["train/reasoning_depth_max"] = max(depth)
         else:
             scalars["train/reasoning_depth"] = depth
-        for key in ("denoise", "length", "fast", "reasoning"):
+        for key in ("denoise", "length", "fast", "reasoning", "cross_mode"):
             if key in record:
                 scalars[f"loss/{task}/{key}"] = record[key]
         for key in ("moe_balance", "moe_z"):
