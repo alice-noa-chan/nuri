@@ -144,7 +144,7 @@ def test_train_script_seeds_before_scratch_initialization(monkeypatch):
     spec.loader.exec_module(script)
     captured = []
 
-    monkeypatch.setattr(script, "TokenCorpus", lambda _: object())
+    monkeypatch.setattr(script, "open_corpus", lambda _: object())
     monkeypatch.setattr(script, "base_stage", lambda *args: ({}, {"mlm": 1.0}))
 
     def capture_initialization(model, *args, **kwargs):
