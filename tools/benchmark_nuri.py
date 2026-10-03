@@ -117,6 +117,8 @@ def run_benchmark(
     for _ in range(warmup):
         one_iteration()
     synchronize()
+    for layer in model.moe_layers():
+        layer.used_backends.clear()
     if runtime_device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(runtime_device)
     elapsed = []
@@ -132,6 +134,9 @@ def run_benchmark(
     input_tokens = batch_size * input_length * iterations
     canvas_tokens = batch_size * output_length * iterations if task in {"denoise", "generate"} else 0
     sorted_times = sorted(elapsed)
+    expert_backends = sorted({backend for layer in model.moe_layers() for backend in layer.used_backends})
+    actual_moe_backend = {(): "not_run", ("loop",): "portable_expert_loop", ("grouped",): "grouped_mm"}.get(
+        tuple(expert_backends), "mixed_grouped_and_loop") if config.moe is not None else "dense"
     return {
         "input_kind": "synthetic_random_tokens_not_a_quality_evaluation",
         "task": task,
@@ -151,7 +156,9 @@ def run_benchmark(
         "warmup_iterations": warmup,
         "measured_iterations": iterations,
         "total_parameters": sum(p.numel() for p in model.parameters()),
-        "moe_backend": "portable_expert_loop" if config.moe is not None else "dense",
+        "moe_backend_requested": config.moe.backend if config.moe is not None else "dense",
+        "moe_backend": actual_moe_backend,
+        "moe_expert_paths_used": expert_backends,
         "latency_seconds": {
             "mean": statistics.mean(elapsed),
             "median": statistics.median(elapsed),
@@ -178,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", choices=["mlm", "denoise", "embed-fast", "embed-reasoning", "generate"], default="denoise")
     parser.add_argument("--training", action="store_true")
     parser.add_argument("--native-gqa", action="store_true", help="use compact GQA heads in supported SDPA")
+    parser.add_argument("--moe-backend", choices=["loop", "grouped"], help="override the configured expert backend")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--batch-size", type=int, default=1)
@@ -191,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="Optional JSON output file")
     args = parser.parse_args(argv)
     config = NuriConfig.load(args.config) if args.config else PRESETS[args.preset]()
+    if args.moe_backend is not None:
+        if config.moe is None:
+            parser.error("--moe-backend requires a MoE model configuration")
+        config.moe.backend = args.moe_backend
     results = run_benchmark(
         config, task=args.task, training=args.training, device=args.device, dtype=args.dtype,
         batch_size=args.batch_size, input_length=args.input_length, output_length=args.output_length,

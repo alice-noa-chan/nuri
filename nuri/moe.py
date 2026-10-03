@@ -25,6 +25,8 @@ class MoEFFN(nn.Module):
                  num_shared_experts: int, backend: str = "loop"):
         super().__init__()
         self.backend = backend
+        self.last_backend = "not_run"
+        self.used_backends: set[str] = set()
         if not 2 <= top_k <= num_experts:
             # With top_k=1 the renormalized weight is always 1, so the task loss
             # would no longer train the router. That variant needs its own gate.
@@ -88,20 +90,45 @@ class MoEFFN(nn.Module):
         """SwiGLU of each expert on its contiguous slice of `grouped` (rows sorted by expert)."""
         if self.backend == "grouped":
             dtype = _compute_dtype(grouped)
-            if _grouped_mm_usable(grouped, dtype, self.w_gate, self.w_down):
+            if _grouped_mm_usable(grouped, dtype, self.w_gate, self.w_up, self.w_down):
                 try:
-                    x = grouped.to(dtype)
+                    x = grouped.to(dtype).contiguous()
                     offsets = counts.cumsum(0).to(torch.int32)  # end row of each expert's slice
                     gate = _grouped_matmul(x, self.w_gate, offsets)
                     up = _grouped_matmul(x, self.w_up, offsets)
-                    return _grouped_matmul(F.silu(gate) * up, self.w_down, offsets)
-                except RuntimeError:
-                    pass  # an unsupported kernel/device combination: use the loop below
+                    result = _grouped_matmul(F.silu(gate) * up, self.w_down, offsets)
+                except RuntimeError as error:
+                    if not _unsupported_grouped_kernel(error):
+                        raise
+                else:
+                    self.last_backend = "grouped"
+                    self.used_backends.add("grouped")
+                    return result
         outputs = []
         for e, rows in enumerate(grouped.split(counts.tolist())):
             if rows.shape[0]:
                 outputs.append((F.silu(rows @ self.w_gate[e]) * (rows @ self.w_up[e])) @ self.w_down[e])
-        return torch.cat(outputs)
+        result = torch.cat(outputs)
+        self.last_backend = "loop"
+        self.used_backends.add("loop")
+        return result
+
+
+def _unsupported_grouped_kernel(error: RuntimeError) -> bool:
+    """Fall back for known unavailable kernels; preserve memory and unknown failures."""
+    if isinstance(error, torch.OutOfMemoryError):
+        return False
+    if isinstance(error, NotImplementedError):
+        return True
+    message = str(error).casefold()
+    if "not implemented for" in message or "no kernel image is available" in message:
+        return True
+    if "could not run 'aten::_grouped_mm'" in message:
+        return True
+    operation = any(name in message for name in ("grouped_mm", "grouped mm", "grouped gemm"))
+    unavailable = any(reason in message for reason in (
+        "not supported on", "only supported on", "not compiled", "not available"))
+    return operation and unavailable
 
 
 def _compute_dtype(x: torch.Tensor) -> torch.dtype:
@@ -111,7 +138,7 @@ def _compute_dtype(x: torch.Tensor) -> torch.dtype:
     inputs to this dtype itself.
     """
     device = x.device.type
-    if torch.is_autocast_enabled(device):
+    if x.dtype in {torch.float16, torch.bfloat16, torch.float32} and torch.is_autocast_enabled(device):
         return torch.get_autocast_dtype(device)
     return x.dtype
 
@@ -119,9 +146,10 @@ def _compute_dtype(x: torch.Tensor) -> torch.dtype:
 def grouped_mm_supported(device_type: str, dtype: torch.dtype, capability: tuple[int, int] | None) -> bool:
     """Where torch._grouped_mm is known to work.
 
-    CUDA: bf16 on compute capability 9.0+ (H100 class) only; A100 (8.0) and
-    other dtypes must use the loop. CPU: float32, the case this repository
-    tests. Everything else uses the loop.
+    Conservatively allow CUDA bf16 on compute capability 9.0+ and CPU
+    float32. Older/build-specific kernels vary, so actual unsupported kernels
+    still fall back. Newer Ampere support is not enabled by this policy until
+    checked on that runtime; this is not a hardware performance claim.
     """
     if device_type == "cuda":
         return dtype == torch.bfloat16 and capability is not None and capability >= (9, 0)
@@ -131,7 +159,11 @@ def grouped_mm_supported(device_type: str, dtype: torch.dtype, capability: tuple
 
 
 def _grouped_mm_usable(x: torch.Tensor, dtype: torch.dtype, *weights: torch.Tensor) -> bool:
-    """The op exists, the device/dtype pair is supported, and every stride is a multiple of 16 bytes."""
+    """Check known device/dtype support and byte-aligned dimensions.
+
+    Operation inputs are made contiguous after casting, so these dimensions
+    describe the row strides of the matrices that the kernel actually sees.
+    """
     if not hasattr(torch, "_grouped_mm"):
         return False
     capability = torch.cuda.get_device_capability(x.device) if x.device.type == "cuda" else None
@@ -144,7 +176,7 @@ def _grouped_mm_usable(x: torch.Tensor, dtype: torch.dtype, *weights: torch.Tens
 
 def _grouped_matmul(x: torch.Tensor, weight: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     """Rows offsets[e-1]:offsets[e] of x times weight[e], for every expert e, in one call."""
-    out = torch._grouped_mm(x, weight.to(x.dtype), offs=offsets)
+    out = torch._grouped_mm(x.contiguous(), weight.to(x.dtype).contiguous(), offs=offsets)
     if out.requires_grad:
         # The backward of _grouped_mm rejects gradients with zero strides (e.g.
         # from .sum()), so hand it a contiguous gradient.
