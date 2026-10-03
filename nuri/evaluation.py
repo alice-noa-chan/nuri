@@ -198,9 +198,14 @@ def span_denoising(model: NuriModel, documents: Sequence[list[int]], ratios=(0.1
                 count = max(1, round(ratio * length))
                 loss_mask[row, torch.randperm(length, generator=generator)[:count]] = True
             canvas = spans.masked_fill(loss_mask, config.mask_id)
+            canvas, canvas_valid = canvas.to(device), canvas_valid.to(device)
             x, valid = model.encode(ids.to(device), valid.to(device))
-            cache = model.generation_memory(x, valid, model.reason(x, valid, steps))
-            hidden = model.readout_hidden(canvas.to(device), canvas_valid.to(device), cache)
+            if config.draft_feedback:
+                r = model.reason(x, valid, steps, draft=(canvas, canvas_valid))
+            else:
+                r = model.reason(x, valid, steps)
+            cache = model.generation_memory(x, valid, r)
+            hidden = model.readout_hidden(canvas, canvas_valid, cache)
             mask = loss_mask.to(device)
             logits = model.vocab_logits(hidden[mask]).float()
             labels = spans.to(device)[mask]

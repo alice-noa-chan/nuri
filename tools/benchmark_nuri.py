@@ -101,7 +101,10 @@ def run_benchmark(
                 loss_mask[:, 0] = True
                 canvas = response.masked_fill(loss_mask, config.mask_id)
                 x, valid = model.encode(clean_input, valid_input)
-                r = model.reason(x, valid, steps)
+                if config.draft_feedback:
+                    r = model.reason(x, valid, steps, draft=(canvas, valid_canvas))
+                else:
+                    r = model.reason(x, valid, steps)
                 cache = model.generation_memory(x, valid, r)
                 hidden = model.readout_hidden(canvas, valid_canvas, cache)
                 loss = sample_mean_ce(model.vocab_logits(hidden[loss_mask]), response, loss_mask)

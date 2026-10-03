@@ -1,8 +1,9 @@
 """Mask-Predict style refinement sampler (ARCHITECTURE.md §7).
 
-X and R are computed once per request. Each round fills every MASK position
+By default X and R are computed once per request. Each round fills every MASK position
 in parallel, then re-masks the least confident positions. After the last
-round the answer is cut at the first EOS.
+round the answer is cut at the first EOS. Optional draft feedback recomputes
+R from the current corrupted canvas before each round.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ class GenerationResult:
     lengths: torch.Tensor            # canvas length used for each sample
     ended_with_eos: list[bool]       # False means the model never wrote EOS
     history: list[torch.Tensor] = field(default_factory=list)  # canvas after each round
-    reasoning_steps: torch.Tensor | None = None  # core steps each sample ran (< T only with halting)
+    reasoning_steps: torch.Tensor | None = None  # total core steps per sample, including feedback calls
 
 
 @torch.no_grad()
@@ -52,7 +53,8 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         revisit unlikely choices.
     halt_tol: experimental training-free halting of the core (see
         RecurrentReasoningCore); `steps` becomes an upper bound and
-        result.reasoning_steps reports what each sample used.
+        result.reasoning_steps sums what each sample used across all core
+        calls, including the initial draft-free call and any feedback rounds.
     """
     config = model.config
     steps = config.default_depth if steps is None else steps
@@ -71,12 +73,13 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     x, valid = model.encode(input_ids, attention_mask)
     # halt_tol is passed only when used, so models that override reason() keep working.
     r = model.reason(x, valid, steps) if halt_tol is None else model.reason(x, valid, steps, halt_tol=halt_tol)
-    reasoning_steps = model.core.last_steps_used
+    used = model.core.last_steps_used
+    reasoning_steps = used.clone() if used is not None else None
     if transform_r is not None:
         r = transform_r(r)
     lengths = _choose_lengths(model, x, valid, r, canvas_len, input_ids.shape[0]).clamp(1, max_len)
-    cache = model.generation_memory(x, valid, r)
     draft_feedback = model.config.draft_feedback
+    cache = None if draft_feedback else model.generation_memory(x, valid, r)
 
     batch, width = input_ids.shape[0], int(lengths.max())
     positions = torch.arange(width, device=input_ids.device)
@@ -89,7 +92,12 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     for round_index in range(1, rounds + 1):
         masked = (canvas == config.mask_id) & canvas_valid
         if draft_feedback:  # experimental: R re-reads the current draft every round
-            r = model.reason(x, valid, steps, draft=(canvas, canvas_valid))
+            reason_kwargs = {"draft": (canvas, canvas_valid)}
+            if halt_tol is not None:
+                reason_kwargs["halt_tol"] = halt_tol
+            r = model.reason(x, valid, steps, **reason_kwargs)
+            used = model.core.last_steps_used
+            reasoning_steps = reasoning_steps + used if reasoning_steps is not None and used is not None else None
             if transform_r is not None:
                 r = transform_r(r)
             cache = model.generation_memory(x, valid, r)
