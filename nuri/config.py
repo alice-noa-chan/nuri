@@ -58,6 +58,10 @@ class NuriConfig:
     # "GLLGLG". Local layers see keys with |i - j| <= local_radius.
     attention_schedule: str = ""
     local_radius: int = 64
+    # Experimental hypothesis slot groups (§9 idea 2, OFF = 1): the K slots form
+    # this many groups that attend only within their group in every core step
+    # except the last one, where all slots merge.
+    slot_groups: int = 1
     moe: Optional[MoEConfig] = None
 
     @property
@@ -97,6 +101,8 @@ class NuriConfig:
                 raise ValueError("attention_schedule needs one 'G' or 'L' per input layer")
             if self.local_radius < 1:
                 raise ValueError("local_radius must be >= 1")
+        if self.slot_groups < 1 or self.latent_slots % self.slot_groups:
+            raise ValueError("slot_groups must be >= 1 and divide latent_slots")
         if self.num_labels < 0:
             raise ValueError("num_labels must be >= 0")
         special = (self.pad_id, self.mask_id, self.eos_id)

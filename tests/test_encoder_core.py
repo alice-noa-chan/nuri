@@ -1,3 +1,4 @@
+import pytest
 import torch
 from torch import nn
 
@@ -112,3 +113,34 @@ def test_halted_samples_keep_their_own_state():
             alone = core(x[row:row + 1], valid[row:row + 1], steps=steps)
             assert torch.allclose(out[row], alone[0], atol=1e-5)
     assert all(1 <= s <= 6 for s in used)
+
+
+def test_slot_groups_stay_separate_until_the_last_step():
+    torch.manual_seed(0)
+    config = tiny_config(slot_groups=2)  # K = 4: slots {0, 1} and {2, 3}
+    core = RecurrentReasoningCore(config)
+    x = torch.randn(1, 6, config.hidden_size)
+    valid = torch.ones(1, 6, dtype=torch.bool)
+    with torch.no_grad():
+        _, states = core(x, valid, steps=3, return_states=True)
+        core.slots[2:] += 1.0  # change group 2 only
+        _, changed = core(x, valid, steps=3, return_states=True)
+    # Steps 1 and 2 are grouped: group 1 never sees group 2 ...
+    assert torch.allclose(states[2][0, :2], changed[2][0, :2], atol=1e-6)
+    # ... and the last step merges all slots.
+    assert not torch.allclose(states[3][0, :2], changed[3][0, :2], atol=1e-4)
+
+
+def test_one_step_with_groups_equals_no_groups():
+    torch.manual_seed(0)
+    grouped = RecurrentReasoningCore(tiny_config(slot_groups=2))
+    torch.manual_seed(0)
+    plain = RecurrentReasoningCore(tiny_config())
+    x = torch.randn(2, 6, plain.slots.shape[1])
+    valid = torch.ones(2, 6, dtype=torch.bool)
+    assert torch.equal(grouped(x, valid, steps=1), plain(x, valid, steps=1))  # the only step is the last
+
+
+def test_bad_slot_groups_are_rejected():
+    with pytest.raises(ValueError):
+        tiny_config(slot_groups=3)  # K = 4 is not divisible by 3

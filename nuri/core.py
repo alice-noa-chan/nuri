@@ -38,16 +38,21 @@ class RecurrentReasoningCore(nn.Module):
         self.gate_logits = nn.Parameter(torch.full((3,), gate_logit))
         self.final_norm = RMSNorm(d, config.norm_eps)
         nn.init.normal_(self.slots, std=config.initializer_range)
+        # Hypothesis groups: slot i may see slot j in early steps only if they share a group.
+        group = torch.arange(config.latent_slots) // (config.latent_slots // config.slot_groups)
+        self.register_buffer("group_mask", group[:, None] == group[None, :], persistent=False)
+        self.grouped = config.slot_groups > 1
         # Steps each sample of the last forward actually ran ([B]); differs from
         # `steps` only when halting is on.
         self.last_steps_used: torch.Tensor | None = None
         # With a MoE core: expert assignment counts of every step of the last forward.
         self.last_step_expert_counts: list[torch.Tensor] = []
 
-    def _step(self, r, kv, valid, gates):
+    def _step(self, r, kv, valid, gates, grouped: bool = False):
         g_cross, g_self, g_ffn = gates
         r = r + g_cross * self.cross_attn(self.cross_norm(r), kv=kv, key_mask=valid)
-        r = r + g_self * self.self_attn(self.self_norm(r))
+        slot_keys = self.group_mask.expand(r.shape[0], -1, -1) if grouped else None
+        r = r + g_self * self.self_attn(self.self_norm(r), key_mask=slot_keys)
         r = r + g_ffn * self.ffn(self.ffn_norm(r))
         if isinstance(self.ffn, MoEFFN) and self.ffn.last_aux is not None:
             self.last_step_expert_counts.append(self.ffn.last_aux["counts"])
@@ -77,8 +82,8 @@ class RecurrentReasoningCore(nn.Module):
         used = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
         if halt_tol is None:
             states = [r] if return_states else None
-            for _ in range(steps):
-                r = self._step(r, kv, valid, gates)
+            for step in range(steps):
+                r = self._step(r, kv, valid, gates, grouped=self.grouped and step < steps - 1)
                 if return_states:
                     states.append(r)
             self.last_steps_used = used + steps
@@ -86,11 +91,12 @@ class RecurrentReasoningCore(nn.Module):
             return (out, states) if return_states else out
 
         active = torch.arange(x.shape[0], device=x.device)
-        for _ in range(steps):
+        for step in range(steps):
             if active.numel() == 0:
                 break
             before = r[active]
-            after = self._step(before, (kv[0][active], kv[1][active]), valid[active], gates)
+            after = self._step(before, (kv[0][active], kv[1][active]), valid[active], gates,
+                               grouped=self.grouped and step < steps - 1)
             r = r.index_copy(0, active, after)
             used[active] += 1
             change = (after - before).flatten(1).norm(dim=1) / before.flatten(1).norm(dim=1).clamp_min(1e-12)
