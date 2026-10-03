@@ -116,3 +116,25 @@ def test_resume_matches_uninterrupted_run(tmp_path):
         assert torch.equal(tensor, resumed.state_dict()[name]), name
     full_last = json.loads((tmp_path / "full" / "train_log.jsonl").read_text().splitlines()[-1])
     assert records[-1]["tokens"] == full_last["tokens"]
+
+
+def test_resume_checks_settings_and_handles_finished_runs(tmp_path):
+    import pytest
+
+    config = tiny_config()
+    corpus = toy_corpus(tmp_path / "corpus", count=50)
+
+    def run(out, steps=6, save_every=3, resume=None, log_every=1):
+        torch.manual_seed(0)
+        model = NuriModel(config)
+        tasks, mix = base_stage(corpus, config, batch_size=4)
+        settings = TrainSettings(out_dir=str(tmp_path / out), total_steps=steps, peak_lr=1e-3, warmup_steps=1,
+                                 save_every=save_every, log_every=log_every, mix=mix)
+        return train(model, tasks, settings, device=torch.device("cpu"), resume_from=resume)
+
+    run("first")
+    state = tmp_path / "first" / "training_state"
+    with pytest.raises(ValueError, match="total_steps"):
+        run("longer", steps=8, resume=state / "step-3.pt")
+    assert run("cadence", save_every=0, log_every=2, resume=state / "step-3.pt")  # output cadence may change
+    assert run("done", resume=state / "final.pt") == []  # nothing left to do

@@ -35,7 +35,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nuri.checkpoint import load_pretrained  # noqa: E402
+from nuri.checkpoint import load_pretrained, training_state_config  # noqa: E402
 from nuri.config import PRESETS  # noqa: E402
 from nuri.data import TokenCorpus, chat_prompt_text  # noqa: E402
 from nuri.model import NuriModel  # noqa: E402
@@ -49,7 +49,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage", choices=["base", "it", "embed"], required=True)
     p.add_argument("--preset", choices=sorted(PRESETS), default="release-dense", help="model size for --stage base")
-    p.add_argument("--init", help="checkpoint folder to start from (required for it/embed)")
+    p.add_argument("--init", help="checkpoint folder to start from (required for it/embed unless --resume)")
     p.add_argument("--out", required=True)
     p.add_argument("--steps", type=int, required=True)
     p.add_argument("--batch-size", type=int, default=32)
@@ -84,15 +84,18 @@ def main(argv=None):
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     tokenizer_path = args.tokenizer
-    if args.stage != "base" and not tokenizer_path and (Path(require(args.init, "--init")) / "tokenizer.json").exists():
+    if not tokenizer_path and args.init and (Path(args.init) / "tokenizer.json").exists():
         tokenizer_path = args.init  # every checkpoint carries a copy of its tokenizer
     tokenizer = load_tokenizer(tokenizer_path) if tokenizer_path else None
+    if args.stage == "base" and tokenizer is None:
+        print("warning: no --tokenizer; using the preset vocabulary size and saving no tokenizer files")
 
-    if args.stage == "base":
+    if args.resume:
+        # The interrupted run decides the model shape; its weights are loaded by train().
+        model = NuriModel(training_state_config(args.resume))
+    elif args.stage == "base":
         # The embedding needs exactly one row per token id of the real tokenizer.
         overrides = {"vocab_size": vocab_size(tokenizer)} if tokenizer else {}
-        if tokenizer is None:
-            print("warning: no --tokenizer; using the preset vocabulary size and saving no tokenizer files")
         model = NuriModel(PRESETS[args.preset](**overrides))
     else:
         model = load_pretrained(require(args.init, "--init"))
@@ -126,7 +129,10 @@ def main(argv=None):
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}")
     records = train(model, tasks, settings, resume_from=args.resume)
-    print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
+    if records:
+        print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
+    else:
+        print("nothing to do: the resumed run had already finished")
 
 
 if __name__ == "__main__":

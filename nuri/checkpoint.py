@@ -65,6 +65,11 @@ def save_training_state(path: str | Path, model, optimizer, step: int, extra: di
     }, path)
 
 
+def training_state_config(path: str | Path) -> NuriConfig:
+    """The model config stored in a training state, to rebuild the model before resuming."""
+    return NuriConfig.from_dict(torch.load(path, map_location="cpu", weights_only=False)["config"])
+
+
 def load_training_state(path: str | Path, model, optimizer) -> dict:
     """Restore a run. Refuses a state saved with a different model config.
 

@@ -152,7 +152,7 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     totals = {"tokens": 0, "targets": 0}
     start_step = 0
     if resume_from is not None:
-        start_step, totals = _resume(resume_from, model, optimizer, rng, tasks)
+        start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
     records, started = [], time.time()
 
     with open(out / "train_log.jsonl", "a", encoding="utf-8") as log:
@@ -197,9 +197,24 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
     return state
 
 
-def _resume(path, model, optimizer, rng: random.Random, tasks: dict[str, Task]) -> tuple[int, dict]:
+# Settings that may change between the interrupted and the resumed run; they
+# do not change what is computed. Everything else must match exactly.
+RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir")
+
+
+def _comparable_settings(settings: TrainSettings) -> dict:
+    data = {k: v for k, v in asdict(settings).items() if k not in RESUME_FREE_SETTINGS}
+    return json.loads(json.dumps(data))  # tuples and lists compare equal after this
+
+
+def _resume(path, model, optimizer, rng: random.Random, tasks: dict[str, Task],
+            settings: TrainSettings) -> tuple[int, dict]:
     state = load_training_state(path, model, optimizer)  # also checks the config and restores torch/Python RNG
     extra = state["extra"]
+    saved, current = extra["settings"], _comparable_settings(settings)
+    if saved != current:
+        changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
+        raise ValueError(f"resume needs the same training settings; these differ: {changed}")
     rng.setstate(extra["random"]["trainer_rng"])
     for name, saved in extra["random"]["tasks"].items():
         if saved["rng"] is not None:
@@ -248,5 +263,6 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
         names.append("final")
     for name in names:
         save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
-        extra = {"totals": dict(totals), "random": _random_state(rng, tasks)}
+        extra = {"totals": dict(totals), "random": _random_state(rng, tasks),
+                 "settings": _comparable_settings(settings)}
         save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, extra)
