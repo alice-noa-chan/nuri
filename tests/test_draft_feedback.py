@@ -67,3 +67,14 @@ def test_draft_requires_the_flag():
     x, valid = model.encode(torch.randint(3, 128, (1, 4)))
     with pytest.raises(ValueError):
         model.reason(x, valid, 1, draft=(torch.tensor([[5]]), torch.ones(1, 1, dtype=torch.bool)))
+
+
+def test_draft_order_matters_to_reasoning():
+    model = make_model()
+    with torch.no_grad():
+        torch.nn.init.normal_(model.draft_positions, std=0.5)  # trained positions are not all zero
+        x, valid = model.encode(torch.randint(3, 128, (1, 6)))
+        canvas_valid = torch.ones(1, 3, dtype=torch.bool)
+        forward = model.reason(x, valid, 2, draft=(torch.tensor([[40, 41, 42]]), canvas_valid))
+        backward = model.reason(x, valid, 2, draft=(torch.tensor([[42, 41, 40]]), canvas_valid))
+    assert not torch.allclose(forward, backward, atol=1e-5)

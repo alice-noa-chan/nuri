@@ -38,6 +38,10 @@ class NuriModel(nn.Module):
         self.task_head = nn.Linear(2 * d, config.num_labels, bias=False) if config.num_labels else None
         # Marks draft tokens in the core memory when draft feedback is on.
         self.draft_embedding = nn.Parameter(torch.zeros(d)) if config.draft_feedback else None
+        # Position of each draft token inside the canvas. Without it the core would see
+        # the draft as an unordered set (it has no RoPE on its memory).
+        self.draft_positions = (nn.Parameter(torch.zeros(config.max_response_len, d))
+                                if config.draft_feedback else None)
         self.structure_head = nn.Linear(d, config.num_labels, bias=False) if config.num_labels else None
         self.apply(self._init_weights)
 
@@ -94,7 +98,10 @@ class NuriModel(nn.Module):
             if self.draft_embedding is None:
                 raise ValueError("draft feedback is off in this model's config")
             canvas, canvas_valid = draft
-            drafted = self.embedding(canvas) + self.draft_embedding.to(x.dtype)
+            if canvas.shape[1] > self.draft_positions.shape[0]:
+                raise ValueError("draft is longer than max_response_len")
+            positions = self.draft_positions[:canvas.shape[1]]
+            drafted = self.embedding(canvas) + self.draft_embedding.to(x.dtype) + positions.to(x.dtype)
             x, valid = torch.cat([x, drafted.to(x.dtype)], dim=1), torch.cat([valid, canvas_valid.bool()], dim=1)
         return self.core(x, valid, steps, return_states=return_states, halt_tol=halt_tol)
 
