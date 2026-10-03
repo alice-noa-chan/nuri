@@ -212,3 +212,61 @@ def test_invalid_resume_does_not_purge_event_history(tmp_path):
               resume_from=tmp_path / "run/training_state/step-3.pt")
     assert sorted((tmp_path / "events").iterdir()) == previous_files
     assert [p.step for p in read_events(tmp_path / "events").Scalars("loss/total")] == [1, 3, 5, 6]
+
+
+@pytest.mark.parametrize("moe", [False, True])
+def test_accumulated_depths_and_mixed_task_losses_write_numeric_events(tmp_path, monkeypatch, capsys, moe):
+    pytest.importorskip("tensorboard")
+    model, tasks, settings = fresh_run(tmp_path, moe=moe)
+    settings.grad_accum = 3
+    settings.mix = {"mlm": 0.5, "span": 0.5}
+    settings.progress = True
+    settings.tensorboard_dir = str(tmp_path / "events")
+    counts_per_microbatch = []
+    active_depths = []
+    original_aux = model.pop_moe_aux
+    original_begin = TrainingMonitor.begin_step
+
+    def capture_begin(self, task, depth, schedule_phase, **kwargs):
+        active_depths.append(depth)
+        original_begin(self, task, depth, schedule_phase, **kwargs)
+
+    def capture_aux():
+        aux = original_aux()
+        counts_per_microbatch.append([count.tolist() for count in aux["counts"]])
+        return aux
+
+    monkeypatch.setattr(model, "pop_moe_aux", capture_aux)
+    monkeypatch.setattr(TrainingMonitor, "begin_step", capture_begin)
+    records = train(model, tasks, settings, device=torch.device("cpu"))
+    output = capsys.readouterr().err
+    for text in ("micro=1/3", "micro=2/3", "micro=3/3"):
+        assert text in output
+    assert any(isinstance(record["depth"], list) for record in records)
+    assert any("+" in record["task"] for record in records)
+    events = read_events(tmp_path / "events")
+    assert [p.step for p in events.Scalars("loss/total")] == [1, 3, 5, 6]
+    for record in records:
+        depths = active_depths[3 * record["step"]:3 * (record["step"] + 1)]
+        expected = depths[0] if len(set(depths)) == 1 else depths
+        assert record["depth"] == expected
+    for key, reducer in {"mean": lambda depths: sum(depths) / len(depths), "min": min, "max": max}.items():
+        expected = {record["step"] + 1: reducer(record["depth"])
+                    for record in records if isinstance(record["depth"], list) and record["task"] != "mlm"}
+        points = events.Scalars(f"train/reasoning_depth_{key}")
+        assert {point.step: point.value for point in points} == pytest.approx(expected)
+    mixed_steps = [record["step"] + 1 for record in records if "+" in record["task"]]
+    assert [p.step for p in events.Scalars("loss/mixed/total")] == mixed_steps
+    for task in ("mlm", "span"):
+        if f"loss/{task}/total" in events.Tags()["scalars"]:
+            assert not (set(p.step for p in events.Scalars(f"loss/{task}/total")) & set(mixed_steps))
+    if moe:
+        for record in records:
+            micro_counts = counts_per_microbatch[3 * record["step"]:3 * (record["step"] + 1)]
+            expected = [[sum(counts[layer][expert] for counts in micro_counts if layer < len(counts))
+                         for expert in range(4)] for layer in range(max(map(len, micro_counts)))]
+            assert record["expert_counts"] == expected
+            for layer, counts in enumerate(expected):
+                for expert, count in enumerate(counts):
+                    points = events.Scalars(f"moe/layer_{layer}/expert_{expert}_assignments")
+                    assert next(point.value for point in points if point.step == record["step"] + 1) == count

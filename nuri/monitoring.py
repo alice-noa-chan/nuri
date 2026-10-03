@@ -54,8 +54,11 @@ class TrainingMonitor:
             finally:
                 self.bar.close()
 
-    def begin_step(self, task: str, depth: int, schedule_phase: str):
+    def begin_step(self, task: str, depth: int, schedule_phase: str,
+                   micro: int = 1, micro_count: int = 1):
         self.context = f"{self.stage}/{task} T={depth} {schedule_phase}"
+        if micro_count > 1:
+            self.context += f" micro={micro}/{micro_count}"
         self.phase("batch")
 
     def phase(self, operation: str, force: bool = False):
@@ -98,9 +101,17 @@ class TrainingMonitor:
             "data/processed_tokens": record["tokens"], f"batch/{kind}/targets": batch_targets,
             "performance/tokens_per_second": tokens_per_second,
             "performance/steps_per_second": steps_per_second,
-            "train/reasoning_depth": record["depth"] if kind != "mlm" else 0,
             "train/schedule_phase": {"warmup": 0, "stable": 1, "decay": 2}[schedule_phase],
         }
+        depth = record["depth"] if kind != "mlm" else 0
+        if isinstance(depth, (tuple, list)):
+            # An accumulated update can sample several recurrent depths.
+            # Keep the range explicit instead of labeling it as one depth.
+            scalars["train/reasoning_depth_mean"] = sum(depth) / len(depth)
+            scalars["train/reasoning_depth_min"] = min(depth)
+            scalars["train/reasoning_depth_max"] = max(depth)
+        else:
+            scalars["train/reasoning_depth"] = depth
         for key in ("denoise", "length", "fast", "reasoning"):
             if key in record:
                 scalars[f"loss/{task}/{key}"] = record[key]
