@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -61,3 +62,15 @@ def test_factory_places_moe_layers():
     assert isinstance(build_ffn(config, "readout", 2), MoEFFN)
     assert isinstance(build_ffn(config, "core", 1), SwiGLU)
     assert isinstance(build_ffn(tiny_config(), "input", 2), SwiGLU)
+
+
+def test_rejects_top1_routing():
+    with pytest.raises(ValueError):
+        MoEFFN(hidden_size=16, num_experts=4, expert_ffn_size=8, top_k=1, num_shared_experts=0)
+
+
+def test_router_stays_fp32_under_autocast():
+    moe = make_moe()
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        moe(torch.randn(2, 3, 16))
+    assert moe.last_aux["z"].dtype == torch.float32

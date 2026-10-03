@@ -28,6 +28,19 @@ def test_roundtrip(tmp_path):
     assert isinstance(loaded.moe, MoEConfig)
 
 
-def test_rejects_bad_heads():
+@pytest.mark.parametrize("overrides", [
+    dict(hidden_size=100, num_heads=8),
+    dict(ffn_size=0),
+    dict(train_depths=()),
+    dict(train_depths=(2, -1)),
+    dict(gate_init=1.0),
+    dict(norm_eps=0.0),
+    dict(mask_id=0),
+    dict(eos_id=40000),
+    dict(moe=MoEConfig(top_k=1)),
+    dict(moe=MoEConfig(input_layers=(7,))),
+    dict(moe=MoEConfig(readout_layers=(3,))),
+])
+def test_rejects_invalid_configs(overrides):
     with pytest.raises(ValueError):
-        NuriConfig(hidden_size=100, num_heads=8)
+        NuriConfig(**overrides)

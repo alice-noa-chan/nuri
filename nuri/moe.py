@@ -22,6 +22,10 @@ class MoEFFN(nn.Module):
     def __init__(self, hidden_size: int, num_experts: int, expert_ffn_size: int, top_k: int,
                  num_shared_experts: int):
         super().__init__()
+        if not 2 <= top_k <= num_experts:
+            # With top_k=1 the renormalized weight is always 1, so the task loss
+            # would no longer train the router. That variant needs its own gate.
+            raise ValueError("top_k must be between 2 and num_experts")
         self.num_experts = num_experts
         self.top_k = top_k
         self.router = nn.Linear(hidden_size, num_experts, bias=False)
@@ -45,8 +49,10 @@ class MoEFFN(nn.Module):
             self.last_aux = None
             return out.view(shape)
 
-        logits = F.linear(h.float(), self.router.weight.float())
-        probs = logits.softmax(dim=-1)
+        # Router math must stay in fp32 even inside a bf16 autocast region.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = F.linear(h.float(), self.router.weight.float())
+            probs = logits.softmax(dim=-1)
         top_p, top_i = probs.topk(self.top_k, dim=-1)
         weights = (top_p / top_p.sum(dim=-1, keepdim=True)).to(h.dtype)
 

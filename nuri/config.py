@@ -60,10 +60,42 @@ class NuriConfig:
             self.moe.input_layers = tuple(self.moe.input_layers)
             self.moe.readout_layers = tuple(self.moe.readout_layers)
         self.train_depths = tuple(self.train_depths)
+        self.validate()
+
+    def validate(self) -> None:
+        """Fail early with a clear message instead of deep inside a forward pass."""
+        sizes = ("vocab_size", "hidden_size", "num_heads", "ffn_size", "input_layers", "readout_layers",
+                 "latent_slots", "max_input_len", "max_response_len", "embed_dim")
+        for name in sizes:
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
         if self.head_dim % 2:
             raise ValueError("RoPE needs an even head_dim")
+        if not self.train_depths or min(self.train_depths) < 0 or self.default_depth < 0:
+            raise ValueError("reasoning depths must be >= 0 and train_depths must not be empty")
+        if self.refine_rounds <= 0:
+            raise ValueError("refine_rounds must be positive")
+        if not 0.0 < self.gate_init < 1.0:
+            raise ValueError("gate_init is a sigmoid output and must be in (0, 1)")
+        if self.norm_eps <= 0 or self.rope_theta <= 0 or self.initializer_range <= 0:
+            raise ValueError("norm_eps, rope_theta and initializer_range must be positive")
+        if self.num_labels < 0:
+            raise ValueError("num_labels must be >= 0")
+        special = (self.pad_id, self.mask_id, self.eos_id)
+        if len(set(special)) != 3 or not all(0 <= i < self.vocab_size for i in special):
+            raise ValueError("pad_id, mask_id and eos_id must be distinct ids inside the vocabulary")
+        if self.moe is not None:
+            moe = self.moe
+            if moe.num_experts <= 0 or moe.expert_ffn_size <= 0 or moe.num_shared_experts < 0:
+                raise ValueError("MoE sizes must be positive")
+            if not 2 <= moe.top_k <= moe.num_experts:
+                raise ValueError("MoE top_k must be between 2 and num_experts")
+            if not all(1 <= i <= self.input_layers for i in moe.input_layers):
+                raise ValueError("MoE input_layers must be 1-based indices of input layers")
+            if not all(1 <= i <= self.readout_layers for i in moe.readout_layers):
+                raise ValueError("MoE readout_layers must be 1-based indices of readout layers")
 
     def to_dict(self) -> dict:
         return asdict(self)
