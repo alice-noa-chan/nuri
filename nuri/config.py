@@ -17,6 +17,9 @@ class MoEConfig:
     # 1-based layer indices, matching the numbering in ARCHITECTURE.md §9.
     input_layers: tuple[int, ...] = (2, 4, 6, 8, 10)
     readout_layers: tuple[int, ...] = (2,)
+    # Experimental (§9, OFF): MoE FFN in the shared reasoning core. The router
+    # can pick different experts at different steps although the weights are shared.
+    core: bool = False
     # Loss weights are calibrated from logs (§9); these are starting points.
     balance_loss_weight: float = 0.01
     z_loss_weight: float = 0.001

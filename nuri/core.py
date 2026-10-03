@@ -8,7 +8,8 @@ import torch
 from torch import nn
 
 from .config import NuriConfig
-from .layers import Attention, RMSNorm, SwiGLU
+from .layers import Attention, RMSNorm
+from .moe import MoEFFN, build_ffn
 
 
 class RecurrentReasoningCore(nn.Module):
@@ -31,7 +32,7 @@ class RecurrentReasoningCore(nn.Module):
         self.self_norm = RMSNorm(d, config.norm_eps)
         self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps)
         self.ffn_norm = RMSNorm(d, config.norm_eps)
-        self.ffn = SwiGLU(d, config.ffn_size)
+        self.ffn = build_ffn(config, "core", 1)  # dense unless MoEConfig.core is on
         # Raw logits of the three sigmoid branch gates (cross, self, ffn).
         gate_logit = math.log(config.gate_init / (1 - config.gate_init))
         self.gate_logits = nn.Parameter(torch.full((3,), gate_logit))
@@ -40,12 +41,17 @@ class RecurrentReasoningCore(nn.Module):
         # Steps each sample of the last forward actually ran ([B]); differs from
         # `steps` only when halting is on.
         self.last_steps_used: torch.Tensor | None = None
+        # With a MoE core: expert assignment counts of every step of the last forward.
+        self.last_step_expert_counts: list[torch.Tensor] = []
 
     def _step(self, r, kv, valid, gates):
         g_cross, g_self, g_ffn = gates
         r = r + g_cross * self.cross_attn(self.cross_norm(r), kv=kv, key_mask=valid)
         r = r + g_self * self.self_attn(self.self_norm(r))
-        return r + g_ffn * self.ffn(self.ffn_norm(r))
+        r = r + g_ffn * self.ffn(self.ffn_norm(r))
+        if isinstance(self.ffn, MoEFFN) and self.ffn.last_aux is not None:
+            self.last_step_expert_counts.append(self.ffn.last_aux["counts"])
+        return r
 
     def forward(self, x: torch.Tensor, valid: torch.Tensor, steps: int, return_states: bool = False,
                 halt_tol: float | None = None):
@@ -66,6 +72,7 @@ class RecurrentReasoningCore(nn.Module):
             raise ValueError("halt_tol must be >= 0 and cannot be combined with return_states")
         kv = self.cross_attn.project_kv(x)
         gates = torch.sigmoid(self.gate_logits).to(x.dtype)
+        self.last_step_expert_counts = []
         r = self.slots.to(x.dtype).unsqueeze(0).expand(x.shape[0], -1, -1)
         used = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
         if halt_tol is None:

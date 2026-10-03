@@ -98,6 +98,7 @@ def build_ffn(config: NuriConfig, stack: str, layer_number: int) -> nn.Module:
     use_moe = moe is not None and (
         (stack == "input" and layer_number in moe.input_layers)
         or (stack == "readout" and layer_number in moe.readout_layers)
+        or (stack == "core" and moe.core)
     )
     if not use_moe:
         return SwiGLU(config.hidden_size, config.ffn_size)

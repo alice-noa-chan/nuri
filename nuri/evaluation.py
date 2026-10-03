@@ -269,6 +269,8 @@ def core_diagnostics(model: NuriModel, prompts: Sequence[list[int]], steps: int 
         if t > 0:
             update = (state - states[t - 1].float()).norm(dim=-1) / states[t - 1].float().norm(dim=-1).clamp_min(1e-12)
             row["relative_update"] = float(update.mean())
+            if model.core.last_step_expert_counts:  # MoE core: which experts each step used
+                row["expert_counts"] = model.core.last_step_expert_counts[t - 1].tolist()
         rows.append(row)
     return rows
 

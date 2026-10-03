@@ -74,3 +74,23 @@ def test_router_stays_fp32_under_autocast():
     with torch.autocast("cpu", dtype=torch.bfloat16):
         moe(torch.randn(2, 3, 16))
     assert moe.aux_records[-1]["z"].dtype == torch.float32
+
+
+def test_core_moe_routes_every_step():
+    from nuri.model import NuriModel
+
+    moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(), readout_layers=(), core=True)
+    torch.manual_seed(0)
+    model = NuriModel(tiny_config(moe=moe)).train()
+    assert isinstance(model.core.ffn, MoEFFN) and len(model.moe_layers()) == 1
+    ids = torch.randint(3, 128, (2, 6))
+    x, valid = model.encode(ids)
+    model.reason(x, valid, steps=3)
+    counts = model.core.last_step_expert_counts
+    assert len(counts) == 3 and all(int(c.sum()) == 2 * model.config.latent_slots * 2 for c in counts)
+    aux = model.pop_moe_aux()
+    assert aux["loss"] is not None and int(aux["counts"][0].sum()) == 3 * 2 * model.config.latent_slots * 2
+    with torch.no_grad():
+        model.eval()
+        model.reason(x, valid, steps=5, halt_tol=float("inf"))  # halting works with a MoE core
+        assert model.core.last_steps_used.tolist() == [1, 1]
