@@ -46,7 +46,10 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
         docs = corpus.sample(batch_size, rng, usable=lambda d: len(d) >= 2)  # one token on each side
         return build_span_batch(docs, config, rng, generator)
 
-    return {"mlm": Task("mlm", mlm_batch, rng, generator), "span": Task("span", span_batch, rng, generator)}
+    options = {"batch_size": batch_size, "corpus_documents": len(corpus),
+               "corpus_weights": getattr(corpus, "weights", None)}  # set for a MixedCorpus
+    return {"mlm": Task("mlm", mlm_batch, rng, generator, options),
+            "span": Task("span", span_batch, rng, generator, options)}
 
 
 def _usable_examples(examples: list, config: NuriConfig, name: str) -> list:
@@ -62,7 +65,8 @@ def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
     return Task(kind, lambda: build_instruction_batch(rng.sample(examples, min(batch_size, len(examples))),
-                                                      config, generator), rng, generator)
+                                                      config, generator), rng, generator,
+                {"batch_size": batch_size, "examples": len(examples)})
 
 
 def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0):
@@ -95,5 +99,6 @@ def embedding_stage(pairs: list, config: NuriConfig, batch_size: int, seed: int 
     if batch_size < 2 or len(pairs) < 2:
         raise ValueError("embedding training needs batch_size >= 2 and at least 2 non-empty pairs")
     rng = random.Random(seed)
-    task = Task("pairs", lambda: build_pair_batch(rng.sample(pairs, min(batch_size, len(pairs))), config), rng)
+    task = Task("pairs", lambda: build_pair_batch(rng.sample(pairs, min(batch_size, len(pairs))), config), rng,
+                options={"batch_size": batch_size, "pairs": len(pairs)})
     return {"pairs": task}, {"pairs": 1.0}

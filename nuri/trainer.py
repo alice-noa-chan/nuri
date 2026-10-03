@@ -110,11 +110,16 @@ class Task:
     rng and generator are the random sources next_batch draws from. The
     trainer saves and restores them, so a resumed run sees the same batches
     as an uninterrupted one.
+
+    options records how batches are built (batch size, pool sizes, ...). It
+    is saved with the training state and must match on resume, because a
+    different batch size would silently change the data of a resumed run.
     """
     kind: str
     next_batch: Callable[[], dict]
     rng: random.Random | None = None
     generator: torch.Generator | None = None
+    options: dict = field(default_factory=dict)
 
 
 def default_device() -> torch.device:
@@ -268,6 +273,10 @@ def _compile_blocks(model: NuriModel) -> None:
         block.compile(dynamic=True)
 
 
+def _task_options(tasks: dict[str, Task]) -> dict:
+    return json.loads(json.dumps({name: task.options for name, task in tasks.items()}))
+
+
 def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
     """Every random source that decides which batches come next."""
     state = {"trainer_rng": rng.getstate(), "tasks": {}}
@@ -307,6 +316,12 @@ def _resume(path, model, optimizer, rng: random.Random, tasks: dict[str, Task],
     if saved != current:
         changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
         raise ValueError(f"resume needs the same training settings; these differ: {changed}")
+    if "task_options" in extra:  # states from before task options existed skip this check
+        saved_options, current_options = extra["task_options"], _task_options(tasks)
+        if saved_options != current_options:
+            changed = sorted(n for n in set(saved_options) | set(current_options)
+                             if saved_options.get(n) != current_options.get(n))
+            raise ValueError(f"resume needs the same batch construction; these tasks differ: {changed}")
     rng.setstate(extra["random"]["trainer_rng"])
     for name, saved in extra["random"]["tasks"].items():
         if saved["rng"] is not None:
@@ -359,5 +374,5 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
             on_save(name)
         save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
         extra = {"totals": dict(totals), "random": _random_state(rng, tasks),
-                 "settings": _comparable_settings(settings)}
+                 "settings": _comparable_settings(settings), "task_options": _task_options(tasks)}
         save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, extra)

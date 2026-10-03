@@ -213,3 +213,24 @@ def test_accumulated_expert_counts_keep_readout_layers(tmp_path):
     assert mixed, "expected at least one step that mixes mlm and span"
     for record in mixed:
         assert len(record["expert_counts"]) == 2 and sum(record["expert_counts"][1]) > 0
+
+
+def test_resume_rejects_a_different_batch_size(tmp_path):
+    import pytest
+
+    config = tiny_config()
+    corpus = toy_corpus(tmp_path / "corpus", count=30)
+
+    def run(out, batch_size, resume=None):
+        torch.manual_seed(0)
+        model = NuriModel(config)
+        tasks, mix = base_stage(corpus, config, batch_size=batch_size)
+        settings = TrainSettings(out_dir=str(tmp_path / out), total_steps=4, peak_lr=1e-3, warmup_steps=1,
+                                 save_every=2, mix=mix, progress=False)
+        return train(model, tasks, settings, device=torch.device("cpu"), resume_from=resume)
+
+    run("first", batch_size=4)
+    state = tmp_path / "first" / "training_state" / "step-2.pt"
+    with pytest.raises(ValueError, match="batch construction"):
+        run("bigger", batch_size=8, resume=state)
+    assert run("same", batch_size=4, resume=state)
