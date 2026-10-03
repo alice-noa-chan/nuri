@@ -138,15 +138,21 @@ class NuriModel(nn.Module):
 
         For each layer the records are averaged over its forwards (so running
         a layer twice in one step does not double its weight); layers are
-        then summed. Counts are summed per layer for logging.
+        then summed. Counts are summed per layer for logging and always list
+        every MoE layer in model order (zeros for a layer that did not run,
+        e.g. the readout during an MLM batch), so counts of different batches
+        line up layer by layer.
         """
         moe = self.config.moe
-        layers = [m for m in self.moe_layers() if m.aux_records]
+        all_layers = self.moe_layers()
+        layers = [m for m in all_layers if m.aux_records]
         if moe is None or not layers:
             return {"loss": None, "counts": []}
         balance = sum(sum(r["balance"] for r in m.aux_records) / len(m.aux_records) for m in layers)
         z = sum(sum(r["z"] for r in m.aux_records) / len(m.aux_records) for m in layers)
-        counts = [sum(r["counts"] for r in m.aux_records) for m in layers]
+        counts = [sum(r["counts"] for r in m.aux_records) if m.aux_records
+                  else torch.zeros(m.num_experts, dtype=torch.long, device=m.router.weight.device)
+                  for m in all_layers]
         for m in layers:
             m.aux_records = []
         loss = moe.balance_loss_weight * balance + moe.z_loss_weight * z

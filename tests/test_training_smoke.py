@@ -196,3 +196,20 @@ def test_checkpointing_flag_does_not_change_training(tmp_path):
     plain, saved = run(False, "plain"), run(True, "ckpt")
     for name, tensor in plain.state_dict().items():
         assert torch.allclose(tensor, saved.state_dict()[name], atol=1e-6), name
+
+
+def test_accumulated_expert_counts_keep_readout_layers(tmp_path):
+    """An MLM micro-batch (encoder only) and a span micro-batch (encoder + readout) in one step."""
+    config = tiny_config(moe=MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,),
+                                       readout_layers=(2,)))
+    corpus = toy_corpus(tmp_path / "corpus", count=30)
+    torch.manual_seed(0)
+    model = NuriModel(config)
+    tasks, mix = base_stage(corpus, config, batch_size=4)
+    settings = TrainSettings(out_dir=str(tmp_path / "run"), total_steps=6, peak_lr=1e-3, warmup_steps=1,
+                             mix=mix, grad_accum=4, log_every=1, progress=False)
+    records = train(model, tasks, settings, device=torch.device("cpu"))
+    mixed = [r for r in records if "+" in r["task"]]
+    assert mixed, "expected at least one step that mixes mlm and span"
+    for record in mixed:
+        assert len(record["expert_counts"]) == 2 and sum(record["expert_counts"][1]) > 0

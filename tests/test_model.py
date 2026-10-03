@@ -111,7 +111,7 @@ def test_moe_aux_is_collected_once():
     ids = sample_inputs(model.config)
     x, valid = model.encode(ids)
     aux = model.pop_moe_aux()
-    assert aux["loss"] is not None and len(aux["counts"]) == 1
+    assert aux["loss"] is not None and len(aux["counts"]) == 2  # every MoE layer is listed
     assert model.pop_moe_aux()["loss"] is None
 
 
@@ -161,3 +161,12 @@ def test_structure_head_reads_only_r():
     assert logits.shape == (2, 3)
     assert torch.equal(logits, model.structure_logits(r.clone()))  # no input besides r
     assert not torch.equal(model.task_logits(u, r), model.task_logits(torch.zeros_like(u), r))
+
+
+def test_moe_counts_cover_every_layer_even_if_it_did_not_run():
+    moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,), readout_layers=(2,))
+    model = make_model(moe=moe).train()
+    model.encode(sample_inputs(model.config))  # encoder only: the readout MoE layer does not run
+    aux = model.pop_moe_aux()
+    assert len(aux["counts"]) == len(model.moe_layers()) == 2
+    assert int(aux["counts"][0].sum()) > 0 and int(aux["counts"][1].sum()) == 0

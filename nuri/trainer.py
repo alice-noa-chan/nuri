@@ -184,10 +184,11 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             # With grad_accum > 1 the gradients of several micro-batches add up
             # before one optimizer step; each loss is divided so the step uses
             # their mean. grad_accum = 1 is exactly the plain loop.
-            for _ in range(settings.grad_accum):
+            for micro in range(settings.grad_accum):
                 name = rng.choices(names, weights)[0]
                 depth = rng.choice(model.config.train_depths)
-                monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
+                monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase,
+                                   micro=micro + 1, micro_count=settings.grad_accum)
                 batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
 
                 monitor.phase("forward")
