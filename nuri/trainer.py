@@ -1,8 +1,10 @@
 """Training loop and the loss for each kind of batch (ARCHITECTURE.md §8-C, §11).
 
 A training run mixes several batch "tasks" (for example MLM and span
-denoising in the base stage). Each step picks one task by its mix weight,
-builds a batch, computes that task's loss and takes one optimizer step.
+denoising in the base stage). Each optimizer step runs grad_accum
+micro-batches; each micro-batch picks a task by its mix weight and a
+reasoning depth, builds a batch and adds the gradient of its loss. Then the
+optimizer steps once, the step is logged, and checkpoints are saved when due.
 """
 
 from __future__ import annotations
