@@ -278,11 +278,22 @@ def _write_outputs(db, folder: Path, progress: bool) -> dict:
             bar.update(promoted)
             if not promoted:
                 break
+    # Resolve membership once from the held-out groups, rather than looking up
+    # every record's groups while streaming the output. CROSS JOIN keeps the
+    # small held-out index first, with indexed membership lookups after it.
+    db.execute("CREATE INDEX IF NOT EXISTS held_out_group_keys ON groups(key) WHERE held_out=1")
+    db.execute("PRAGMA temp.cache_size=-8192")  # Bound the TEMP page cache to about 8 MiB.
+    db.execute("CREATE TEMP TABLE output_held_out(digest TEXT PRIMARY KEY) WITHOUT ROWID")
     counts, streams = {}, {}
+    rows = None
     try:
-        rows = db.execute("""SELECT r.kind,r.lang,r.payload,
-            (SELECT max(g.held_out) FROM membership m JOIN groups g ON m.group_key=g.key
-             WHERE m.digest=r.digest) FROM records r ORDER BY r.rowid""")
+        db.execute("""INSERT OR IGNORE INTO temp.output_held_out
+            SELECT m.digest FROM groups g INDEXED BY held_out_group_keys
+            CROSS JOIN membership m INDEXED BY member_group ON m.group_key=g.key
+            WHERE g.held_out=1""")
+        rows = db.execute("""SELECT r.kind,r.lang,r.payload,h.digest IS NOT NULL
+            FROM records r LEFT JOIN temp.output_held_out h ON h.digest=r.digest
+            ORDER BY r.rowid""")
         for kind, lang, payload, held_out in tqdm(rows, desc="Writing normalized records", unit="record",
                                                disable=not progress):
             split = "eval" if held_out else "train"
@@ -296,8 +307,11 @@ def _write_outputs(db, folder: Path, progress: bool) -> dict:
             tally = counts.setdefault(kind, {}).setdefault(lang, {"train": 0, "eval": 0})
             tally[split] += 1
     finally:
+        if rows is not None:
+            rows.close()
         for stream in streams.values():
             stream.close()
+        db.execute("DROP TABLE temp.output_held_out")
     for relative in streams:
         destination = folder / relative
         os.replace(destination.with_suffix(".jsonl.part"), destination)
