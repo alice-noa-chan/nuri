@@ -36,6 +36,8 @@ class NuriModel(nn.Module):
         # General classifier on concat(u, r), and a structure-check head that reads
         # only mean(R) so it has no direct path from X (§6).
         self.task_head = nn.Linear(2 * d, config.num_labels, bias=False) if config.num_labels else None
+        # Marks draft tokens in the core memory when draft feedback is on.
+        self.draft_embedding = nn.Parameter(torch.zeros(d)) if config.draft_feedback else None
         self.structure_head = nn.Linear(d, config.num_labels, bias=False) if config.num_labels else None
         self.apply(self._init_weights)
 
@@ -80,9 +82,20 @@ class NuriModel(nn.Module):
         return self.encoder(self.embedding(input_ids), valid, segments), valid
 
     def reason(self, x: torch.Tensor, valid: torch.Tensor, steps: int | None = None, return_states: bool = False,
-               halt_tol: float | None = None):
-        """R_final after `steps` core steps (config default if None); see the core for halt_tol."""
+               halt_tol: float | None = None, draft: tuple[torch.Tensor, torch.Tensor] | None = None):
+        """R_final after `steps` core steps (config default if None); see the core for halt_tol.
+
+        draft: (canvas ids, canvas valid) of the current answer draft, only with
+        config.draft_feedback. The core then reads [X; draft embeddings].
+        Masked positions hold MASK, so the draft never reveals a hidden target.
+        """
         steps = self.config.default_depth if steps is None else steps
+        if draft is not None:
+            if self.draft_embedding is None:
+                raise ValueError("draft feedback is off in this model's config")
+            canvas, canvas_valid = draft
+            drafted = self.embedding(canvas) + self.draft_embedding.to(x.dtype)
+            x, valid = torch.cat([x, drafted.to(x.dtype)], dim=1), torch.cat([valid, canvas_valid.bool()], dim=1)
         return self.core(x, valid, steps, return_states=return_states, halt_tol=halt_tol)
 
     def pool(self, x: torch.Tensor, valid: torch.Tensor, r: torch.Tensor | None = None):

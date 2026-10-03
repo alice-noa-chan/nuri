@@ -42,14 +42,18 @@ def canvas_loss(model: NuriModel, batch: dict, depth: int, length_weight: float 
     (instruction tuning). Random span lengths must never train it (§7).
     """
     x, valid = model.encode(batch["input_ids"], batch["input_valid"])
-    r = model.reason(x, valid, depth)
+    draft = (batch["canvas"], batch["canvas_valid"]) if model.config.draft_feedback else None
+    r = model.reason(x, valid, depth, draft=draft)
     cache = model.generation_memory(x, valid, r)
     hidden = model.readout_hidden(batch["canvas"], batch["canvas_valid"], cache)
     mask = batch["loss_mask"]
     loss = sample_mean_ce(model.vocab_logits(hidden[mask]), batch["targets"], mask)
     result = {"denoise": loss.detach()}
     if length_weight:
-        u, r_mean = model.pool(x, valid, r)
+        # The training canvas has the gold length, so the length head must use an
+        # R that has not seen the draft.
+        r_length = model.reason(x, valid, depth) if draft is not None else r
+        u, r_mean = model.pool(x, valid, r_length)
         length = length_loss(model.length_logits(u, r_mean), batch["lengths"])
         loss = loss + length_weight * length
         result["length"] = length.detach()
@@ -314,7 +318,7 @@ RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
 
 # Settings added after the first training states were written, with the value
 # that matches what older code did.
-LEGACY_SETTING_DEFAULTS = {"grad_accum": 1, "native_gqa": False}
+LEGACY_SETTING_DEFAULTS = {"grad_accum": 1, "native_gqa": False, "cross_mode_weight": 0.0}
 
 
 def _comparable_settings(settings: TrainSettings) -> dict:

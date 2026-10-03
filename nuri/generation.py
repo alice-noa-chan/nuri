@@ -76,6 +76,7 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         r = transform_r(r)
     lengths = _choose_lengths(model, x, valid, r, canvas_len, input_ids.shape[0]).clamp(1, max_len)
     cache = model.generation_memory(x, valid, r)
+    draft_feedback = model.config.draft_feedback
 
     batch, width = input_ids.shape[0], int(lengths.max())
     positions = torch.arange(width, device=input_ids.device)
@@ -87,6 +88,11 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
 
     for round_index in range(1, rounds + 1):
         masked = (canvas == config.mask_id) & canvas_valid
+        if draft_feedback:  # experimental: R re-reads the current draft every round
+            r = model.reason(x, valid, steps, draft=(canvas, canvas_valid))
+            if transform_r is not None:
+                r = transform_r(r)
+            cache = model.generation_memory(x, valid, r)
         hidden = model.readout_hidden(canvas, canvas_valid, cache)
         logits = model.vocab_logits(hidden[masked]).float()
         # MASK and PAD are not words; never write them into the answer.

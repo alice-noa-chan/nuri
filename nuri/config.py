@@ -70,6 +70,10 @@ class NuriConfig:
     # this many groups that attend only within their group in every core step
     # except the last one, where all slots merge.
     slot_groups: int = 1
+    # Experimental draft feedback (§9, OFF): the core also reads the current
+    # (corrupted) answer canvas, and generation recomputes R every round. This
+    # deliberately changes the v0 contract that R never sees the canvas.
+    draft_feedback: bool = False
     moe: Optional[MoEConfig] = None
 
     @property
