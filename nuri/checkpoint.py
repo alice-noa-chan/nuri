@@ -19,14 +19,19 @@ from safetensors.torch import load_file, save_file
 
 from .config import NuriConfig
 from .model import NuriModel
+from .tokenizer import copy_tokenizer_files
 
 
-def save_pretrained(model: NuriModel, folder: str | Path, dtype: torch.dtype = torch.bfloat16) -> None:
+def save_pretrained(model: NuriModel, folder: str | Path, dtype: torch.dtype = torch.bfloat16,
+                    tokenizer_dir: str | Path | None = None) -> None:
+    """Write config.json + model.safetensors, plus the tokenizer files when given."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     model.config.save(folder / "config.json")
     weights = {name: t.detach().to("cpu", dtype).contiguous() for name, t in model.state_dict().items()}
     save_file(weights, str(folder / "model.safetensors"), metadata={"format": "pt"})
+    if tokenizer_dir is not None:
+        copy_tokenizer_files(tokenizer_dir, folder)
 
 
 def load_pretrained(folder: str | Path, device="cpu", dtype: torch.dtype = torch.float32) -> NuriModel:

@@ -93,6 +93,7 @@ class TrainSettings:
     embed_dims: tuple[int, ...] = (64, 128, 256)
     temperature: float = 0.05
     mix: dict[str, float] = field(default_factory=dict)
+    tokenizer_dir: str | None = None  # copied into every saved checkpoint
 
 
 @dataclass
@@ -246,6 +247,6 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
     if last:
         names.append("final")
     for name in names:
-        save_pretrained(model, out / name)
+        save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
         extra = {"totals": dict(totals), "random": _random_state(rng, tasks)}
         save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, extra)
