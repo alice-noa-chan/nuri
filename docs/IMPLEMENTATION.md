@@ -298,14 +298,18 @@ folder and must match its vocabulary and special IDs.
 
 The generation report includes exact token match, missing EOS, and canvas
 length errors. It compares predicted and oracle lengths for IT; base models
-use oracle length because their length head is untrained. The T curve uses
+use oracle length because their length head is untrained. Over-limit answers
+are excluded and counted. Oracle reports include a length-only answer baseline,
+since the supplied answer length can reveal the label. The T curve uses
 one checkpoint at T=1/2/4/8/16. The S curve uses S=1/2/4/8. The R interventions
 zero the latent state or swap it between samples before length prediction and
 canvas readout. Use oracle length when you need to separate readout behavior
 from the effect on the length head.
 
 Retrieval reports Recall@k and MRR for matched query/document modes and supported
-embedding prefixes. Core diagnostics report state/update norms, slot cosine,
+embedding prefixes, with stable document order used to break score ties.
+R-shuffle batches contain at least two eligible samples; a singleton tail is
+merged so every sample receives another sample's state. Core diagnostics report state/update norms, slot cosine,
 and effective rank per recurrent step. Diagnostics characterize behavior;
 changing states, higher confidence, or unchanged floor-level accuracy do not
 establish reasoning. Depth curves also do not replace an independently trained
