@@ -89,9 +89,11 @@ def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpu
 
 
 def embedding_stage(pairs: list, config: NuriConfig, batch_size: int, seed: int = 0):
+    # A side that tokenized to nothing cannot be encoded; drop such pairs.
+    pairs = [(q, d) for q, d in pairs if q and d]
     # In-batch InfoNCE needs at least one other row as a negative.
     if batch_size < 2 or len(pairs) < 2:
-        raise ValueError("embedding training needs batch_size >= 2 and at least 2 pairs")
+        raise ValueError("embedding training needs batch_size >= 2 and at least 2 non-empty pairs")
     rng = random.Random(seed)
     task = Task("pairs", lambda: build_pair_batch(rng.sample(pairs, min(batch_size, len(pairs))), config), rng)
     return {"pairs": task}, {"pairs": 1.0}

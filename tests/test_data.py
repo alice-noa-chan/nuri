@@ -1,10 +1,12 @@
 import random
 
+import pytest
 import torch
 
 from nuri.config import tiny_config
 from nuri.data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_pair_batch,
                        build_span_batch, chat_prompt_text, write_corpus)
+from nuri.pipeline import embedding_stage
 
 CONFIG = tiny_config()
 
@@ -57,3 +59,11 @@ def test_mlm_window_always_contains_a_target():
     for seed in range(20):
         batch = build_mlm_batch([doc], CONFIG, random.Random(seed), torch.Generator().manual_seed(seed))
         assert batch["target_mask"].shape[0] == 1 and batch["target_mask"].any()
+
+
+def test_embedding_stage_drops_empty_pairs():
+    with pytest.raises(ValueError):
+        embedding_stage([([], [3]), ([4], [5])], CONFIG, batch_size=2)
+    tasks, _ = embedding_stage([([], [3]), ([4], [5]), ([6], [7])], CONFIG, batch_size=2)
+    batch = tasks["pairs"].next_batch()
+    assert batch["query_valid"].any(dim=1).all() and batch["doc_valid"].any(dim=1).all()

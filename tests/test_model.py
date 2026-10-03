@@ -141,3 +141,12 @@ def test_embed_rejects_invalid_dims():
     for dim in (0, -1, model.config.embed_dim + 1, 2.5, True):
         with pytest.raises(ValueError):
             model.embed(ids, dim=dim)
+
+
+def test_last_aux_is_available_at_inference():
+    moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,), readout_layers=(2,))
+    model = make_model(moe=moe)  # eval mode
+    with torch.no_grad():
+        model.encode(sample_inputs(model.config))
+    layer = model.moe_layers()[0]
+    assert layer.last_aux is not None and not layer.aux_records

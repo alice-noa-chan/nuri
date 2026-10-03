@@ -37,11 +37,9 @@ class MoEFFN(nn.Module):
         self.w_down = nn.Parameter(torch.empty(num_experts, expert_ffn_size, hidden_size))
         self.shared = nn.ModuleList(SwiGLU(hidden_size, expert_ffn_size) for _ in range(num_shared_experts))
         self.aux_records: list[dict] = []
-
-    @property
-    def last_aux(self) -> dict | None:
-        """The record of the most recent forward, or None."""
-        return self.aux_records[-1] if self.aux_records else None
+        # Stats of the most recent forward in any mode, for diagnostics such
+        # as expert load at inference. Only training mode appends to aux_records.
+        self.last_aux: dict | None = None
 
     def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
         shape = x.shape
@@ -78,6 +76,7 @@ class MoEFFN(nn.Module):
         load = counts.float() / (self.top_k * h.shape[0])
         balance = self.num_experts * (load * probs.mean(dim=0)).sum()
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
+        self.last_aux = {"balance": balance.detach(), "z": z_loss.detach(), "counts": counts.detach()}
         if self.training:  # inference never collects them, so they would pile up forever
             self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
         return out.view(shape)
