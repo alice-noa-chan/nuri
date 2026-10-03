@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from .config import NuriConfig
-from .layers import Attention, RMSNorm, rope_cache
+from .layers import Attention, RMSNorm, rope_cache, run_checkpointed
 from .moe import build_ffn
 
 
@@ -65,6 +65,7 @@ class InputEncoder(nn.Module):
     def __init__(self, config: NuriConfig):
         super().__init__()
         self.local_radius = config.local_radius
+        self.gradient_checkpointing = False  # set by NuriModel.set_gradient_checkpointing
         self.rope = RopeTables(config.head_dim, config.rope_theta)
         self.blocks = nn.ModuleList(EncoderBlock(config, i + 1) for i in range(config.input_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
@@ -76,5 +77,8 @@ class InputEncoder(nn.Module):
         # Built once per forward and shared by all local layers.
         local_keys = local_mask(valid, self.local_radius) if any(b.local for b in self.blocks) else None
         for block in self.blocks:
-            h = block(h, valid, rope, local_keys)
+            if self.gradient_checkpointing and torch.is_grad_enabled():
+                h = run_checkpointed(block, h, valid, rope, local_keys)
+            else:
+                h = block(h, valid, rope, local_keys)
         return self.final_norm(h)

@@ -9,7 +9,7 @@ from torch import nn
 
 from .config import NuriConfig
 from .encoder import RopeTables
-from .layers import Attention, RMSNorm
+from .layers import Attention, RMSNorm, run_checkpointed
 from .moe import build_ffn
 
 
@@ -48,6 +48,7 @@ class BidirectionalReadout(nn.Module):
     def __init__(self, config: NuriConfig):
         super().__init__()
         self.rope = RopeTables(config.head_dim, config.rope_theta)
+        self.gradient_checkpointing = False  # set by NuriModel.set_gradient_checkpointing
         self.blocks = nn.ModuleList(ReadoutBlock(config, i + 1) for i in range(config.readout_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
 
@@ -63,5 +64,8 @@ class BidirectionalReadout(nn.Module):
             raise ValueError(f"memory cache has {len(cache.kv)} layers, the readout has {len(self.blocks)}")
         rope = self.rope(canvas.shape[1], canvas.device)
         for block, kv in zip(self.blocks, cache.kv):
-            canvas = block(canvas, canvas_valid, kv, cache.mask, rope)
+            if self.gradient_checkpointing and torch.is_grad_enabled():
+                canvas = run_checkpointed(block, canvas, canvas_valid, kv, cache.mask, rope)
+            else:
+                canvas = block(canvas, canvas_valid, kv, cache.mask, rope)
         return self.final_norm(canvas)

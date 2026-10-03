@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNorm(nn.Module):
@@ -91,6 +92,29 @@ class Attention(nn.Module):
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         b, _, n, _ = out.shape
         return self.o_proj(out.transpose(1, 2).reshape(b, n, -1))
+
+
+def run_checkpointed(module: nn.Module, *args):
+    """Run `module(*args)` without keeping its activations; they are recomputed in backward.
+
+    The recomputation runs the module a second time. MoE layers inside must
+    not record their auxiliary losses again, or a step would count them
+    twice, so recording is switched off for every call after the first.
+    """
+    moe_layers = [m for m in module.modules() if hasattr(m, "record_aux")]
+    calls = []
+
+    def forward(*inputs):
+        calls.append(1)
+        for layer in moe_layers:
+            layer.record_aux = len(calls) == 1
+        try:
+            return module(*inputs)
+        finally:
+            for layer in moe_layers:
+                layer.record_aux = True
+
+    return checkpoint(forward, *args, use_reentrant=False)
 
 
 class SwiGLU(nn.Module):

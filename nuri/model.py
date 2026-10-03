@@ -46,6 +46,16 @@ class NuriModel(nn.Module):
             for p in (module.w_gate, module.w_up, module.w_down):
                 nn.init.normal_(p, std=std)
 
+    def set_gradient_checkpointing(self, enabled: bool = True) -> None:
+        """Recompute encoder and readout block activations in backward to save memory.
+
+        Results and gradients are unchanged; each training step costs one more
+        forward of those blocks. The core is small (K slots) and is not
+        checkpointed. This is a training-time switch and is not saved in the config.
+        """
+        self.encoder.gradient_checkpointing = enabled
+        self.readout.gradient_checkpointing = enabled
+
     # ----- input memory and reasoning -------------------------------------------------
 
     def input_mask(self, input_ids: torch.Tensor) -> torch.Tensor:

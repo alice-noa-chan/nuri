@@ -40,6 +40,8 @@ class MoEFFN(nn.Module):
         # Stats of the most recent forward in any mode, for diagnostics such
         # as expert load at inference. Only training mode appends to aux_records.
         self.last_aux: dict | None = None
+        # Switched off only while activation checkpointing recomputes this layer.
+        self.record_aux = True
 
     def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
         shape = x.shape
@@ -77,7 +79,7 @@ class MoEFFN(nn.Module):
         balance = self.num_experts * (load * probs.mean(dim=0)).sum()
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
         self.last_aux = {"balance": balance.detach(), "z": z_loss.detach(), "counts": counts.detach()}
-        if self.training:  # inference never collects them, so they would pile up forever
+        if self.training and self.record_aux:  # inference never collects them, so they would pile up forever
             self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
         return out.view(shape)
 
