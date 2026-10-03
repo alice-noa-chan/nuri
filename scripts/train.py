@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -45,6 +46,13 @@ from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size  # noqa: 
 from nuri.trainer import TrainSettings, train  # noqa: E402
 
 
+def positive_int(value):
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage", choices=["base", "it", "embed"], required=True)
@@ -56,6 +64,11 @@ def parse_args(argv=None):
     p.add_argument("--lr", type=float, default=None, help="peak LR (default 3e-4 base, 5e-5 it/embed)")
     p.add_argument("--warmup", type=int, default=None, help="warmup steps (default 2%% of steps)")
     p.add_argument("--save-every", type=int, default=0)
+    p.add_argument("--log-every", type=positive_int, default=10,
+                   help="record metrics every N optimizer steps (first and last always recorded)")
+    p.add_argument("--no-progress", action="store_true", help="disable tqdm bars; keep setup messages and logs")
+    p.add_argument("--tensorboard", action="store_true", help="write TensorBoard events to <out>/tensorboard")
+    p.add_argument("--tensorboard-dir", help="custom event directory; also enables TensorBoard")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", default=os.environ.get("NURI_TEXT_CORPUS"))
@@ -86,24 +99,31 @@ def main(argv=None):
     tokenizer_path = args.tokenizer
     if not tokenizer_path and args.init and (Path(args.init) / "tokenizer.json").exists():
         tokenizer_path = args.init  # every checkpoint carries a copy of its tokenizer
+    print(f"[{args.stage}] Loading tokenizer and checking vocabulary options...", flush=True)
     tokenizer = load_tokenizer(tokenizer_path) if tokenizer_path else None
     if args.stage == "base" and tokenizer is None:
         print("warning: no --tokenizer; using the preset vocabulary size and saving no tokenizer files")
 
     if args.resume:
+        print(f"[{args.stage}] Building model from the resume configuration...", flush=True)
         # The interrupted run decides the model shape; its weights are loaded by train().
         model = NuriModel(training_state_config(args.resume))
     elif args.stage == "base":
+        print(f"[{args.stage}] Initializing model weights...", flush=True)
         # The embedding needs exactly one row per token id of the real tokenizer.
         overrides = {"vocab_size": vocab_size(tokenizer)} if tokenizer else {}
         model = NuriModel(PRESETS[args.preset](**overrides))
     else:
+        print(f"[{args.stage}] Loading initial checkpoint weights...", flush=True)
         model = load_pretrained(require(args.init, "--init"))
     config = model.config
     if tokenizer is not None:
         check_tokenizer(tokenizer, config)
+    if args.corpus:
+        print(f"[{args.stage}] Opening the token corpus...", flush=True)
     corpus = TokenCorpus(args.corpus) if args.corpus else None
 
+    print(f"[{args.stage}] Preparing training tasks...", flush=True)
     if args.stage == "base":
         tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed)
     elif args.stage == "it":
@@ -112,22 +132,38 @@ def main(argv=None):
         def tokenize(messages, response):
             return encode(tokenizer, chat_prompt_text(messages)), encode(tokenizer, response)
 
-        examples = [tokenize(r["messages"], r["response"]) for r in read_jsonl(require(args.instructions, "--instructions"))]
-        reasoning = [tokenize(m, a) for m, a in reasoning_examples(args.reasoning_examples, seed=args.seed)]
+        with tqdm(read_jsonl(require(args.instructions, "--instructions")),
+                  desc="it | tokenizing instructions", unit="example", ascii=True,
+                  dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
+            examples = [tokenize(r["messages"], r["response"]) for r in progress]
+        print("[it] Generating structured reasoning examples...", flush=True)
+        raw_reasoning = reasoning_examples(args.reasoning_examples, seed=args.seed)
+        with tqdm(raw_reasoning, desc="it | tokenizing reasoning examples", unit="example", ascii=True,
+                  dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
+            reasoning = [tokenize(m, a) for m, a in progress]
         tasks, mix = instruction_stage(examples, config, args.batch_size, corpus, reasoning, args.seed)
         config.length_head_trained = True  # saved into every checkpoint of this run
     else:
         require(tokenizer, "--tokenizer")
-        pairs = [(encode(tokenizer, r["query"]), encode(tokenizer, r["positive"]))
-                 for r in read_jsonl(require(args.pairs, "--pairs"))]
+        with tqdm(read_jsonl(require(args.pairs, "--pairs")),
+                  desc="embed | tokenizing pairs", unit="pair", ascii=True,
+                  dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
+            pairs = [(encode(tokenizer, r["query"]), encode(tokenizer, r["positive"])) for r in progress]
         tasks, mix = embedding_stage(pairs, config, args.batch_size, args.seed)
 
     peak_lr = args.lr or (3e-4 if args.stage == "base" else 5e-5)
     warmup = args.warmup if args.warmup is not None else max(1, args.steps // 50)
+    tensorboard_dir = args.tensorboard_dir
+    if args.tensorboard and not tensorboard_dir:
+        tensorboard_dir = str(Path(args.out) / "tensorboard")
     settings = TrainSettings(out_dir=args.out, total_steps=args.steps, peak_lr=peak_lr, warmup_steps=warmup,
-                             save_every=args.save_every, seed=args.seed, mix=mix,
+                             save_every=args.save_every, log_every=args.log_every, seed=args.seed, mix=mix,
+                             stage=args.stage, progress=not args.no_progress, tensorboard_dir=tensorboard_dir,
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None)
-    print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}")
+    print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    if tensorboard_dir:
+        print(f"TensorBoard events: {tensorboard_dir}", flush=True)
+    print(f"[{args.stage}] {'Restoring state and continuing' if args.resume else 'Starting'} training...", flush=True)
     records = train(model, tasks, settings, resume_from=args.resume)
     if records:
         print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
