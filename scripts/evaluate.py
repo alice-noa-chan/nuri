@@ -12,9 +12,11 @@ Examples
   python scripts/evaluate.py --checkpoint runs/nuri-base-embed/final --suites retrieval --pairs $NURI_EVAL_PAIRS
 
 Suites
-  reasoning      exact match on synthetic multi-step tasks; predicted and oracle length
-  curves         the same metric at T = 1/2/4/8/16 and S = 1/2/4/8
-  interventions  normal R vs zeroed R vs R shuffled between samples
+  reasoning      exact match on synthetic multi-step tasks; predicted and oracle length;
+                 on the "shared" split (training pools, new combinations) and the
+                 "eval" split (unseen names: a stress test)
+  curves         the same metric at T = 1/2/4/8/16 and S = 1/2/4/8 (shared split)
+  interventions  normal R vs zeroed R vs R shuffled between samples (shared split)
   mlm            masked-token accuracy on --corpus (a held-out corpus folder)
   retrieval      Recall@k / MRR on --pairs (JSONL with "query" and "positive")
   diagnostics    per-step core state statistics
@@ -71,14 +73,21 @@ def main(argv=None) -> dict:
     report = {"checkpoint": str(args.checkpoint), "length_head_trained": model.config.length_head_trained}
     needs_examples = {"reasoning", "curves", "interventions"} & set(args.suites)
     if needs_examples:
-        examples = [(encode(chat_prompt_text(m)), encode(a))
-                    for m, a in reasoning_examples(args.examples, seed=args.seed, split="eval")]
+        # A seed far from the training seeds, so "shared" examples are new combinations.
+        def split_examples(split):
+            return [(encode(chat_prompt_text(m)), encode(a))
+                    for m, a in reasoning_examples(args.examples, seed=1_000_003 + args.seed, split=split)]
+
+        examples = split_examples("shared")
         oracle = not model.config.length_head_trained  # base models cannot predict the length
         report["oracle_length_only"] = oracle
     if "reasoning" in args.suites:
-        report["reasoning"] = {"oracle_length": evaluation.generation_accuracy(model, examples, oracle_length=True)}
-        if not oracle:
-            report["reasoning"]["predicted_length"] = evaluation.generation_accuracy(model, examples)
+        report["reasoning"] = {}
+        for split, split_set in (("shared", examples), ("eval", split_examples("eval"))):
+            result = {"oracle_length": evaluation.generation_accuracy(model, split_set, oracle_length=True)}
+            if not oracle:
+                result["predicted_length"] = evaluation.generation_accuracy(model, split_set)
+            report["reasoning"][split] = result
     if "curves" in args.suites:
         report["depth_curve"] = evaluation.depth_curve(model, examples, oracle_length=oracle)
         report["rounds_curve"] = evaluation.rounds_curve(model, examples, oracle_length=oracle)

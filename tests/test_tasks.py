@@ -1,5 +1,7 @@
 import random
 
+import pytest
+
 from nuri.tasks import NAMES, arithmetic_example, reachability_example, reasoning_examples, relation_example
 
 
@@ -49,3 +51,18 @@ def test_mix_has_both_languages():
     examples = reasoning_examples(100, seed=0)
     korean = sum(any("가" <= ch <= "힣" for ch in m[0]["content"]) for m, _ in examples)
     assert 20 < korean < 80
+
+
+def test_shared_split_uses_training_pools_but_new_combinations():
+    def names(split, seeds):
+        return {n for i in seeds for n in NAMES if n in relation_example(random.Random(i), "en", split)[0][0]["content"]}
+
+    assert names("shared", range(200)) <= names("train", range(1000))
+    train_prompts = {relation_example(random.Random(i), "en", "train")[0][0]["content"] for i in range(500)}
+    shared_prompts = {relation_example(random.Random(10_000 + i), "en", "shared")[0][0]["content"] for i in range(500)}
+    assert not train_prompts & shared_prompts
+
+
+def test_unknown_split_is_rejected():
+    with pytest.raises(ValueError):
+        reasoning_examples(1, split="test")

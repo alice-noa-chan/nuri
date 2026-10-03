@@ -8,8 +8,15 @@ recurrent core helps:
 - arithmetic: evaluate a short expression with bounded numbers
 - reachability: decide if one node can reach another in a small directed graph
 
-The "train" and "eval" splits use disjoint name pools, so an eval answer can
-never be memorized from training data.
+Splits
+- "train": the training pools (names, nodes, numbers 1-50).
+- "shared": the same pools, new random chains, graphs and expressions.
+  It tests generalization to unseen combinations and is the main eval
+  split. Draw it with a seed different from the training seed.
+- "eval": disjoint pools (other names and nodes, numbers 51-99). Answers
+  are tokens that never were answers in training, so it is a stress test:
+  CPU runs showed small models score 0% there even when they can copy
+  (docs/DISCUSSION.md, §12 "Evaluation hygiene").
 """
 
 from __future__ import annotations
@@ -22,9 +29,14 @@ NAMES = ["Alex", "Bora", "Chen", "Dana", "Eun", "Farah", "Gabi", "Hana", "Ivan",
 NODES = [f"N{i}" for i in range(60)]
 
 
+SPLITS = ("train", "shared", "eval")
+
+
 def _pool(items: list[str], split: str) -> list[str]:
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {SPLITS}")
     half = len(items) * 2 // 3
-    return items[:half] if split == "train" else items[half:]
+    return items[half:] if split == "eval" else items[:half]
 
 
 def relation_example(rng: random.Random, lang: str, split: str = "train"):
@@ -47,7 +59,8 @@ def relation_example(rng: random.Random, lang: str, split: str = "train"):
 
 
 def arithmetic_example(rng: random.Random, lang: str, split: str = "train"):
-    low, high = (1, 50) if split == "train" else (51, 99)
+    _pool([], split)  # validates the split name
+    low, high = (51, 99) if split == "eval" else (1, 50)
     a, b, c, d = (rng.randint(low, high) for _ in range(4))
     op1, op2 = rng.choice("+-"), rng.choice("+-*")
     expression = f"({a} {op1} {b}) {op2} {c} - {d}"

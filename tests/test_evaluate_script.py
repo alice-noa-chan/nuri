@@ -51,7 +51,8 @@ def test_every_suite_runs_on_a_tiny_checkpoint(tmp_path):
         "--corpus", str(tmp_path / "corpus"), "--pairs", str(tmp_path / "pairs.jsonl"),
         "--examples", "6", "--documents", "8", "--output", str(tmp_path / "report.json")])
 
-    assert set(report["reasoning"]) == {"oracle_length", "predicted_length"}
+    assert set(report["reasoning"]) == {"shared", "eval"}
+    assert set(report["reasoning"]["shared"]) == {"oracle_length", "predicted_length"}
     assert [r["steps"] for r in report["depth_curve"]] == [1, 2, 4, 8, 16]
     assert [r["rounds"] for r in report["rounds_curve"]] == [1, 2, 4, 8]
     assert set(report["interventions"]) == {"normal", "zero_r", "shuffled_r"}
@@ -67,4 +68,4 @@ def test_base_checkpoint_uses_oracle_length_only(tmp_path):
     save_pretrained(NuriModel(config), tmp_path / "ckpt", tokenizer_dir=tmp_path / "tok")
     report = load_script().main(["--checkpoint", str(tmp_path / "ckpt"), "--suites", "reasoning",
                                  "--examples", "4"])
-    assert report["oracle_length_only"] and set(report["reasoning"]) == {"oracle_length"}
+    assert report["oracle_length_only"] and set(report["reasoning"]["shared"]) == {"oracle_length"}
