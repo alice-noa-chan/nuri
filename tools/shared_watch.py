@@ -50,7 +50,16 @@ def save(agent, files):
     STATE_DIR.mkdir(exist_ok=True)
     tmp = snapshot_path(agent).with_suffix(".tmp")
     tmp.write_text(json.dumps(files, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(snapshot_path(agent))
+    # On Windows the rename fails while another process (e.g. a running
+    # `watch`) has the snapshot open for reading, so retry briefly.
+    for attempt in range(20):
+        try:
+            tmp.replace(snapshot_path(agent))
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 def describe(old, new, max_lines):
