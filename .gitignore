@@ -1,0 +1,8 @@
+# Local development notes and reference documents
+/.dev/
+
+# Private data notes (dataset sources are not disclosed, D-008)
+/.private/
+
+# Per-agent watcher snapshots
+/.watch/

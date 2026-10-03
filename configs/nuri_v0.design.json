@@ -1,0 +1,309 @@
+{
+  "status": "architecture_proposal_not_executable_training_config",
+  "architecture_name": "nuri_bidirectional_latent_reasoning_v0",
+  "goals": [
+    "embedding",
+    "retrieval",
+    "classification",
+    "bounded_conditional_generation"
+  ],
+  "hardware_assumption": {
+    "gpu_count": 1,
+    "candidates": [
+      "A100 80GB",
+      "H100 variant unspecified"
+    ],
+    "training_wall_hours": 24,
+    "throughput_and_batch_size": "measure_before_setting"
+  },
+  "reference_model": {
+    "initialization": "scratch_pilot",
+    "vocab_size": 32768,
+    "tokenizer": "undecided_reference_size_only",
+    "hidden_size": 512,
+    "attention_heads": 8,
+    "kv_heads": 8,
+    "head_dim": 64,
+    "ffn_intermediate_size": 1408,
+    "ffn": "swiglu",
+    "norm": "rmsnorm",
+    "norm_eps": 1e-06,
+    "linear_bias": false,
+    "tie_token_embedding_and_vocab_head": true,
+    "dropout": 0.0
+  },
+  "input_encoder": {
+    "layers": 6,
+    "max_input_tokens": 512,
+    "attention": "global_bidirectional_mha",
+    "position": "rope_on_self_attention_qk",
+    "rope_theta_candidate": 10000,
+    "final_norm": true,
+    "read_only_during_reasoning_and_refinement": true,
+    "detach_input_memory": false,
+    "pretrained_backbone_variant": "preserve_original_backbone_geometry_and_recalculate_budget"
+  },
+  "reasoning_core": {
+    "latent_slots": 16,
+    "distinct_learned_slot_initialization": true,
+    "blocks": 1,
+    "share_entire_block_across_steps": true,
+    "training_steps": 4,
+    "evaluation_steps": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "operations": [
+      "pre_norm_cross_read_input",
+      "pre_norm_bidirectional_latent_self_attention",
+      "pre_norm_swiglu"
+    ],
+    "cache_input_kv_with_gradient": true,
+    "latent_rope": false,
+    "cross_attention_rope": false,
+    "step_embedding": false,
+    "task_embedding": false,
+    "branch_gate": "shared_sigmoid_scalar_per_branch",
+    "branch_gate_initial_value": 0.1,
+    "branch_gate_raw_logit_initial_value": -2.197224577,
+    "final_readout_norm": true,
+    "recurrent_state_uses_final_readout_norm": false
+  },
+  "embedding": {
+    "dimension": 256,
+    "pooling": "masked_mean_input_and_mean_latents",
+    "fast_mode": "l2_normalize(P(pool_X))",
+    "reasoning_mode": "l2_normalize(P(pool_X_plus_Wr_pool_R))",
+    "query_document_default": "same_mode",
+    "cross_mode_alignment": "required_before_mixed_mode_retrieval",
+    "contrastive_training": "supervised_pairs_preferred",
+    "unsupervised_simcse_variant": "enable_independent_dropout_views_separately"
+  },
+  "generation": {
+    "readout_layers": 2,
+    "share_readout_across_refinement_rounds": true,
+    "share_with_input_encoder_or_reasoning_core": false,
+    "memory": [
+      "input_X",
+      "final_reasoning_R"
+    ],
+    "operations": [
+      "pre_norm_bidirectional_canvas_self_attention_with_rope",
+      "pre_norm_memory_cross_attention_without_rope",
+      "pre_norm_swiglu"
+    ],
+    "final_norm": true,
+    "recompute_X_or_R_each_refinement_round": false,
+    "cache_memory_kv_per_readout_layer": true,
+    "cache_canvas_self_attention_kv_between_rounds": false,
+    "max_response_tokens_including_eos": 64,
+    "length_head_input": "concat_pool_X_pool_R",
+    "length_class_range_including_eos": {
+      "min": 1,
+      "max": 64
+    },
+    "train_canvas_length": "gold_length_implicit_conditioning",
+    "inference_canvas_length": "it_predicted_length_argmax_base_explicit_canvas_len",
+    "length_loss_supervision": "it_natural_instruction_responses_only_not_random_spans",
+    "generation_loss_batch_reduction": "mean_of_per_sample_masked_position_mean_ce",
+    "objective": "conditional_masked_denoising_not_diffusion_elbo",
+    "full_mask_probability": 0.1,
+    "other_mask_ratio_uniform": [
+      0.15,
+      0.95
+    ],
+    "minimum_masked_positions": 1,
+    "loss_positions": "masked_response_positions_including_eos",
+    "training_corruptions_per_sample": 1,
+    "training_refinement_unroll": false,
+    "refinement_rounds": 4,
+    "evaluation_refinement_rounds": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "token_selection": "greedy",
+    "remask_policy": "lowest_stored_last_masked_prediction_confidence",
+    "after_round_s_remask_count": "ceil(output_length*(rounds-s)/rounds)",
+    "early_stop_on_intermediate_eos": false,
+    "final_eos_handling": "trim_at_first_eos_and_record_eos_failures"
+  },
+  "training_mix_candidate": {
+    "mlm_text": 0.3,
+    "supervised_embedding_pairs": 0.3,
+    "short_instruction_denoising": 0.25,
+    "structured_reasoning_tasks": 0.15,
+    "task_loss_weight_within_batch": 1.0,
+    "length_loss_weight_within_generation_batch": 0.1,
+    "reasoning_validation_head": "R_only",
+    "one_batch_one_task_type": true
+  },
+  "optional_features_disabled_by_default": {
+    "moe": {
+      "enabled": false,
+      "input_layers_one_based": [
+        3,
+        6
+      ],
+      "experts": 4,
+      "top_k": 2,
+      "expert_intermediate_size": 1408,
+      "routing": "dropless_tokenwise_normalized_selected_weights",
+      "router_precision": "fp32",
+      "load_balance_loss": "calibrate_weight_from_logs",
+      "router_z_loss": "calibrate_weight_from_logs"
+    },
+    "local_global_attention": {
+      "enabled": false,
+      "input_layer_schedule": [
+        "global",
+        "local",
+        "local",
+        "global",
+        "local",
+        "global"
+      ],
+      "local_radius": 64,
+      "maximum_interior_local_keys": 129
+    },
+    "qk_norm": false,
+    "gqa": false,
+    "mla": false,
+    "adaptive_halting": false,
+    "random_depth_training": {
+      "enabled": false,
+      "depths": [
+        2,
+        4,
+        8
+      ]
+    },
+    "intermediate_answer_supervision": false,
+    "forced_state_change_loss": false,
+    "monotonic_confidence_loss": false,
+    "draft_feedback_to_reasoning": false,
+    "matryoshka_embeddings": {
+      "enabled": false,
+      "dimensions": [
+        64,
+        128,
+        256
+      ]
+    },
+    "hypothesis_slot_groups": {
+      "enabled": false,
+      "groups": 4
+    },
+    "diffusion_objective_and_sampler": false
+  },
+  "release_models": {
+    "decision": "D-009 ~ D-014 (docs/ARCHITECTURE.md §14)",
+    "languages": [
+      "ko",
+      "en",
+      "ja(minor)"
+    ],
+    "license": "MIT",
+    "training_budget": "~24 GPU-hours total across all released models, 1x A100 80GB or H100",
+    "shrink_rule": "if measured dense throughput gives <3B tokens in 8h, use hidden 512 / input layers 8",
+    "dense": {
+      "vocab_size": "65536 candidate; decided by tokenizer experiment (D-012)",
+      "hidden_size": 768,
+      "attention_heads": 12,
+      "head_dim": 64,
+      "ffn_intermediate_size": 2048,
+      "input_layers": 10,
+      "readout_layers": 2,
+      "latent_slots": 32,
+      "max_input_tokens": 1024,
+      "max_response_tokens_including_eos": 256,
+      "approx_params": "150M",
+      "qk_norm": true,
+      "qk_norm_type": "per_head_rms_with_learnable_q_and_k_gains",
+      "qk_norm_eps": 0.000001,
+      "qk_norm_order": "projection_then_qk_norm_then_rope_where_applicable",
+      "attention_scale": "inverse_sqrt_head_dimension",
+      "random_depth_sampling": "uniform_per_batch",
+      "bptt": "full_all_sampled_steps",
+      "random_depth_training": [
+        2,
+        4,
+        8
+      ],
+      "default_inference_steps": 4
+    },
+    "moe": {
+      "base": "dense",
+      "moe_layers": {
+        "input_one_based": [
+          2,
+          4,
+          6,
+          8,
+          10
+        ],
+        "readout_one_based": [
+          2
+        ]
+      },
+      "experts": 16,
+      "expert_intermediate_size": 512,
+      "top_k": 3,
+      "shared_experts": 1,
+      "active_ffn_width": 2048,
+      "approx_params_total": "242M",
+      "approx_params_active": "150M_tokenwise_dense_equivalent_not_request_unique_weights",
+      "routed_weight_rule": "softmax_over_16_then_normalize_selected_top_3",
+      "shared_weight_rule": "add_shared_output_separately",
+      "shared_experts_in_router_or_balance_statistics": false,
+      "matching_scope": "expert_ffn_matmul_only_router_and_dispatch_extra"
+    },
+    "stages": {
+      "base": {
+        "init": "scratch",
+        "mix": {
+          "text_mlm": 0.5,
+          "text_span_denoising": 0.5
+        },
+        "lr_schedule": "wsd_decay_last_15pct",
+        "generation_length": "explicit_canvas_len_required",
+        "text_span_target": "split_prefix_before_encoding_then_raw_span_plus_eos",
+        "raw_span_max_tokens": 255,
+        "span_cross_document_boundary": false,
+        "train_length_head": false
+      },
+      "it": {
+        "init": "base",
+        "generation_length": "predicted_length_or_explicit_canvas_len",
+        "length_loss_on": "natural_instruction_response_batches_only",
+        "mix": {
+          "instruction_denoising": 0.7,
+          "structured_reasoning": 0.15,
+          "text_span_denoising": 0.15
+        }
+      },
+      "embed": {
+        "init": "dense_base",
+        "objective": "contrastive",
+        "matryoshka_dims": [
+          64,
+          128,
+          256
+        ]
+      }
+    },
+    "artifacts": [
+      "nuri-tokenizer",
+      "nuri-base",
+      "nuri-base-moe",
+      "nuri-base-it",
+      "nuri-base-moe-it",
+      "nuri-base-embed"
+    ],
+    "skip_independent_T_pilot": true
+  }
+}
