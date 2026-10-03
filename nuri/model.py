@@ -32,7 +32,10 @@ class NuriModel(nn.Module):
         self.reason_proj = nn.Linear(d, d, bias=False)
         # Length classes 1..M including EOS; class index = length - 1.
         self.length_head = nn.Linear(2 * d, config.max_response_len, bias=False)
+        # General classifier on concat(u, r), and a structure-check head that reads
+        # only mean(R) so it has no direct path from X (§6).
         self.task_head = nn.Linear(2 * d, config.num_labels, bias=False) if config.num_labels else None
+        self.structure_head = nn.Linear(d, config.num_labels, bias=False) if config.num_labels else None
         self.apply(self._init_weights)
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -100,6 +103,12 @@ class NuriModel(nn.Module):
         if self.task_head is None:
             raise ValueError("config.num_labels is 0")
         return self.task_head(torch.cat([u, r], dim=-1))
+
+    def structure_logits(self, r: torch.Tensor) -> torch.Tensor:
+        """Multi-hop structure check from mean(R_final) only. Not evidence of reasoning by itself."""
+        if self.structure_head is None:
+            raise ValueError("config.num_labels is 0")
+        return self.structure_head(r)
 
     # ----- generation path -------------------------------------------------------------
 

@@ -5,7 +5,7 @@ from nuri.config import MoEConfig, reference_config, release_dense_config, relea
 from nuri.model import NuriModel
 
 # Small parameters that ARCHITECTURE.md §10 leaves out of the headline counts.
-SMALL_PARAMS = ("norm", "gate_logits", "length_head", "task_head")
+SMALL_PARAMS = ("norm", "gate_logits", "length_head", "task_head", "structure_head")
 
 
 def main_weight_count(config) -> int:
@@ -150,3 +150,14 @@ def test_last_aux_is_available_at_inference():
         model.encode(sample_inputs(model.config))
     layer = model.moe_layers()[0]
     assert layer.last_aux is not None and not layer.aux_records
+
+
+def test_structure_head_reads_only_r():
+    model = make_model(num_labels=3)
+    ids = sample_inputs(model.config)
+    x, valid = model.encode(ids)
+    u, r = model.pool(x, valid, model.reason(x, valid))
+    logits = model.structure_logits(r)
+    assert logits.shape == (2, 3)
+    assert torch.equal(logits, model.structure_logits(r.clone()))  # no input besides r
+    assert not torch.equal(model.task_logits(u, r), model.task_logits(torch.zeros_like(u), r))
