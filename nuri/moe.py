@@ -86,11 +86,17 @@ class MoEFFN(nn.Module):
 
     def _run_experts(self, grouped: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
         """SwiGLU of each expert on its contiguous slice of `grouped` (rows sorted by expert)."""
-        if self.backend == "grouped" and _grouped_mm_usable(grouped, self.w_gate, self.w_down):
-            offsets = counts.cumsum(0).to(torch.int32)  # end row of each expert's slice
-            gate = _grouped_matmul(grouped, self.w_gate, offsets)
-            up = _grouped_matmul(grouped, self.w_up, offsets)
-            return _grouped_matmul(F.silu(gate) * up, self.w_down, offsets)
+        if self.backend == "grouped":
+            dtype = _compute_dtype(grouped)
+            if _grouped_mm_usable(grouped, dtype, self.w_gate, self.w_down):
+                try:
+                    x = grouped.to(dtype)
+                    offsets = counts.cumsum(0).to(torch.int32)  # end row of each expert's slice
+                    gate = _grouped_matmul(x, self.w_gate, offsets)
+                    up = _grouped_matmul(x, self.w_up, offsets)
+                    return _grouped_matmul(F.silu(gate) * up, self.w_down, offsets)
+                except RuntimeError:
+                    pass  # an unsupported kernel/device combination: use the loop below
         outputs = []
         for e, rows in enumerate(grouped.split(counts.tolist())):
             if rows.shape[0]:
@@ -98,12 +104,42 @@ class MoEFFN(nn.Module):
         return torch.cat(outputs)
 
 
-def _grouped_mm_usable(x: torch.Tensor, *weights: torch.Tensor) -> bool:
-    """torch._grouped_mm exists and every row/column stride is a multiple of 16 bytes."""
+def _compute_dtype(x: torch.Tensor) -> torch.dtype:
+    """The dtype a matmul on x would actually use: the autocast dtype if autocast is on.
+
+    torch._grouped_mm has no autocast rule, so the grouped path casts its
+    inputs to this dtype itself.
+    """
+    device = x.device.type
+    if torch.is_autocast_enabled(device):
+        return torch.get_autocast_dtype(device)
+    return x.dtype
+
+
+def grouped_mm_supported(device_type: str, dtype: torch.dtype, capability: tuple[int, int] | None) -> bool:
+    """Where torch._grouped_mm is known to work.
+
+    CUDA: bf16 on compute capability 9.0+ (H100 class) only; A100 (8.0) and
+    other dtypes must use the loop. CPU: float32, the case this repository
+    tests. Everything else uses the loop.
+    """
+    if device_type == "cuda":
+        return dtype == torch.bfloat16 and capability is not None and capability >= (9, 0)
+    if device_type == "cpu":
+        return dtype == torch.float32
+    return False
+
+
+def _grouped_mm_usable(x: torch.Tensor, dtype: torch.dtype, *weights: torch.Tensor) -> bool:
+    """The op exists, the device/dtype pair is supported, and every stride is a multiple of 16 bytes."""
     if not hasattr(torch, "_grouped_mm"):
         return False
+    capability = torch.cuda.get_device_capability(x.device) if x.device.type == "cuda" else None
+    if not grouped_mm_supported(x.device.type, dtype, capability):
+        return False
+    element_size = torch.empty((), dtype=dtype).element_size()
     sizes = [x.shape[-1]] + [w.shape[-1] for w in weights] + [w.shape[-2] for w in weights]
-    return all(size * x.element_size() % 16 == 0 for size in sizes)
+    return all(size * element_size % 16 == 0 for size in sizes)
 
 
 def _grouped_matmul(x: torch.Tensor, weight: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:

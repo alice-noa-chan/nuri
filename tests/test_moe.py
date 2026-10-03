@@ -124,3 +124,27 @@ def test_grouped_backend_falls_back_when_unaligned():
 def test_unknown_backend_is_rejected():
     with pytest.raises(ValueError):
         tiny_config(moe=MoEConfig(backend="fast"))
+
+
+@pytest.mark.parametrize("device,dtype,capability,expected", [
+    ("cuda", torch.bfloat16, (9, 0), True),    # H100
+    ("cuda", torch.bfloat16, (8, 0), False),   # A100 must fall back
+    ("cuda", torch.float32, (9, 0), False),    # fp32 on CUDA must fall back
+    ("cpu", torch.float32, None, True),
+    ("cpu", torch.bfloat16, None, False),
+])
+def test_grouped_support_matrix(device, dtype, capability, expected):
+    from nuri.moe import grouped_mm_supported
+    assert grouped_mm_supported(device, dtype, capability) is expected
+
+
+def test_grouped_backend_falls_back_for_unsupported_dtype_and_autocast():
+    moe = make_moe()
+    moe.backend = "grouped"
+    x = torch.randn(2, 5, 16)
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # CPU bf16 is not a supported grouped case
+        out = moe(x)
+    assert torch.isfinite(out).all()
+    reference = make_moe()
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        assert torch.allclose(out.float(), reference(x).float(), atol=1e-2)
