@@ -15,8 +15,8 @@ several --seeds, each variant is trained once per seed (model init and
 batch order change, data stays fixed) and the summary reports the mean and
 standard deviation, so differences can be compared with seed noise.
 
-The tokenizer is a small byte-level BPE trained on the task texts, so the
-script needs no data. Results go to <out>/ablation.json and a table is
+The tokenizer is a small byte-level BPE trained on the training task texts
+only, so the script needs no data and the eval set does not shape it. Results go to <out>/ablation.json and a table is
 printed. These are small-scale comparisons: they show whether an option
 trains and how it moves the metric, not how it behaves at release scale.
 """
@@ -115,7 +115,8 @@ def main(argv=None) -> list[dict]:
 
     train_raw = reasoning_examples(args.train_examples, seed=args.seed, split="train")
     eval_raw = reasoning_examples(args.eval_examples, seed=1_000_003 + args.seed, split="shared")
-    tokenizer = build_tokenizer([m[0]["content"] + " " + a for m, a in train_raw + eval_raw], args.vocab_size)
+    # The tokenizer sees training texts only, so nothing about the eval set leaks into it.
+    tokenizer = build_tokenizer([m[0]["content"] + " " + a for m, a in train_raw], args.vocab_size)
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False).ids  # noqa: E731
     train_ex = [(encode(chat_prompt_text(m)), encode(a)) for m, a in train_raw]
     eval_ex = [(encode(chat_prompt_text(m)), encode(a)) for m, a in eval_raw]
