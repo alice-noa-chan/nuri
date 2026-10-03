@@ -4,6 +4,9 @@
 # Private data notes (dataset sources are not disclosed, D-008)
 /.private/
 
+# Local datasets, prepared examples and downloads are never part of Git.
+/data/
+
 # Per-agent watcher snapshots
 /.watch/
 
