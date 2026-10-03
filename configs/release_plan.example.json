@@ -1,0 +1,24 @@
+{
+  "out": "runs/release",
+  "data": {
+    "tokenizer": "<folder of the chosen tokenizer variant>",
+    "corpus": "<training corpus folder>",
+    "eval_corpus": "<held-out corpus folder>",
+    "instructions": "<instruction JSONL>",
+    "pairs": "<embedding pair JSONL>",
+    "eval_pairs": "<held-out pair JSONL>"
+  },
+  "release": {"gpu": "1x H100 80GB"},
+  "stages": {
+    "base-dense": {"stage": "base", "preset": "release-dense", "steps": 20000, "batch_size": 64,
+                   "save_every": 2000, "evaluate": ["mlm", "diagnostics"], "release_name": "nuri-base"},
+    "base-moe": {"stage": "base", "preset": "release-moe", "steps": 20000, "batch_size": 64,
+                 "save_every": 2000, "evaluate": ["mlm", "diagnostics"], "release_name": "nuri-base-moe"},
+    "it-dense": {"stage": "it", "init": "base-dense", "steps": 3000, "batch_size": 64,
+                 "evaluate": ["reasoning", "curves", "interventions"], "release_name": "nuri-base-it"},
+    "it-moe": {"stage": "it", "init": "base-moe", "steps": 3000, "batch_size": 64,
+               "evaluate": ["reasoning", "curves", "interventions"], "release_name": "nuri-base-moe-it"},
+    "embed": {"stage": "embed", "init": "base-dense", "steps": 3000, "batch_size": 128,
+              "evaluate": ["retrieval"], "release_name": "nuri-base-embed"}
+  }
+}
