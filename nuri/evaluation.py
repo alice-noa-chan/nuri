@@ -12,6 +12,7 @@ plain dicts that can be written as JSON. Every result reports its settings
   (measures the core + readout path of base models, which MLM skips)
 - retrieval_metrics: Recall@k and MRR for an embedding mode
 - core_diagnostics: state norm, update norm, slot cosine and effective rank per step
+- halting_curve: exact match vs mean core steps for several halting tolerances
 """
 
 from __future__ import annotations
@@ -57,7 +58,8 @@ def _length_only_accuracy(answers: list[list[int]]) -> float:
 @torch.no_grad()
 def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: int | None = None,
                         rounds: int | None = None, oracle_length: bool = False, batch_size: int = 32,
-                        transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None) -> dict:
+                        transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None,
+                        halt_tol: float | None = None) -> dict:
     """Exact match of generated answers.
 
     oracle_length=True gives the canvas the gold length (answer + EOS), which
@@ -76,14 +78,16 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
     if transform_r is not None and len(eligible) < 2:
         raise ValueError("R interventions need at least two eligible examples")
     min_size = 2 if transform_r is not None else 1
-    counts = {"correct": 0, "missing_eos": 0, "wrong_length": 0, "total": 0}
+    counts = {"correct": 0, "missing_eos": 0, "wrong_length": 0, "total": 0, "core_steps": 0}
     for chunk in _batches(eligible, max(batch_size, min_size), min_size):
         prompts = [p[-config.max_input_len:] for p, _ in chunk]
         ids, valid = pad_batch(prompts, config.pad_id)
         gold_lengths = torch.tensor([len(a) + 1 for _, a in chunk])
         result = generate(model, ids.to(device), valid.to(device), steps=steps, rounds=rounds,
                           canvas_len=gold_lengths.to(device) if oracle_length else None,
-                          transform_r=transform_r)
+                          transform_r=transform_r, halt_tol=halt_tol)
+        if result.reasoning_steps is not None:
+            counts["core_steps"] += int(result.reasoning_steps.sum())
         for (_, answer), tokens, ended, length, gold in zip(chunk, result.tokens, result.ended_with_eos,
                                                             result.lengths.tolist(), gold_lengths.tolist()):
             counts["correct"] += tokens == list(answer)
@@ -94,6 +98,7 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
     report = {"exact_match": counts["correct"] / total, "missing_eos_rate": counts["missing_eos"] / total,
               "length_error_rate": counts["wrong_length"] / total, "examples": counts["total"],
               "excluded": len(examples) - len(eligible),
+              "mean_core_steps": counts["core_steps"] / total, "halt_tol": halt_tol,
               "steps": steps if steps is not None else config.default_depth,
               "rounds": rounds if rounds is not None else config.refine_rounds, "oracle_length": oracle_length}
     if oracle_length:
@@ -104,6 +109,12 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
 def depth_curve(model: NuriModel, examples: Sequence[Example], depths=(1, 2, 4, 8, 16), **kwargs) -> list[dict]:
     """Exact match at several reasoning depths T of the same checkpoint (D-014)."""
     return [generation_accuracy(model, examples, steps=t, **kwargs) for t in depths]
+
+
+def halting_curve(model: NuriModel, examples: Sequence[Example], tolerances=(None, 0.01, 0.03, 0.1),
+                  steps: int = 16, **kwargs) -> list[dict]:
+    """Exact match and mean core steps at several halting tolerances (None = always `steps`)."""
+    return [generation_accuracy(model, examples, steps=steps, halt_tol=tol, **kwargs) for tol in tolerances]
 
 
 def rounds_curve(model: NuriModel, examples: Sequence[Example], rounds=(1, 2, 4, 8), **kwargs) -> list[dict]:

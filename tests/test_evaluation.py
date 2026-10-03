@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from nuri.config import tiny_config
-from nuri.evaluation import (core_diagnostics, depth_curve, generation_accuracy, mlm_accuracy,
+from nuri.evaluation import (core_diagnostics, depth_curve, generation_accuracy, halting_curve, mlm_accuracy,
                              r_interventions, retrieval_metrics, rounds_curve, sample_examples,
                              shuffle_r, span_denoising, zero_r)
 from nuri.model import NuriModel
@@ -122,3 +122,10 @@ def test_span_denoising_reports_each_ratio_and_is_deterministic():
     assert all(r["spans"] == 6 and r["targets"] > 0 and r["loss"] > 0 for r in rows)
     assert rows[1]["targets"] > rows[0]["targets"]  # full masking scores every position
     assert span_denoising(model, docs, ratios=(0.5,), steps=2) == rows[:1]
+
+
+def test_halting_curve_reports_mean_core_steps():
+    model = make_model()
+    rows = halting_curve(model, EXAMPLES, tolerances=(None, float("inf")), steps=5, oracle_length=True)
+    assert [r["halt_tol"] for r in rows] == [None, float("inf")]
+    assert rows[0]["mean_core_steps"] == 5.0 and rows[1]["mean_core_steps"] == 1.0

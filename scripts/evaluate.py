@@ -17,6 +17,7 @@ Suites
                  "eval" split (unseen names: a stress test)
   curves         the same metric at T = 1/2/4/8/16 and S = 1/2/4/8 (shared split)
   interventions  normal R vs zeroed R vs R shuffled between samples (shared split)
+  halting        exact match vs mean core steps with training-free halting (shared split, up to T=16)
   mlm            masked-token accuracy on --corpus (a held-out corpus folder)
   denoise        held-out span reconstruction loss at 15/50/100% masking, at T = 1/4/8
                  (the core + readout path; works for base models)
@@ -47,7 +48,7 @@ from nuri.pipeline import read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer  # noqa: E402
 
-SUITES = ("reasoning", "curves", "interventions", "mlm", "denoise", "retrieval", "diagnostics")
+SUITES = ("reasoning", "curves", "interventions", "halting", "mlm", "denoise", "retrieval", "diagnostics")
 
 
 def parse_args(argv=None):
@@ -73,7 +74,7 @@ def main(argv=None) -> dict:
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False).ids  # noqa: E731
 
     report = {"checkpoint": str(args.checkpoint), "length_head_trained": model.config.length_head_trained}
-    needs_examples = {"reasoning", "curves", "interventions"} & set(args.suites)
+    needs_examples = {"reasoning", "curves", "interventions", "halting"} & set(args.suites)
     if needs_examples:
         # A seed far from the training seeds, so "shared" examples are new combinations.
         def split_examples(split):
@@ -95,6 +96,8 @@ def main(argv=None) -> dict:
         report["rounds_curve"] = evaluation.rounds_curve(model, examples, oracle_length=oracle)
     if "interventions" in args.suites:
         report["interventions"] = evaluation.r_interventions(model, examples, oracle_length=oracle)
+    if "halting" in args.suites:
+        report["halting"] = evaluation.halting_curve(model, examples, oracle_length=oracle)
 
     if {"mlm", "denoise", "diagnostics"} & set(args.suites):
         if not args.corpus:
