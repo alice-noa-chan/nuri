@@ -72,7 +72,8 @@ class Attention(nn.Module):
     def forward(self, x, kv=None, key_mask=None, rope=None) -> torch.Tensor:
         """x: queries [B, n, D]. kv: cached (k, v) or None for self-attention.
 
-        key_mask: bool [B, n_keys], True for keys that may be attended.
+        key_mask: bool [B, n_keys] (same keys for every query) or
+            [B, n, n_keys] (per query, e.g. local attention); True = may attend.
         rope: tables applied to queries (and keys when kv is None).
         """
         q = self._split(self.q_proj(x))
@@ -81,7 +82,12 @@ class Attention(nn.Module):
         if rope is not None:
             q = apply_rope(q, rope)
         k, v = kv if kv is not None else self.project_kv(x, rope)
-        attn_mask = key_mask[:, None, None, :] if key_mask is not None else None
+        if key_mask is None:
+            attn_mask = None
+        elif key_mask.dim() == 2:
+            attn_mask = key_mask[:, None, None, :]
+        else:
+            attn_mask = key_mask[:, None, :, :]
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         b, _, n, _ = out.shape
         return self.o_proj(out.transpose(1, 2).reshape(b, n, -1))

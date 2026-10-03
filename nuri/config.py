@@ -50,6 +50,11 @@ class NuriConfig:
     mask_id: int = 1
     eos_id: int = 2
     initializer_range: float = 0.02
+    # Bidirectional local/global attention in the input encoder (§4, OFF by
+    # default). One letter per input layer: "G" = global, "L" = local, e.g.
+    # "GLLGLG". Local layers see keys with |i - j| <= local_radius.
+    attention_schedule: str = ""
+    local_radius: int = 64
     moe: Optional[MoEConfig] = None
 
     @property
@@ -84,6 +89,11 @@ class NuriConfig:
             raise ValueError("gate_init is a sigmoid output and must be in (0, 1)")
         if self.norm_eps <= 0 or self.rope_theta <= 0 or self.initializer_range <= 0:
             raise ValueError("norm_eps, rope_theta and initializer_range must be positive")
+        if self.attention_schedule:
+            if len(self.attention_schedule) != self.input_layers or set(self.attention_schedule) - {"G", "L"}:
+                raise ValueError("attention_schedule needs one 'G' or 'L' per input layer")
+            if self.local_radius < 1:
+                raise ValueError("local_radius must be >= 1")
         if self.num_labels < 0:
             raise ValueError("num_labels must be >= 0")
         special = (self.pad_id, self.mask_id, self.eos_id)
