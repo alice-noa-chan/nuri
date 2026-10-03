@@ -103,6 +103,7 @@ class TrainSettings:
     grad_accum: int = 1               # micro-batches per optimizer step (each draws its own task and depth)
     gradient_checkpointing: bool = False  # recompute block activations in backward (same results, less memory)
     compile: bool = False             # torch.compile the blocks in place (same weights and names)
+    native_gqa: bool = False          # let SDPA consume compact grouped K/V heads (runtime option)
 
 
 @dataclass
@@ -157,6 +158,7 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     device = device or default_device()
     model.to(device).train()
     model.set_gradient_checkpointing(settings.gradient_checkpointing)
+    model.set_native_gqa(settings.native_gqa)
     if settings.compile:
         _compile_blocks(model)
     out = Path(settings.out_dir)
@@ -300,7 +302,7 @@ RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
 
 # Settings added after the first training states were written, with the value
 # that matches what older code did.
-LEGACY_SETTING_DEFAULTS = {"grad_accum": 1}
+LEGACY_SETTING_DEFAULTS = {"grad_accum": 1, "native_gqa": False}
 
 
 def _comparable_settings(settings: TrainSettings) -> dict:

@@ -37,6 +37,7 @@ def run_benchmark(
     warmup: int = 2,
     iterations: int = 5,
     seed: int = 0,
+    native_gqa: bool = False,
 ) -> dict:
     if task not in {"mlm", "denoise", "embed-fast", "embed-reasoning", "generate"}:
         raise ValueError("Unknown benchmark task")
@@ -59,6 +60,7 @@ def run_benchmark(
 
     torch.manual_seed(seed)
     model = NuriModel(config).to(runtime_device)
+    model.set_native_gqa(native_gqa)
     model.train(training)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4) if training else None
     clean_input = torch.randint(3, config.vocab_size, (batch_size, input_length), device=runtime_device)
@@ -137,6 +139,9 @@ def run_benchmark(
         "device": str(runtime_device),
         "device_name": torch.cuda.get_device_name(runtime_device) if runtime_device.type == "cuda" else "CPU",
         "torch_version": torch.__version__,
+        "native_gqa": native_gqa,
+        "attention_execution": ("native_sdpa_gqa" if native_gqa else "repeat_kv_gqa")
+                               if config.num_kv_heads not in (None, config.num_heads) else "mha",
         "autocast_dtype": dtype,
         "batch_size": batch_size,
         "input_length": input_length,
@@ -172,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="Use a saved executable NuriConfig JSON instead of a preset")
     parser.add_argument("--task", choices=["mlm", "denoise", "embed-fast", "embed-reasoning", "generate"], default="denoise")
     parser.add_argument("--training", action="store_true")
+    parser.add_argument("--native-gqa", action="store_true", help="use compact GQA heads in supported SDPA")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--batch-size", type=int, default=1)
@@ -189,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         config, task=args.task, training=args.training, device=args.device, dtype=args.dtype,
         batch_size=args.batch_size, input_length=args.input_length, output_length=args.output_length,
         steps=args.steps, rounds=args.rounds, warmup=args.warmup, iterations=args.iterations, seed=args.seed,
+        native_gqa=args.native_gqa,
     )
     text = json.dumps(results, indent=2) + "\n"
     if args.output:
