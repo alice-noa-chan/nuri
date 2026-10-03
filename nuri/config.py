@@ -42,6 +42,9 @@ class NuriConfig:
     train_depths: tuple[int, ...] = (4,)
     default_depth: int = 4
     refine_rounds: int = 4
+    # Set to True after instruction tuning. Base models never train the length
+    # head, so generation then needs an explicit canvas length (§7).
+    length_head_trained: bool = False
     num_labels: int = 0
     pad_id: int = 0
     mask_id: int = 1
