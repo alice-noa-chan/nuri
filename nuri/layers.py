@@ -61,6 +61,7 @@ class Attention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads or num_heads
+        self.native_gqa = False
         self.head_dim = hidden_size // num_heads
         kv_size = self.num_kv_heads * self.head_dim
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
@@ -76,8 +77,12 @@ class Attention(nn.Module):
         b, n, size = x.shape
         return x.view(b, n, size // self.head_dim, self.head_dim).transpose(1, 2)
 
+    def set_native_gqa(self, enabled: bool = True) -> None:
+        """Select native SDPA GQA at runtime; the portable path remains default."""
+        configure_native_gqa(self, enabled)
+
     def project_kv(self, memory: torch.Tensor, rope=None) -> tuple[torch.Tensor, torch.Tensor]:
-        """K/V with num_kv_heads heads; they are only repeated for the query heads inside forward."""
+        """Reusable K/V with num_kv_heads heads for either attention path."""
         if self.kv_down is not None:
             memory = self.kv_down(memory)  # shared low-dimensional latent for K and V
         k = self._split(self.k_proj(memory))
@@ -100,7 +105,8 @@ class Attention(nn.Module):
         if rope is not None:
             q = apply_rope(q, rope)
         k, v = kv if kv is not None else self.project_kv(x, rope)
-        if self.num_kv_heads != self.num_heads:  # GQA: each K/V head serves a group of query heads
+        grouped = self.num_kv_heads != self.num_heads
+        if grouped and not self.native_gqa:
             group = self.num_heads // self.num_kv_heads
             k, v = k.repeat_interleave(group, dim=1), v.repeat_interleave(group, dim=1)
         if key_mask is None:
@@ -109,9 +115,39 @@ class Attention(nn.Module):
             attn_mask = key_mask[:, None, None, :]
         else:
             attn_mask = key_mask[:, None, :, :]
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        if grouped and self.native_gqa:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=True)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         b, _, n, _ = out.shape
         return self.o_proj(out.transpose(1, 2).reshape(b, n, -1))
+
+
+def configure_native_gqa(module: nn.Module, enabled: bool = True) -> None:
+    """Configure all Attention descendants without changing checkpoint weights.
+
+    A deterministic CPU math probe checks the native API before any flag is
+    changed. Actual backend selection still depends on the device, dtype and
+    mask; forced incompatible backends report their normal SDPA error. Native
+    support alone does not guarantee a fused kernel or a speed improvement.
+    """
+    attention_layers = [layer for layer in module.modules() if isinstance(layer, Attention)]
+    if enabled and any(layer.num_kv_heads != layer.num_heads for layer in attention_layers):
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+
+        query = torch.zeros(1, 2, 1, 2, device="cpu", dtype=torch.float32)
+        memory = torch.zeros(1, 1, 1, 2, device="cpu", dtype=torch.float32)
+        try:
+            with sdpa_kernel(SDPBackend.MATH):
+                F.scaled_dot_product_attention(query, memory, memory, enable_gqa=True)
+        except (TypeError, RuntimeError) as error:
+            raise RuntimeError(
+                "This PyTorch build does not support SDPA enable_gqa. Upgrade to "
+                "PyTorch >=2.5 with native GQA support, or disable native GQA to "
+                "use the portable repeated-head path."
+            ) from error
+    for layer in attention_layers:
+        layer.native_gqa = bool(enabled)
 
 
 def run_checkpointed(module: nn.Module, *args):

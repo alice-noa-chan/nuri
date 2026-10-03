@@ -9,6 +9,7 @@ from torch import nn
 from .config import NuriConfig
 from .core import RecurrentReasoningCore
 from .encoder import InputEncoder
+from .layers import configure_native_gqa
 from .moe import MoEFFN
 from .readout import BidirectionalReadout, MemoryCache
 
@@ -55,6 +56,15 @@ class NuriModel(nn.Module):
         """
         self.encoder.gradient_checkpointing = enabled
         self.readout.gradient_checkpointing = enabled
+
+    def set_native_gqa(self, enabled: bool = True) -> None:
+        """Let SDPA consume compact grouped K/V heads when this runtime supports it.
+
+        The portable repeated-K/V path remains the default. This switch changes
+        execution, not weights or model geometry, and is not saved in public
+        model configs. Benchmark the selected backend on the target GPU.
+        """
+        configure_native_gqa(self, enabled)
 
     # ----- input memory and reasoning -------------------------------------------------
 
