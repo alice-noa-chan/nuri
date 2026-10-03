@@ -47,22 +47,30 @@ class Attention(nn.Module):
     fixed input memory across all reasoning steps or refinement rounds.
     """
 
-    def __init__(self, hidden_size: int, num_heads: int, qk_norm: bool, eps: float):
+    def __init__(self, hidden_size: int, num_heads: int, qk_norm: bool, eps: float,
+                 num_kv_heads: int | None = None):
+        """num_kv_heads < num_heads gives grouped-query attention (GQA): several
+        query heads share one key/value head, so K/V projections and cached
+        K/V shrink by num_heads / num_kv_heads. None means plain MHA.
+        """
         super().__init__()
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads or num_heads
         self.head_dim = hidden_size // num_heads
+        kv_size = self.num_kv_heads * self.head_dim
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, kv_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, kv_size, bias=False)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps) if qk_norm else None
         self.k_norm = RMSNorm(self.head_dim, eps) if qk_norm else None
 
     def _split(self, x: torch.Tensor) -> torch.Tensor:
-        b, n, _ = x.shape
-        return x.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        b, n, size = x.shape
+        return x.view(b, n, size // self.head_dim, self.head_dim).transpose(1, 2)
 
     def project_kv(self, memory: torch.Tensor, rope=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """K/V with num_kv_heads heads; they are only repeated for the query heads inside forward."""
         k = self._split(self.k_proj(memory))
         if self.k_norm is not None:
             k = self.k_norm(k)
@@ -83,6 +91,9 @@ class Attention(nn.Module):
         if rope is not None:
             q = apply_rope(q, rope)
         k, v = kv if kv is not None else self.project_kv(x, rope)
+        if self.num_kv_heads != self.num_heads:  # GQA: each K/V head serves a group of query heads
+            group = self.num_heads // self.num_kv_heads
+            k, v = k.repeat_interleave(group, dim=1), v.repeat_interleave(group, dim=1)
         if key_mask is None:
             attn_mask = None
         elif key_mask.dim() == 2:

@@ -26,9 +26,9 @@ class ReadoutBlock(nn.Module):
         super().__init__()
         d = config.hidden_size
         self.self_norm = RMSNorm(d, config.norm_eps)
-        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps)
+        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
         self.cross_norm = RMSNorm(d, config.norm_eps)
-        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps)
+        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
         self.ffn_norm = RMSNorm(d, config.norm_eps)
         self.ffn = build_ffn(config, "readout", layer_number)
 

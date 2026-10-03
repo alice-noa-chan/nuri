@@ -28,9 +28,9 @@ class RecurrentReasoningCore(nn.Module):
         d = config.hidden_size
         self.slots = nn.Parameter(torch.empty(config.latent_slots, d))
         self.cross_norm = RMSNorm(d, config.norm_eps)
-        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps)
+        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
         self.self_norm = RMSNorm(d, config.norm_eps)
-        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps)
+        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
         self.ffn_norm = RMSNorm(d, config.norm_eps)
         self.ffn = build_ffn(config, "core", 1)  # dense unless MoEConfig.core is on
         # Raw logits of the three sigmoid branch gates (cross, self, ffn).

@@ -170,3 +170,18 @@ def test_moe_counts_cover_every_layer_even_if_it_did_not_run():
     aux = model.pop_moe_aux()
     assert len(aux["counts"]) == len(model.moe_layers()) == 2
     assert int(aux["counts"][0].sum()) > 0 and int(aux["counts"][1].sum()) == 0
+
+
+def test_gqa_model_runs_and_shrinks_kv_projections():
+    full = main_weight_count(reference_config())
+    gqa = main_weight_count(reference_config(num_kv_heads=2))
+    # 12 attention layers (6 input, 2 core, 2 per readout layer x 2) each lose 3/4 of their K and V.
+    attention_layers = 6 + 2 + 2 * 2
+    assert full - gqa == attention_layers * 2 * (512 * 512 - 512 * 128)
+    model = make_model(num_kv_heads=2)
+    ids = sample_inputs(model.config)
+    x, valid = model.encode(ids)
+    cache = model.generation_memory(x, valid, model.reason(x, valid))
+    assert cache.kv[0][0].shape[1] == 2
+    hidden = model.readout_hidden(torch.full((2, 3), model.config.mask_id), torch.ones(2, 3, dtype=torch.bool), cache)
+    assert torch.isfinite(hidden).all()

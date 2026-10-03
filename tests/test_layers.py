@@ -55,3 +55,18 @@ def test_cached_kv_matches_inline():
 
 def test_swiglu_shape():
     assert SwiGLU(16, 40)(torch.randn(2, 3, 16)).shape == (2, 3, 16)
+
+
+def test_gqa_shares_key_value_heads():
+    torch.manual_seed(0)
+    gqa = Attention(32, 4, qk_norm=True, eps=1e-6, num_kv_heads=2)
+    assert gqa.k_proj.weight.shape == (16, 32)  # 2 heads x head_dim 8
+    x = torch.randn(2, 5, 32)
+    k, v = gqa.project_kv(x)
+    assert k.shape == (2, 2, 5, 8)  # the cache keeps 2 heads, not 4
+    # Same as MHA whose 4 K/V heads repeat the 2 shared ones.
+    mha = Attention(32, 4, qk_norm=True, eps=1e-6)
+    mha.load_state_dict({**gqa.state_dict(),
+                         "k_proj.weight": gqa.k_proj.weight.view(2, 8, 32).repeat_interleave(2, 0).reshape(32, 32),
+                         "v_proj.weight": gqa.v_proj.weight.view(2, 8, 32).repeat_interleave(2, 0).reshape(32, 32)})
+    assert torch.allclose(gqa(x), mha(x), atol=1e-6)
