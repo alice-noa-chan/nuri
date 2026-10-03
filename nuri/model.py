@@ -69,9 +69,11 @@ class NuriModel(nn.Module):
             raise ValueError("every sample needs at least one valid input token")
         return self.encoder(self.embedding(input_ids), valid, segments), valid
 
-    def reason(self, x: torch.Tensor, valid: torch.Tensor, steps: int | None = None, return_states: bool = False):
+    def reason(self, x: torch.Tensor, valid: torch.Tensor, steps: int | None = None, return_states: bool = False,
+               halt_tol: float | None = None):
+        """R_final after `steps` core steps (config default if None); see the core for halt_tol."""
         steps = self.config.default_depth if steps is None else steps
-        return self.core(x, valid, steps, return_states=return_states)
+        return self.core(x, valid, steps, return_states=return_states, halt_tol=halt_tol)
 
     def pool(self, x: torch.Tensor, valid: torch.Tensor, r: torch.Tensor | None = None):
         u = masked_mean(x, valid)

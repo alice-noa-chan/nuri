@@ -81,3 +81,34 @@ def test_depth_changes_state_and_states_are_returned():
     assert not torch.allclose(r1, r4)
     gate = torch.sigmoid(core.gate_logits)
     assert torch.allclose(gate, torch.full((3,), 0.1), atol=1e-6)
+
+
+def test_halting_extremes_match_fixed_depths():
+    parts = Parts()
+    config, core = parts.config, parts.core
+    x = torch.randn(3, 6, config.hidden_size)
+    valid = torch.ones(3, 6, dtype=torch.bool)
+    with torch.no_grad():
+        never = core(x, valid, steps=4, halt_tol=0.0)  # every change >= 0: nobody stops
+        assert torch.allclose(never, core(x, valid, steps=4), atol=1e-6)
+        assert core.last_steps_used.tolist() == [4, 4, 4]
+        always = core(x, valid, steps=4, halt_tol=float("inf"))  # everybody stops after one step
+        assert torch.allclose(always, core(x, valid, steps=1), atol=1e-6)
+        assert core.last_steps_used.tolist() == [1, 1, 1]
+
+
+def test_halted_samples_keep_their_own_state():
+    parts = Parts()
+    config, core = parts.config, parts.core
+    torch.manual_seed(1)
+    x = torch.randn(4, 6, config.hidden_size)
+    x[0] *= 50  # a very different input changes slowly relative to its size
+    valid = torch.ones(4, 6, dtype=torch.bool)
+    with torch.no_grad():
+        core(x, valid, steps=6)
+        out = core(x, valid, steps=6, halt_tol=0.05)
+        used = core.last_steps_used.tolist()
+        for row, steps in enumerate(used):
+            alone = core(x[row:row + 1], valid[row:row + 1], steps=steps)
+            assert torch.allclose(out[row], alone[0], atol=1e-5)
+    assert all(1 <= s <= 6 for s in used)

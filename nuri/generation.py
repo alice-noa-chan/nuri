@@ -23,6 +23,7 @@ class GenerationResult:
     lengths: torch.Tensor            # canvas length used for each sample
     ended_with_eos: list[bool]       # False means the model never wrote EOS
     history: list[torch.Tensor] = field(default_factory=list)  # canvas after each round
+    reasoning_steps: torch.Tensor | None = None  # core steps each sample ran (< T only with halting)
 
 
 @torch.no_grad()
@@ -31,7 +32,7 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
              max_len: int | None = None, keep_history: bool = False,
              transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None,
              temperature: float = 0.0, top_k: int | None = None,
-             generator: torch.Generator | None = None) -> GenerationResult:
+             generator: torch.Generator | None = None, halt_tol: float | None = None) -> GenerationResult:
     """Greedy refinement generation.
 
     steps: reasoning depth T (config default if None).
@@ -49,6 +50,9 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         repeatable. The stored confidence is the model's own probability of
         the chosen token (at temperature 1), so re-masking still prefers to
         revisit unlikely choices.
+    halt_tol: experimental training-free halting of the core (see
+        RecurrentReasoningCore); `steps` becomes an upper bound and
+        result.reasoning_steps reports what each sample used.
     """
     config = model.config
     steps = config.default_depth if steps is None else steps
@@ -65,7 +69,9 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     max_len = min(max_len, config.max_response_len)
 
     x, valid = model.encode(input_ids, attention_mask)
-    r = model.reason(x, valid, steps)
+    # halt_tol is passed only when used, so models that override reason() keep working.
+    r = model.reason(x, valid, steps) if halt_tol is None else model.reason(x, valid, steps, halt_tol=halt_tol)
+    reasoning_steps = model.core.last_steps_used
     if transform_r is not None:
         r = transform_r(r)
     lengths = _choose_lengths(model, x, valid, r, canvas_len, input_ids.shape[0]).clamp(1, max_len)
@@ -102,7 +108,7 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         answer = canvas[row, :int(lengths[row])].tolist()
         ended.append(config.eos_id in answer)
         tokens.append(answer[:answer.index(config.eos_id)] if config.eos_id in answer else answer)
-    return GenerationResult(tokens, canvas, lengths, ended, history)
+    return GenerationResult(tokens, canvas, lengths, ended, history, reasoning_steps)
 
 
 def _pick_tokens(logits: torch.Tensor, temperature: float, top_k: int | None, generator) -> torch.Tensor:

@@ -90,3 +90,11 @@ def test_bad_sampling_settings_are_rejected(kwargs):
     model = make_model()
     with pytest.raises(ValueError):
         generate(model, prompt(model), canvas_len=4, **kwargs)
+
+
+def test_generation_reports_reasoning_steps():
+    model = make_model()
+    full = generate(model, prompt(model), canvas_len=4, steps=3)
+    assert full.reasoning_steps.tolist() == [3, 3]
+    halted = generate(model, prompt(model), canvas_len=4, steps=3, halt_tol=float("inf"))
+    assert halted.reasoning_steps.tolist() == [1, 1]
