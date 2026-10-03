@@ -48,10 +48,15 @@ class Attention(nn.Module):
     """
 
     def __init__(self, hidden_size: int, num_heads: int, qk_norm: bool, eps: float,
-                 num_kv_heads: int | None = None):
+                 num_kv_heads: int | None = None, kv_latent_dim: int | None = None):
         """num_kv_heads < num_heads gives grouped-query attention (GQA): several
         query heads share one key/value head, so K/V projections and cached
         K/V shrink by num_heads / num_kv_heads. None means plain MHA.
+
+        kv_latent_dim (MLA-style, experimental) first compresses the memory to
+        a small shared latent, then expands it to K and V:
+        K = W_k_up(W_down(x)), V = W_v_up(W_down(x)). This tests the
+        projection bottleneck itself (§9); None means direct K/V projections.
         """
         super().__init__()
         self.num_heads = num_heads
@@ -59,8 +64,10 @@ class Attention(nn.Module):
         self.head_dim = hidden_size // num_heads
         kv_size = self.num_kv_heads * self.head_dim
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = nn.Linear(hidden_size, kv_size, bias=False)
-        self.v_proj = nn.Linear(hidden_size, kv_size, bias=False)
+        kv_input = kv_latent_dim or hidden_size
+        self.kv_down = nn.Linear(hidden_size, kv_latent_dim, bias=False) if kv_latent_dim else None
+        self.k_proj = nn.Linear(kv_input, kv_size, bias=False)
+        self.v_proj = nn.Linear(kv_input, kv_size, bias=False)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps) if qk_norm else None
         self.k_norm = RMSNorm(self.head_dim, eps) if qk_norm else None
@@ -71,6 +78,8 @@ class Attention(nn.Module):
 
     def project_kv(self, memory: torch.Tensor, rope=None) -> tuple[torch.Tensor, torch.Tensor]:
         """K/V with num_kv_heads heads; they are only repeated for the query heads inside forward."""
+        if self.kv_down is not None:
+            memory = self.kv_down(memory)  # shared low-dimensional latent for K and V
         k = self._split(self.k_proj(memory))
         if self.k_norm is not None:
             k = self.k_norm(k)

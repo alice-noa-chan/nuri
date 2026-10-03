@@ -185,3 +185,13 @@ def test_gqa_model_runs_and_shrinks_kv_projections():
     assert cache.kv[0][0].shape[1] == 2
     hidden = model.readout_hidden(torch.full((2, 3), model.config.mask_id), torch.ones(2, 3, dtype=torch.bool), cache)
     assert torch.isfinite(hidden).all()
+
+
+def test_latent_kv_model_runs_and_counts_parameters():
+    full = main_weight_count(reference_config())
+    mla = main_weight_count(reference_config(kv_latent_dim=128))
+    per_layer = 2 * 512 * 512 - (512 * 128 + 2 * 128 * 512)  # K and V vs down + two ups
+    assert full - mla == 12 * per_layer
+    model = make_model(kv_latent_dim=16, num_kv_heads=2)
+    x, valid = model.encode(sample_inputs(model.config))
+    assert torch.isfinite(model.reason(x, valid)).all()

@@ -28,9 +28,9 @@ class RecurrentReasoningCore(nn.Module):
         d = config.hidden_size
         self.slots = nn.Parameter(torch.empty(config.latent_slots, d))
         self.cross_norm = RMSNorm(d, config.norm_eps)
-        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
+        self.cross_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads, config.kv_latent_dim)
         self.self_norm = RMSNorm(d, config.norm_eps)
-        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
+        self.self_attn = Attention(d, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads, config.kv_latent_dim)
         self.ffn_norm = RMSNorm(d, config.norm_eps)
         self.ffn = build_ffn(config, "core", 1)  # dense unless MoEConfig.core is on
         # Raw logits of the three sigmoid branch gates (cross, self, ffn).
@@ -70,11 +70,17 @@ class RecurrentReasoningCore(nn.Module):
         (||R_new - R|| / ||R||). Stopped samples leave the batch, so they cost
         no more compute; `steps` is the upper bound. Training-free; learned
         halting is a separate experiment (§9).
+
+        Halting and hypothesis groups cannot be combined: an early stop would
+        skip the required all-slot merge in the final scheduled step.
         """
         if steps < 0:
             raise ValueError("steps must be >= 0")
-        if halt_tol is not None and (return_states or halt_tol < 0):
-            raise ValueError("halt_tol must be >= 0 and cannot be combined with return_states")
+        if halt_tol is not None:
+            if return_states or halt_tol < 0 or math.isnan(halt_tol):
+                raise ValueError("halt_tol must be >= 0, not NaN, and cannot be combined with return_states")
+            if self.grouped:
+                raise ValueError("halt_tol cannot be combined with slot_groups > 1: the final merge is required")
         kv = self.cross_attn.project_kv(x)
         gates = torch.sigmoid(self.gate_logits).to(x.dtype)
         self.last_step_expert_counts = []
@@ -99,7 +105,10 @@ class RecurrentReasoningCore(nn.Module):
                                grouped=self.grouped and step < steps - 1)
             r = r.index_copy(0, active, after)
             used[active] += 1
-            change = (after - before).flatten(1).norm(dim=1) / before.flatten(1).norm(dim=1).clamp_min(1e-12)
+            # Half-precision norms can overflow even for finite slot values,
+            # falsely treating a nonzero update as convergence.
+            before_float, after_float = before.float(), after.float()
+            change = (after_float - before_float).flatten(1).norm(dim=1) / before_float.flatten(1).norm(dim=1).clamp_min(1e-12)
             active = active[change >= halt_tol]
         self.last_steps_used = used
         return self.final_norm(r)

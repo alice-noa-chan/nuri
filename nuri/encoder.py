@@ -55,7 +55,7 @@ class EncoderBlock(nn.Module):
         schedule = config.attention_schedule
         self.local = bool(schedule) and schedule[layer_number - 1] == "L"
         self.attn_norm = RMSNorm(config.hidden_size, config.norm_eps)
-        self.attn = Attention(config.hidden_size, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads)
+        self.attn = Attention(config.hidden_size, config.num_heads, config.qk_norm, config.norm_eps, config.num_kv_heads, config.kv_latent_dim)
         self.ffn_norm = RMSNorm(config.hidden_size, config.norm_eps)
         self.ffn = build_ffn(config, "input", layer_number)
 

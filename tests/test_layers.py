@@ -70,3 +70,18 @@ def test_gqa_shares_key_value_heads():
                          "k_proj.weight": gqa.k_proj.weight.view(2, 8, 32).repeat_interleave(2, 0).reshape(32, 32),
                          "v_proj.weight": gqa.v_proj.weight.view(2, 8, 32).repeat_interleave(2, 0).reshape(32, 32)})
     assert torch.allclose(gqa(x), mha(x), atol=1e-6)
+
+
+def test_latent_kv_is_a_low_rank_projection():
+    torch.manual_seed(0)
+    mla = Attention(32, 4, qk_norm=False, eps=1e-6, kv_latent_dim=8)
+    assert mla.kv_down.weight.shape == (8, 32) and mla.k_proj.weight.shape == (32, 8)
+    x = torch.randn(2, 5, 32)
+    k, v = mla.project_kv(x)
+    assert k.shape == (2, 4, 5, 8)
+    # Without QK-norm, K equals x through the product of the two matrices (rank <= 8).
+    combined = mla.k_proj.weight @ mla.kv_down.weight
+    assert torch.linalg.matrix_rank(combined) <= 8
+    expected = (x @ combined.T).view(2, 5, 4, 8).transpose(1, 2)
+    assert torch.allclose(k, expected, atol=1e-5)
+    assert mla(x).shape == (2, 5, 32)

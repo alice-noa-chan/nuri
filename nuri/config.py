@@ -32,6 +32,8 @@ class NuriConfig:
     num_heads: int = 8
     # Experimental grouped-query attention (§9, OFF = None): key/value heads per layer.
     num_kv_heads: int | None = None
+    # Experimental MLA-style latent K/V bottleneck (§9, OFF = None): size of the shared latent.
+    kv_latent_dim: int | None = None
     ffn_size: int = 1408
     input_layers: int = 6
     readout_layers: int = 2
@@ -90,6 +92,8 @@ class NuriConfig:
             raise ValueError("hidden_size must be divisible by num_heads")
         if self.num_kv_heads is not None and (self.num_kv_heads < 1 or self.num_heads % self.num_kv_heads):
             raise ValueError("num_kv_heads must be >= 1 and divide num_heads")
+        if self.kv_latent_dim is not None and not 1 <= self.kv_latent_dim <= self.hidden_size:
+            raise ValueError("kv_latent_dim must be between 1 and hidden_size")
         if self.head_dim % 2:
             raise ValueError("RoPE needs an even head_dim")
         if not self.train_depths or min(self.train_depths) < 0 or self.default_depth < 0:
