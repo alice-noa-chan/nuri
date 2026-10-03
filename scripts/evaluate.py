@@ -18,6 +18,8 @@ Suites
   curves         the same metric at T = 1/2/4/8/16 and S = 1/2/4/8 (shared split)
   interventions  normal R vs zeroed R vs R shuffled between samples (shared split)
   mlm            masked-token accuracy on --corpus (a held-out corpus folder)
+  denoise        held-out span reconstruction loss at 15/50/100% masking, at T = 1/4/8
+                 (the core + readout path; works for base models)
   retrieval      Recall@k / MRR on --pairs (JSONL with "query" and "positive")
   diagnostics    per-step core state statistics
 
@@ -45,7 +47,7 @@ from nuri.pipeline import read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer  # noqa: E402
 
-SUITES = ("reasoning", "curves", "interventions", "mlm", "retrieval", "diagnostics")
+SUITES = ("reasoning", "curves", "interventions", "mlm", "denoise", "retrieval", "diagnostics")
 
 
 def parse_args(argv=None):
@@ -94,14 +96,17 @@ def main(argv=None) -> dict:
     if "interventions" in args.suites:
         report["interventions"] = evaluation.r_interventions(model, examples, oracle_length=oracle)
 
-    if {"mlm", "diagnostics"} & set(args.suites):
+    if {"mlm", "denoise", "diagnostics"} & set(args.suites):
         if not args.corpus:
-            sys.exit("mlm and diagnostics need --corpus (or NURI_EVAL_CORPUS)")
+            sys.exit("mlm, denoise and diagnostics need --corpus (or NURI_EVAL_CORPUS)")
         corpus = TokenCorpus(args.corpus)
         rng = random.Random(args.seed)
         documents = corpus.sample(args.documents, rng, usable=lambda d: len(d) >= 2)
         if "mlm" in args.suites:
             report["mlm"] = evaluation.mlm_accuracy(model, documents, seed=args.seed)
+        if "denoise" in args.suites:
+            report["denoise"] = [row for t in (1, 4, 8)
+                                 for row in evaluation.span_denoising(model, documents, steps=t, seed=args.seed)]
         if "diagnostics" in args.suites:
             report["diagnostics"] = evaluation.core_diagnostics(model, documents[:64], steps=16)
 

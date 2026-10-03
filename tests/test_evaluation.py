@@ -2,8 +2,9 @@ import pytest
 import torch
 
 from nuri.config import tiny_config
-from nuri.evaluation import (core_diagnostics, depth_curve, generation_accuracy, mlm_accuracy, r_interventions,
-                             retrieval_metrics, rounds_curve, sample_examples, shuffle_r, zero_r)
+from nuri.evaluation import (core_diagnostics, depth_curve, generation_accuracy, mlm_accuracy,
+                             r_interventions, retrieval_metrics, rounds_curve, sample_examples,
+                             shuffle_r, span_denoising, zero_r)
 from nuri.model import NuriModel
 
 EXAMPLES = [([5, 6, 7], [8, 9]), ([10, 11], [12]), ([13, 14, 15, 16], [17, 18, 19])]
@@ -111,3 +112,13 @@ def test_length_only_accuracy_exposes_length_leaks():
     result = generation_accuracy(model, yes_no, oracle_length=True)
     assert result["length_only_accuracy"] == 1.0  # the canvas length alone gives every answer away
     assert "length_only_accuracy" not in generation_accuracy(model, yes_no)
+
+
+def test_span_denoising_reports_each_ratio_and_is_deterministic():
+    model = make_model()
+    docs = [list(range(3 + i, 60 + i)) for i in range(6)]
+    rows = span_denoising(model, docs, ratios=(0.5, 1.0), steps=2)
+    assert [r["mask_ratio"] for r in rows] == [0.5, 1.0]
+    assert all(r["spans"] == 6 and r["targets"] > 0 and r["loss"] > 0 for r in rows)
+    assert rows[1]["targets"] > rows[0]["targets"]  # full masking scores every position
+    assert span_denoising(model, docs, ratios=(0.5,), steps=2) == rows[:1]

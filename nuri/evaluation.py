@@ -8,6 +8,8 @@ plain dicts that can be written as JSON. Every result reports its settings
 - depth_curve / rounds_curve: the same metric over several T or S
 - r_interventions: normal R vs zeroed R vs R shuffled between samples
 - mlm_accuracy: masked token accuracy on held-out text
+- span_denoising: held-out span reconstruction loss at fixed mask ratios
+  (measures the core + readout path of base models, which MLM skips)
 - retrieval_metrics: Recall@k and MRR for an embedding mode
 - core_diagnostics: state norm, update norm, slot cosine and effective rank per step
 """
@@ -20,7 +22,7 @@ from typing import Callable, Sequence
 import torch
 import torch.nn.functional as F
 
-from .corruption import mask_for_mlm, pad_batch
+from .corruption import mask_for_mlm, pad_batch, split_span
 from .generation import generate
 from .model import NuriModel
 
@@ -154,6 +156,54 @@ def mlm_accuracy(model: NuriModel, documents: Sequence[list[int]], rate: float =
         targets += int(mask.sum())
     return {"accuracy": correct / max(targets, 1), "loss": loss_sum / max(targets, 1), "targets": targets,
             "mask_rate": rate}
+
+
+@torch.no_grad()
+def span_denoising(model: NuriModel, documents: Sequence[list[int]], ratios=(0.15, 0.5, 1.0),
+                   steps: int | None = None, batch_size: int = 32, seed: int = 0) -> list[dict]:
+    """Per-sample mean CE and token accuracy of reconstructing held-out spans.
+
+    Each document is split once (fixed seed) into a prefix and the following
+    span, exactly like the base-stage objective; then the same spans are
+    scored with `ratio` of their positions masked (1.0 = write the whole span).
+    Lower loss at the same ratio means a better encoder + core + readout path.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    config = model.config
+    rng = random.Random(seed)
+    pairs = [split_span(d, config.max_input_len, config.max_response_len, config.eos_id, 16, rng)
+             for d in documents if len(d) >= 2]
+    rows = []
+    for ratio in ratios:
+        generator = torch.Generator().manual_seed(seed)
+        loss_sum = correct = targets = samples = 0.0
+        for chunk in _batches(pairs, batch_size):
+            ids, valid = pad_batch([p for p, _ in chunk], config.pad_id)
+            spans, canvas_valid = pad_batch([s for _, s in chunk], config.pad_id)
+            loss_mask = torch.zeros_like(canvas_valid)
+            for row in range(len(chunk)):
+                length = int(canvas_valid[row].sum())
+                count = max(1, round(ratio * length))
+                loss_mask[row, torch.randperm(length, generator=generator)[:count]] = True
+            canvas = spans.masked_fill(loss_mask, config.mask_id)
+            x, valid = model.encode(ids.to(device), valid.to(device))
+            cache = model.generation_memory(x, valid, model.reason(x, valid, steps))
+            hidden = model.readout_hidden(canvas.to(device), canvas_valid.to(device), cache)
+            mask = loss_mask.to(device)
+            logits = model.vocab_logits(hidden[mask]).float()
+            labels = spans.to(device)[mask]
+            ce = F.cross_entropy(logits, labels, reduction="none")
+            row_of = mask.nonzero(as_tuple=True)[0]
+            per_sample = torch.zeros(len(chunk), device=device).index_add_(0, row_of, ce) / mask.sum(1)
+            loss_sum += float(per_sample.sum())
+            samples += len(chunk)
+            correct += int((logits.argmax(-1) == labels).sum())
+            targets += int(mask.sum())
+        rows.append({"mask_ratio": ratio, "loss": loss_sum / max(samples, 1), "accuracy": correct / max(targets, 1),
+                     "spans": int(samples), "targets": int(targets),
+                     "steps": steps if steps is not None else config.default_depth})
+    return rows
 
 
 @torch.no_grad()

@@ -47,7 +47,7 @@ def test_every_suite_runs_on_a_tiny_checkpoint(tmp_path):
 
     report = load_script().main([
         "--checkpoint", str(tmp_path / "ckpt"), "--suites", *("reasoning", "curves", "interventions", "mlm",
-                                                               "retrieval", "diagnostics"),
+                                                               "denoise", "retrieval", "diagnostics"),
         "--corpus", str(tmp_path / "corpus"), "--pairs", str(tmp_path / "pairs.jsonl"),
         "--examples", "6", "--documents", "8", "--output", str(tmp_path / "report.json")])
 
@@ -57,6 +57,7 @@ def test_every_suite_runs_on_a_tiny_checkpoint(tmp_path):
     assert [r["rounds"] for r in report["rounds_curve"]] == [1, 2, 4, 8]
     assert set(report["interventions"]) == {"normal", "zero_r", "shuffled_r"}
     assert report["mlm"]["targets"] > 0 and len(report["diagnostics"]) == 17
+    assert [(r["steps"], r["mask_ratio"]) for r in report["denoise"]][:3] == [(1, 0.15), (1, 0.5), (1, 1.0)]
     # tiny embed_dim is 32, so only the full-size embedding is evaluated (64/128 do not fit)
     assert {(r["mode"], r["dim"]) for r in report["retrieval"]} == {("fast", None), ("reasoning", None)}
     assert json.loads((tmp_path / "report.json").read_text(encoding="utf-8")) == report
