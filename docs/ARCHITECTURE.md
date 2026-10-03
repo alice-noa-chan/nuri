@@ -254,7 +254,7 @@ Turning on every feature at once makes it impossible to tell causes and effects 
 | local/global attention | OFF (implemented) | mixes input layers only, for long inputs; latent K=16 keeps full attention; `attention_schedule`, `local_radius` |
 | GQA | OFF | compare fixed memory K/V storage and projection cost against quality |
 | MLA | OFF | verify the gain/loss of the latent projection bottleneck separately |
-| adaptive halting | OFF | needs min/max T, benefit/correctness supervision, a compute penalty and calibration |
+| adaptive halting | OFF (training-free variant implemented) | learned halting needs min/max T, benefit/correctness supervision, a compute penalty and calibration; the implemented `halt_tol` stops a sample at inference once one step changes its state by less than the tolerance, and `halting_curve` reports accuracy vs mean core steps |
 | random reasoning depth | reference OFF / **release ON** (D-013) | sampled from `{2,4,8}` per batch |
 | intermediate supervision | OFF | only, and limited, when real intermediate-state labels exist |
 | draft→reasoning feedback | OFF | an extension that updates R every output round; caching and cost must be recomputed |
