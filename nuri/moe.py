@@ -60,19 +60,19 @@ class MoEFFN(nn.Module):
         top_p, top_i = probs.topk(self.top_k, dim=-1)
         weights = (top_p / top_p.sum(dim=-1, keepdim=True)).to(h.dtype)
 
-        routed = torch.zeros_like(h)
-        for e in range(self.num_experts):
-            token, slot = (top_i == e).nonzero(as_tuple=True)
-            if token.numel() == 0:
-                continue
-            xe = h[token]
-            ye = (F.silu(xe @ self.w_gate[e]) * (xe @ self.w_up[e])) @ self.w_down[e]
-            routed.index_add_(0, token, ye * weights[token, slot, None])
+        # Sort the (token, expert) assignments by expert so each expert gets one
+        # contiguous slice. This needs a single host sync (counts.tolist())
+        # instead of one nonzero() per expert.
+        flat_expert = top_i.reshape(-1)
+        order = flat_expert.argsort(stable=True)
+        token_of = order // self.top_k
+        counts = torch.bincount(flat_expert, minlength=self.num_experts)
+        expert_out = self._run_experts(h[token_of], counts)
+        routed = torch.zeros_like(h).index_add_(0, token_of, expert_out * weights.reshape(-1)[order, None])
         for expert in self.shared:
             routed = routed + expert(h)
         out[index] = routed
 
-        counts = torch.bincount(top_i.reshape(-1), minlength=self.num_experts)
         load = counts.float() / (self.top_k * h.shape[0])
         balance = self.num_experts * (load * probs.mean(dim=0)).sum()
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
@@ -80,6 +80,14 @@ class MoEFFN(nn.Module):
         if self.training:  # inference never collects them, so they would pile up forever
             self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
         return out.view(shape)
+
+    def _run_experts(self, grouped: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+        """SwiGLU of each expert on its contiguous slice of `grouped` (rows sorted by expert)."""
+        outputs = []
+        for e, rows in enumerate(grouped.split(counts.tolist())):
+            if rows.shape[0]:
+                outputs.append((F.silu(rows @ self.w_gate[e]) * (rows @ self.w_up[e])) @ self.w_down[e])
+        return torch.cat(outputs)
 
 
 def build_ffn(config: NuriConfig, stack: str, layer_number: int) -> nn.Module:
