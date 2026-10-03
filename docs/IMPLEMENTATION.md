@@ -576,7 +576,9 @@ accuracy against average steps.
 
 `draft_feedback=true` is an implemented, default-OFF model experiment. During
 training the core reads X plus the corrupted canvas; masked targets stay
-hidden. Length prediction uses a separate draft-free R. Generation computes
+hidden. Draft tokens also receive learned canvas-position embeddings, initially
+zero; order sensitivity needs learned position values. Length prediction uses
+a separate draft-free R. Generation computes
 that initial R, then restarts the core from its learned slots using the current
 draft before each refinement round and rebuilds readout memory K/V. The input
 encoder X stays fixed. Halting applies to each call; `reasoning_steps` reports

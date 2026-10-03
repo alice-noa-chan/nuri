@@ -258,6 +258,7 @@
       "model_field": "draft_feedback",
       "default": false,
       "source": "input_X_and_current_corrupted_draft_embeddings",
+      "draft_position": "learned_canvas_position_zero_initialized",
       "hidden_targets": "mask_embeddings_only",
       "length_prediction": "separate_draft_free_reasoning",
       "round_update": "restart_from_learned_slots_and_rebuild_readout_kv",
