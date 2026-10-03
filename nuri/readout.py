@@ -7,10 +7,10 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from nuri.config import NuriConfig
-from nuri.encoder import RopeTables
-from nuri.layers import Attention, RMSNorm
-from nuri.moe import build_ffn
+from .config import NuriConfig
+from .encoder import RopeTables
+from .layers import Attention, RMSNorm
+from .moe import build_ffn
 
 
 @dataclass
@@ -59,6 +59,8 @@ class BidirectionalReadout(nn.Module):
 
     def forward(self, canvas: torch.Tensor, canvas_valid: torch.Tensor, cache: MemoryCache) -> torch.Tensor:
         """canvas: embedded canvas tokens [B, L, D]. Returns normalized hidden states."""
+        if len(cache.kv) != len(self.blocks):
+            raise ValueError(f"memory cache has {len(cache.kv)} layers, the readout has {len(self.blocks)}")
         rope = self.rope(canvas.shape[1], canvas.device)
         for block, kv in zip(self.blocks, cache.kv):
             canvas = block(canvas, canvas_valid, kv, cache.mask, rope)

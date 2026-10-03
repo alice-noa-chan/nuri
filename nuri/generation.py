@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from nuri.model import NuriModel
+from .model import NuriModel
 
 
 @dataclass
@@ -40,7 +40,12 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     config = model.config
     steps = config.default_depth if steps is None else steps
     rounds = config.refine_rounds if rounds is None else rounds
-    max_len = min(max_len or config.max_response_len, config.max_response_len)
+    max_len = config.max_response_len if max_len is None else max_len
+    _check_positive_int(rounds, "rounds")
+    _check_positive_int(max_len, "max_len")
+    if not isinstance(steps, int) or steps < 0:
+        raise ValueError("steps must be an int >= 0")
+    max_len = min(max_len, config.max_response_len)
 
     x, valid = model.encode(input_ids, attention_mask)
     r = model.reason(x, valid, steps)
@@ -80,10 +85,32 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     return GenerationResult(tokens, canvas, lengths, ended, history)
 
 
+def _check_positive_int(value, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be an int >= 1, got {value!r}")
+
+
+def _explicit_lengths(canvas_len, batch: int, device) -> torch.Tensor:
+    """Turn an int or a [B] integer tensor into a [B] length tensor, or fail clearly."""
+    if isinstance(canvas_len, torch.Tensor):
+        if canvas_len.is_floating_point() or canvas_len.is_complex() or canvas_len.dim() > 1:
+            raise ValueError("canvas_len tensor must hold integers and be a scalar or a [batch] vector")
+        lengths = canvas_len.to(device).long()
+    else:
+        _check_positive_int(canvas_len, "canvas_len")
+        lengths = torch.tensor(canvas_len, device=device)
+    if lengths.dim() == 0:
+        lengths = lengths.expand(batch).clone()
+    if lengths.shape[0] != batch:
+        raise ValueError(f"canvas_len has {lengths.shape[0]} entries for a batch of {batch}")
+    if (lengths < 1).any():
+        raise ValueError("every canvas_len must be >= 1")
+    return lengths
+
+
 def _choose_lengths(model, x, valid, r, canvas_len, batch) -> torch.Tensor:
     if canvas_len is not None:
-        lengths = torch.as_tensor(canvas_len, device=x.device).long()
-        return lengths.expand(batch).clone() if lengths.dim() == 0 else lengths
+        return _explicit_lengths(canvas_len, batch, x.device)
     if not model.config.length_head_trained:
         raise ValueError("this model's length head is untrained (base model); pass canvas_len")
     u, r_mean = model.pool(x, valid, r)
