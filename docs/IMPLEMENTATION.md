@@ -144,15 +144,46 @@ python tools/benchmark_nuri.py `
 `config.json`. The architecture declaration `configs/nuri_v0.design.json` has
 a different purpose and is not accepted as a model config.
 
-Available tasks are `mlm`, `denoise`, `embed-fast`, `embed-reasoning`, and
-`generate`. Training benchmarks support MLM and denoising and include backward,
-gradient clipping, and an AdamW step. Generation computes X/R and fixed memory
-K/V once per request, then runs S canvas rounds. GPU timings synchronize CUDA;
+Match the executable configuration to the actual training tokenizer. Base
+training reads its vocabulary size from the supplied tokenizer; the benchmark
+does not load a tokenizer and a bare preset keeps its default vocabulary size.
+Use a matching private config when comparing vocabulary variants, and keep the
+batch size, sequence lengths, dtype and runtime options consistent. Training
+samples the configured reasoning depths; a benchmark at one T does not measure
+that whole distribution.
+
+Available tasks are `mlm`, `denoise`, `pairs`, `embed-fast`, `embed-reasoning`,
+and `generate`. Training benchmarks support MLM, denoising and `pairs`, and
+include backward, gradient clipping and an AdamW step. `pairs` requires
+`--training` and a batch size of at least two. It calls the same loss as the
+embedding stage: each side is encoded once, then fast and reasoning embeddings
+share those memories and use normalized Matryoshka prefixes. Both query and
+document have `--input-length` tokens; `--output-length` does not represent a
+pair side. The benchmark uses the embedding stage's optimizer settings and
+keeps cross-mode alignment off. For example, after setting the path of a
+matching executable config:
+
+```powershell
+python tools/benchmark_nuri.py `
+  --config $env:NURI_BENCH_CONFIG --training --task pairs `
+  --device cuda --dtype bfloat16 --batch-size 32 --input-length 1024 `
+  --steps 4 --warmup 5 --iterations 20 `
+  --output runs/benchmarks/dense-pairs.json
+```
+
+`embed-fast` and `embed-reasoning` measure inference. Generation computes X/R
+and fixed memory K/V once per request, then runs S canvas rounds. GPU timings synchronize CUDA;
 reports include latency, input throughput, output sequence throughput, peak
 allocated/reserved memory, T/S, dtype, parameter count, and sequence lengths.
 
-Input throughput counts input tokens once per request. Output sequence
-throughput counts a generated sequence once, rather than multiplying it by S.
+Input throughput counts observed input tokens once per request, including both
+sides of a pair. Reports set `input_sequences_per_sample=2` for `pairs` and
+one for other tasks. Budget planning uses this multiplier; older reports
+without the field keep the previous one-sequence accounting. Synthetic
+benchmarks exclude host batch construction and text tokenization, so allow
+time for those costs and validate the estimate with a short real-data run.
+Output sequence throughput counts a generated sequence once, rather than
+multiplying it by S.
 These definitions differ from a count of all intermediate canvas positions.
 Compare the same task, lengths, batch size, dtype, T, and S. The default MoE
 backend loops over experts in Python. To test the optional grouped projections,
