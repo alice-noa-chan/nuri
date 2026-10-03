@@ -11,6 +11,7 @@ head reuses it at run time, so no tensor is shared under two names.
 
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -35,9 +36,18 @@ def save_pretrained(model: NuriModel, folder: str | Path, dtype: torch.dtype = t
 
 
 def load_pretrained(folder: str | Path, device="cpu", dtype: torch.dtype = torch.float32) -> NuriModel:
+    """Load a training checkpoint or a Hugging Face release folder.
+
+    Release folders (scripts/export_release.py) keep the config under the key
+    "nuri" and prefix every weight with "model."; both layouts load here.
+    """
     folder = Path(folder)
-    model = NuriModel(NuriConfig.load(folder / "config.json"))
-    model.load_state_dict(load_file(str(folder / "model.safetensors")))  # strict: every name must match
+    data = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    model = NuriModel(NuriConfig.from_dict(data["nuri"] if "nuri" in data else data))
+    weights = load_file(str(folder / "model.safetensors"))
+    if weights and all(name.startswith("model.") for name in weights):
+        weights = {name[len("model."):]: tensor for name, tensor in weights.items()}
+    model.load_state_dict(weights)  # strict: every name must match
     return model.to(device=device, dtype=dtype)
 
 
