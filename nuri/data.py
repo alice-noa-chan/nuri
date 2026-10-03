@@ -39,8 +39,21 @@ class TokenCorpus:
         start, end = self.offsets[index], self.offsets[index + 1]
         return self.tokens[start:end].astype(np.int64).tolist()
 
-    def sample(self, count: int, rng: random.Random) -> list[list[int]]:
-        return [self.document(rng.randrange(len(self))) for _ in range(count)]
+    def sample(self, count: int, rng: random.Random, usable=None, max_draws_per_doc: int = 100) -> list[list[int]]:
+        """Draw `count` random documents (with replacement).
+
+        usable: optional test `document -> bool`. Documents that fail it are
+        skipped and redrawn. If too few usable documents turn up, a clear
+        error is raised instead of looping forever.
+        """
+        picked = []
+        for _ in range(count * max_draws_per_doc):
+            doc = self.document(rng.randrange(len(self)))
+            if usable is None or usable(doc):
+                picked.append(doc)
+                if len(picked) == count:
+                    return picked
+        raise ValueError("the corpus has too few usable documents for this batch")
 
 
 def write_corpus(folder: str | Path, documents: Iterable[Sequence[int]]) -> int:
@@ -82,7 +95,21 @@ def build_mlm_batch(documents: list[list[int]], config: NuriConfig, rng: random.
     ids, valid = pad_batch(windows, config.pad_id)
     special = (config.pad_id, config.mask_id, config.eos_id)
     corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
-    return {"input_ids": corrupted, "input_valid": valid, "labels": ids, "target_mask": targets}
+    # A window made only of special tokens has nothing to predict; drop it.
+    keep = targets.any(dim=1)
+    return {"input_ids": corrupted[keep], "input_valid": valid[keep], "labels": ids[keep],
+            "target_mask": targets[keep]}
+
+
+def has_mlm_target(document: list[int], config: NuriConfig) -> bool:
+    """True if the document has at least one token that MLM may mask."""
+    return any(t not in (config.pad_id, config.mask_id, config.eos_id) for t in document)
+
+
+def usable_instruction(example: tuple[list[int], list[int]], config: NuriConfig) -> bool:
+    """Instruction examples need a prompt and an answer that fits M with EOS."""
+    prompt, answer = example
+    return bool(prompt) and len(answer) + 1 <= config.max_response_len
 
 
 def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
@@ -103,9 +130,9 @@ def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config:
     """
     prompts, targets = [], []
     for prompt, answer in examples:
-        target = list(answer) + [config.eos_id]
-        if len(target) > config.max_response_len or not prompt:
+        if not usable_instruction((prompt, answer), config):
             continue
+        target = list(answer) + [config.eos_id]
         prompts.append(list(prompt)[-config.max_input_len:])
         targets.append(target)
     batch = _canvas_batch(prompts, targets, config, generator) if prompts else {}
