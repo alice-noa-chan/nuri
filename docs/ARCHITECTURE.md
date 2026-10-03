@@ -1,6 +1,6 @@
 # Nuri v0 Architecture
 
-Status: design spec. The model code in `nuri/` implements it and passes CPU tests, but no training run or performance measurement has been done yet.
+Status: design spec with an executable implementation. CPU tests and small correctness runs pass; target-GPU release training, throughput and language quality remain unmeasured.
 
 > **User decisions in §14 take priority.** If the body and §14 disagree, follow §14 and record the conflict in §17 (open questions).
 
@@ -36,7 +36,7 @@ flowchart TD
     V --> O[Final answer]
 ```
 
-`T_reason` is the number of latent state updates and `S_refine` is the number of output refinement rounds. They are separate compute axes; both default to 4. `X` and the final `R` are not recomputed during generation. Feeding the output draft back into the core is a later experiment.
+`T_reason` is the number of latent state updates and `S_refine` is the number of output refinement rounds. They are separate compute axes; both default to 4. By default, `X` and the final `R` are not recomputed during generation. The optional draft feedback experiment recomputes R for each round, as described in §9; it remains OFF.
 
 ## 3. Reference sizes
 
@@ -99,6 +99,21 @@ For long-input experiments a bidirectional local/global mix is added. For exampl
 
 Read-only `X` means its values do not change during reasoning and output refinement. **It does not mean `detach()` or a frozen encoder.** Training is end-to-end by default, and gradients from every recurrent step reach the encoder.
 
+### Encoder strengths and the remaining gaps
+
+Keep useful encoder properties and train the missing capabilities explicitly. These are choices to evaluate, not evidence that Nuri already matches the cited models.
+
+| Prior work or limitation | Nuri's response | What still needs evidence |
+|---|---|---|
+| [BERT](https://arxiv.org/abs/1810.04805): bidirectional context for understanding | Keep non-causal input attention and shared representations for MLM, classification and embeddings | General language quality after actual training |
+| [RoBERTa](https://arxiv.org/abs/1907.11692): the training recipe and dynamic masking matter | Draw fresh MLM corruption each batch and measure held-out encoder loss | One day from scratch is not the cited pretraining scale |
+| [ModernBERT](https://arxiv.org/abs/2412.13663): modern positions, gated FFNs and local/global attention | Use RoPE and SwiGLU, with optional local/global layers and isolated document packing | Dense masks do not provide sparse kernels or unpadding; measure real time and peak memory |
+| MLM alone does not train sentence similarity | Train fast/reasoning embeddings with positive pairs, valid negatives and Matryoshka prefixes | Same-mode retrieval and each prefix need evaluation; paraphrase pairs are not a query-document benchmark |
+| MLM alone does not train the core or generator | Base training also reconstructs separated spans; IT trains answers and natural lengths | Predicted-length, EOS and refinement errors remain distinct bottlenecks |
+| Repeated output refinement increases latency | Reuse fixed X/R and per-layer K/V; project vocabulary logits only where needed | Canvas attention still runs each round; generation does not stream tokens and M remains a hard limit |
+
+[DeBERTa](https://arxiv.org/abs/2006.03654) motivates a future content/position attention comparison. It does not justify replacing the agreed RoPE geometry or claiming checkpoint reuse. Native GQA below changes execution without changing that geometry or the release defaults.
+
 ## 5. Recurrent latent reasoning core
 
 The initial state is `R0 = learned_slots [K,D]`, expanded over the batch to `[B,K,D]`. An optional mode/task embedding can be added; it is OFF in v0.
@@ -142,6 +157,8 @@ z_reason = L2Normalize(P(u + W_r r))
 
 `P: D→256` and `W_r: D→D`. Fast mode skips the core. Reasoning mode lets you pick T. Even though both modes share P, they are not guaranteed to land in the same retrieval space. Default retrieval uses the same mode for query and document. Fast documents with reasoning queries are evaluated only after cross-mode contrastive alignment training.
 
+The implemented optional `cross_mode_weight` adds a reasoning-query/fast-document InfoNCE component to embedding training. It reuses the already encoded views and applies the configured Matryoshka dimensions. Its default is zero. The unweighted component is reported as `cross_mode` in JSON/progress and `loss/pairs/cross_mode` in TensorBoard. Mixed-mode evaluation rows test alignment; their presence is not evidence that a model has learned it.
+
 Classification separates a general-purpose head from a structure-check head. General classification and reranking may read `concat(u,r)`. The multi-hop structure-check head reads only `mean(R_final)`, blocking the X→head shortcut. This path restriction alone is not evidence of multi-step reasoning.
 
 Embeddings need their own contrastive objective, with positive sentence or query/document pairs and valid negatives. Duplicates and false negatives in a batch are managed. Supervised pairs may be used first. In an unsupervised experiment following [SimCSE](https://arxiv.org/abs/2104.08821), independent dropout views are required; two identical views with the reference dropout=0 are never contrasted.
@@ -169,7 +186,7 @@ Memory cross-attention uses no RoPE by default. Canvas positions are positions i
 | input encoder token | valid input tokens of the same sample |
 | reasoning slot | X of the same sample, latent slots |
 | output canvas position | valid positions of the current corrupted canvas, X, R |
-| X / R | never the canvas currently being generated |
+| X / R | X never reads the output canvas; R also excludes it by default, with the explicit draft-feedback exception in §9 |
 
 With packing, attention to other samples/documents is blocked. For answer positions that carry a loss, the gold embedding is never left in the input; it is replaced with the real MASK embedding. Answer positions that stay visible after corruption are allowed context. The current gold answer is never added as teacher memory.
 
@@ -249,15 +266,18 @@ Turning on every feature at once makes it impossible to tell causes and effects 
 | Feature | Default | Where it applies / experiment contract |
 |---|---|---|
 | sparse MoE | reference OFF / release MoE ON | reference: input layers 3 and 6, 4 experts, top-2 candidate. release: the compute-matched setup below (D-011) |
-| recurrent core MoE | OFF | after the dense core's effect is confirmed; route per BK at each step, log load per step |
+| recurrent core MoE | OFF (implemented) | `MoEConfig.core`; shared weights route the active B×K tokens each step; `core.last_step_expert_counts` records per-step counts |
+| grouped expert projections | OFF (implemented runtime option) | `MoEConfig.backend="grouped"` uses a supported grouped operation or the portable loop; benchmark reports successful measured paths; no GPU speed gain is claimed |
 | QK normalization | reference OFF / **release ON** (D-013) | per head after the projection, before RoPE; RMS form and scale defined. Public models turn it on without an A/B test |
 | local/global attention | OFF (implemented) | mixes input layers only, for long inputs; latent K=16 keeps full attention; `attention_schedule`, `local_radius` |
-| GQA | OFF | compare fixed memory K/V storage and projection cost against quality |
-| MLA | OFF | verify the gain/loss of the latent projection bottleneck separately |
+| GQA | OFF (implemented) | `num_kv_heads` divides query heads; projected/cached K/V keep reduced heads; compare quality, real time and memory |
+| native GQA execution | OFF (implemented runtime option) | `set_native_gqa` / `--native-gqa` asks SDPA to consume compact heads; portable repetition is the default; support does not guarantee a fused kernel |
+| latent K/V projection | OFF (implemented MLA-style bottleneck) | `kv_latent_dim`: shared down-projection then separate K/V up-projections; caches still contain expanded K/V, so this is not full latent-cache MLA |
+| hypothesis slot groups | OFF (implemented) | `slot_groups` divides K; early self-attention stays within groups, the final scheduled step merges all slots; no claim of distinct learned hypotheses |
 | adaptive halting | OFF (training-free variant implemented) | learned halting needs min/max T, benefit/correctness supervision, a compute penalty and calibration; the implemented `halt_tol` stops a sample at inference once one step changes its state by less than the tolerance, and `halting_curve` reports accuracy vs mean core steps |
 | random reasoning depth | reference OFF / **release ON** (D-013) | sampled from `{2,4,8}` per batch |
 | intermediate supervision | OFF | only, and limited, when real intermediate-state labels exist |
-| draft→reasoning feedback | OFF | an extension that updates R every output round; caching and cost must be recomputed |
+| draft→reasoning feedback | OFF (implemented experiment) | `draft_feedback`; each round recomputes R from X plus the corrupted draft, then rebuilds readout memory; length prediction stays draft-free |
 
 Release QK-norm is RMS normalization over the head dimension. It is applied after the Q/K projections and before RoPE in the self-attention layers that use RoPE, and the attention scale stays `1/sqrt(head_dim)`. Q and K each have a learnable gain and epsilon=1e-6. Latent and cross-attention still get no RoPE, as contracted above; the implementation also applies QK-norm to their queries and keys. Random depth picks from `{2,4,8}` with equal probability per batch and uses full BPTT through all steps. It is separate from the inference default T=4. These settings are the user's choice D-013; any performance gain has not been tested yet.
 
@@ -268,6 +288,16 @@ With 4 experts of F=1408, top-2, replacing 2 input layers adds about 12.98M FFN 
 **Release MoE setup (D-011).** 16 experts (F=512 each), top-3 routing and one always-on shared expert (F=512), so the active FFN width per token is 512×4 = 2,048. This matches the dense F in **FFN matmul compute**; it does not mean router, dispatch, gate and combine costs are equal too. It applies to input encoder layers 2, 4, 6, 8, 10 and readout layer 2. A single GPU has no all-to-all communication. The grouped GEMM/dispatch backend is measured after implementation, and the number of tokens processed in the same 8 hours is recorded separately.
 
 The router applies the softmax only to the 16 routed experts and renormalizes the top-3 probabilities within the chosen set. `FFN(h)=E_shared(h)+sum(w_i*E_i(h), i in top3)`. The shared expert is excluded from top-k and from the balance/z-loss. Per-layer load is computed without padding. With `f_i=assignment_count_i/(3*n_valid_tokens)` and `P_i=mean(router_probability_i)`, the balance loss candidate is `alpha*16*sum(f_i*P_i)`. The alpha and z-loss weights are tuned from logs. Readout expert load is logged per refinement round. In a top-1 variant, a selected weight of 1 cuts the path from the task loss to the router, so the raw softmax probability gate or similar must be defined separately (the implementation rejects top-1 for now).
+
+Halting norms are calculated in FP32, and NaN/negative tolerances are rejected. `halt_tol` cannot be combined with `return_states` or `slot_groups > 1`: stopping early would skip the required final group merge. Positive infinity remains a diagnostic one-step setting for the ungrouped core; zero runs the full scheduled depth. A small update is not proof of a correct answer.
+
+Grouped projections are opt-in and keep the portable expert loop as the default. The current conservative support policy admits CPU FP32 and CUDA BF16 on capability 9.0 or higher; newer build-specific support requires verification on that runtime. Inputs and weights are cast explicitly and made contiguous. Recognizable unavailable-kernel errors fall back; OOM and unknown execution errors propagate. Benchmarks distinguish the requested setting, measured successful path and mixed execution, and exclude warmup history.
+
+Draft feedback adds a learned source-type vector to draft token embeddings and lets the core read `[X; corrupted_draft]`. It restarts from the learned slots each round rather than continuing the previous R. Training supplies the same corrupted canvas used by the readout, with hidden targets replaced by MASK. Natural length prediction uses a separate draft-free R so it cannot infer gold length from the canvas. Inference first computes draft-free R for length, then reruns the core before every refinement round and rebuilds readout K/V. `halt_tol` applies to every call and generation reports the sum of actual core steps per sample. This adds up to `(S+1)*T` core updates without halting, changes the fixed-memory contract and has no measured quality benefit yet.
+
+Raw draft embeddings have no position feature in the feedback branch, so that branch is permutation invariant over equally valid draft tokens; output RoPE remains in the readout. Training sees visible gold context from one corruption, whereas refinement sees model predictions. These gaps need controlled quality and latency comparisons before enabling feedback in a release.
+
+GQA with 12 query heads and 4 K/V heads stores one third as many cached K/V elements as MHA at the same dimensions. Attention still computes all 12 query heads. Native execution avoids explicit repetition in Nuri, but an SDPA math backend may repeat internally. The runtime setting is checked on exact training resume; old states default to the portable path. The latent K/V bottleneck changes projection rank and weights; it does not shrink the expanded cache beyond the selected K/V head count.
 
 ### Additional experiment ideas
 
@@ -403,6 +433,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-012 | 2026-10-03 | The vocabulary size is chosen by a tokenizer experiment (32k/48k/64k, bytes per token per language) | user's choice | user |
 | D-013 | 2026-10-03 | Release models turn on both QK-norm and random depth `{2,4,8}` | user's choice | user |
 | D-014 | 2026-10-03 | Skip the independent T=1 vs T=4 pilot; report the inference T curve instead | user's choice | user |
+| D-015 | 2026-10-03 | Keep raw/prepared datasets and downloads in ignored data/; keep the source/usage list only in .private/; reuse permitted sibling data without changing that project | user's follow-up | user |
 
 ## 15. Release plan
 
@@ -433,8 +464,11 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 
 - Tracked files (docs, configs, code, model cards, commit messages) **never contain dataset names, links or sources.** Data notes live only in the gitignored `.private/`.
 - Code receives data paths through environment variables or config files inside `.private/`, and defaults never contain dataset names.
+- Raw copies, normalized examples, token corpora and downloads live in the ignored `data/` directory (D-015). Source paths, names, permissions, revisions, hashes and preparation/training status remain in `.private/`. Prepared files carry only the fields used by each task.
+- Import uses independent copies; it does not move, link or edit the sibling project's files. Preparation separates train/evaluation groups before chunking, deduplicates exact content within each task kind, and reports final split counts. Near-duplicates and cross-objective semantic overlap require further review. Additional acquisition details stay private too.
+- Local pre-commit/commit-msg/pre-push hooks can run `tools/check_private_files.py`. They reject protected paths and known private provenance markers, including outgoing historical trees. The marker list and installed hooks stay local; ignored files are not included in model exports.
 - Public documents state only the supported languages and the number of training tokens.
-- Reason: trained weights do not contain the datasets, and the repository ships no data files. The goal of not disclosing is to avoid needless disputes (the user's judgement). Data notes are kept in `.private/data-notes.md`.
+- The repository ships no raw or prepared data. Internal source selection and usage notes are kept in `.private/` and do not become model cards or public configuration.
 
 ## 17. Open questions
 

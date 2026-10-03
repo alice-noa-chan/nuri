@@ -200,6 +200,80 @@
     },
     "diffusion_objective_and_sampler": false
   },
+  "implemented_experiment_contracts": {
+    "gqa": {
+      "model_field": "num_kv_heads",
+      "default": null,
+      "cache": "reduced_kv_heads",
+      "quality_and_gpu_speed": "unmeasured"
+    },
+    "native_gqa_runtime": {
+      "default": false,
+      "model_method": "set_native_gqa",
+      "training_and_benchmark_flag": "--native-gqa",
+      "portable_fallback": "explicit_kv_head_repetition",
+      "resume_setting": "native_gqa_legacy_default_false",
+      "fused_kernel_guaranteed": false
+    },
+    "latent_kv_projection": {
+      "model_field": "kv_latent_dim",
+      "default": null,
+      "projection": "shared_down_then_separate_k_and_v_up",
+      "cache": "expanded_kv_not_latent_only"
+    },
+    "core_moe": {
+      "model_field": "moe.core",
+      "default": false,
+      "step_counts": "core.last_step_expert_counts"
+    },
+    "hypothesis_slot_groups": {
+      "model_field": "slot_groups",
+      "default": 1,
+      "attention": "within_groups_until_final_all_slot_merge"
+    },
+    "training_free_halting": {
+      "api_argument": "halt_tol",
+      "default": null,
+      "relative_update_norm_dtype": "float32",
+      "reject_nan_or_negative": true,
+      "incompatible_with": ["return_states", "slot_groups_greater_than_one"],
+      "zero": "full_scheduled_depth",
+      "positive_infinity": "one_step_diagnostic"
+    },
+    "cross_mode_alignment": {
+      "training_field": "cross_mode_weight",
+      "default": 0.0,
+      "objective": "reasoning_query_fast_document_infonce",
+      "telemetry": "loss/pairs/cross_mode_unweighted_component"
+    },
+    "grouped_expert_runtime": {
+      "model_field": "moe.backend",
+      "default": "loop",
+      "opt_in": "grouped",
+      "fallback": "known_unavailable_kernels_only",
+      "benchmark": "requested_and_successful_measured_paths_excluding_warmup",
+      "gpu_speed": "unmeasured"
+    },
+    "draft_feedback": {
+      "model_field": "draft_feedback",
+      "default": false,
+      "source": "input_X_and_current_corrupted_draft_embeddings",
+      "hidden_targets": "mask_embeddings_only",
+      "length_prediction": "separate_draft_free_reasoning",
+      "round_update": "restart_from_learned_slots_and_rebuild_readout_kv",
+      "generation_steps_reported": "sum_of_actual_steps_including_initial_call",
+      "full_depth_generation_cost": "(S+1)*T_core_updates_per_sample"
+    }
+  },
+  "private_data_layout": {
+    "decision": "D-008 and D-015",
+    "raw_prepared_tokens_downloads": "data/ (ignored)",
+    "source_and_usage_records": ".private/ (ignored)",
+    "source_input": "environment_or_private_plan_only",
+    "imports": "independent_copies_read_only_sources",
+    "prepared_fields": "task_content_only_no_provenance",
+    "local_git_guard": "tools/check_private_files.py"
+  },
   "release_models": {
     "decision": "D-009 ~ D-014 (docs/ARCHITECTURE.md §14)",
     "languages": [
