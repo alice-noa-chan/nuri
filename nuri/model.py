@@ -75,6 +75,11 @@ class NuriModel(nn.Module):
     def embed(self, input_ids, attention_mask=None, mode: str = "fast", steps: int | None = None,
               dim: int | None = None) -> torch.Tensor:
         x, valid = self.encode(input_ids, attention_mask)
+        return self.embed_memory(x, valid, mode, steps, dim)
+
+    def embed_memory(self, x: torch.Tensor, valid: torch.Tensor, mode: str = "fast", steps: int | None = None,
+                     dim: int | None = None) -> torch.Tensor:
+        """Embedding from an encoded X, so one encoder pass can serve both modes."""
         u, _ = self.pool(x, valid)
         if mode == "reasoning":
             _, r = self.pool(x, valid, self.reason(x, valid, steps))
@@ -108,15 +113,20 @@ class NuriModel(nn.Module):
         return [m for m in self.modules() if isinstance(m, MoEFFN)]
 
     def pop_moe_aux(self) -> dict:
-        """Weighted balance + z loss summed over MoE layers since the last call."""
+        """Collect and clear the MoE auxiliary records of every forward since the last call.
+
+        For each layer the records are averaged over its forwards (so running
+        a layer twice in one step does not double its weight); layers are
+        then summed. Counts are summed per layer for logging.
+        """
         moe = self.config.moe
-        layers = [m for m in self.moe_layers() if m.last_aux is not None]
+        layers = [m for m in self.moe_layers() if m.aux_records]
         if moe is None or not layers:
             return {"loss": None, "counts": []}
-        balance = sum(m.last_aux["balance"] for m in layers)
-        z = sum(m.last_aux["z"] for m in layers)
-        counts = [m.last_aux["counts"] for m in layers]
+        balance = sum(sum(r["balance"] for r in m.aux_records) / len(m.aux_records) for m in layers)
+        z = sum(sum(r["z"] for r in m.aux_records) / len(m.aux_records) for m in layers)
+        counts = [sum(r["counts"] for r in m.aux_records) for m in layers]
         for m in layers:
-            m.last_aux = None
+            m.aux_records = []
         loss = moe.balance_loss_weight * balance + moe.z_loss_weight * z
         return {"loss": loss, "balance": balance.detach(), "z": z.detach(), "counts": counts}

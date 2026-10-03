@@ -14,9 +14,11 @@ class MoEFFN(nn.Module):
     """Routed SwiGLU experts plus always-on shared experts.
 
     Routing is dropless and computed in fp32. Padding tokens are neither
-    routed nor counted in the load statistics. After each forward the layer
-    exposes `last_aux` with the balance loss, router z-loss and per-expert
-    assignment counts; the model sums these into the training loss.
+    routed nor counted in the load statistics. Every forward appends one
+    record (balance loss, router z-loss, per-expert assignment counts) to
+    `aux_records`. A training step can run the same layer several times
+    (e.g. query and document in embedding training), so records pile up
+    until the model collects and clears them with `pop_moe_aux()`.
     """
 
     def __init__(self, hidden_size: int, num_experts: int, expert_ffn_size: int, top_k: int,
@@ -34,7 +36,12 @@ class MoEFFN(nn.Module):
         self.w_up = nn.Parameter(torch.empty(num_experts, hidden_size, expert_ffn_size))
         self.w_down = nn.Parameter(torch.empty(num_experts, expert_ffn_size, hidden_size))
         self.shared = nn.ModuleList(SwiGLU(hidden_size, expert_ffn_size) for _ in range(num_shared_experts))
-        self.last_aux: dict | None = None
+        self.aux_records: list[dict] = []
+
+    @property
+    def last_aux(self) -> dict | None:
+        """The record of the most recent forward, or None."""
+        return self.aux_records[-1] if self.aux_records else None
 
     def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
         shape = x.shape
@@ -46,7 +53,6 @@ class MoEFFN(nn.Module):
         h = flat[index]
         out = torch.zeros_like(flat)
         if h.shape[0] == 0:
-            self.last_aux = None
             return out.view(shape)
 
         # Router math must stay in fp32 even inside a bf16 autocast region.
@@ -72,7 +78,7 @@ class MoEFFN(nn.Module):
         load = counts.float() / (self.top_k * h.shape[0])
         balance = self.num_experts * (load * probs.mean(dim=0)).sum()
         z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
-        self.last_aux = {"balance": balance, "z": z_loss, "counts": counts.detach()}
+        self.aux_records.append({"balance": balance, "z": z_loss, "counts": counts.detach()})
         return out.view(shape)
 
 

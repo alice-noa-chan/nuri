@@ -41,7 +41,7 @@ def test_padding_not_routed_or_counted():
     valid = torch.tensor([[True] * 3 + [False] * 2, [True] * 5])
     out = moe(x, valid)
     assert torch.all(out[0, 3:] == 0)
-    assert moe.last_aux["counts"].sum().item() == moe.top_k * 8
+    assert moe.aux_records[-1]["counts"].sum().item() == moe.top_k * 8
     x2 = x.clone()
     x2[0, 3:] = 1e3
     assert torch.allclose(moe(x2, valid), out)
@@ -50,7 +50,7 @@ def test_padding_not_routed_or_counted():
 def test_aux_losses_reach_router():
     moe = make_moe()
     moe(torch.randn(4, 6, 16))
-    (moe.last_aux["balance"] + moe.last_aux["z"]).backward()
+    (moe.aux_records[-1]["balance"] + moe.aux_records[-1]["z"]).backward()
     assert moe.router.weight.grad is not None and moe.router.weight.grad.abs().sum() > 0
 
 
@@ -73,4 +73,4 @@ def test_router_stays_fp32_under_autocast():
     moe = make_moe()
     with torch.autocast("cpu", dtype=torch.bfloat16):
         moe(torch.randn(2, 3, 16))
-    assert moe.last_aux["z"].dtype == torch.float32
+    assert moe.aux_records[-1]["z"].dtype == torch.float32

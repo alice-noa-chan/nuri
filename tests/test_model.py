@@ -112,3 +112,15 @@ def test_moe_aux_is_collected_once():
     aux = model.pop_moe_aux()
     assert aux["loss"] is not None and len(aux["counts"]) == 1
     assert model.pop_moe_aux()["loss"] is None
+
+
+def test_moe_aux_keeps_every_forward_of_a_step():
+    """Regression: two forwards in one step used to keep only the last record."""
+    moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,), readout_layers=(2,))
+    model = make_model(moe=moe)
+    ids = sample_inputs(model.config)
+    model.encode(ids)
+    model.encode(ids[:1])
+    aux = model.pop_moe_aux()
+    valid_tokens = int((ids != model.config.pad_id).sum() + (ids[:1] != model.config.pad_id).sum())
+    assert int(aux["counts"][0].sum()) == moe.top_k * valid_tokens

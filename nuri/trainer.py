@@ -58,12 +58,15 @@ def pair_loss(model: NuriModel, batch: dict, depth: int, dims: tuple[int, ...], 
     """Contrastive embedding loss, trained for both the fast and the reasoning mode.
 
     Query and document always use the same mode, as the spec's default
-    retrieval does (§6).
+    retrieval does (§6). Each side is encoded once and its X is reused for
+    both modes, so the encoder runs twice per step, not four times.
     """
+    xq, vq = model.encode(batch["query_ids"], batch["query_valid"])
+    xd, vd = model.encode(batch["doc_ids"], batch["doc_valid"])
     losses = {}
     for mode in ("fast", "reasoning"):
-        q = model.embed(batch["query_ids"], batch["query_valid"], mode=mode, steps=depth)
-        d = model.embed(batch["doc_ids"], batch["doc_valid"], mode=mode, steps=depth)
+        q = model.embed_memory(xq, vq, mode=mode, steps=depth)
+        d = model.embed_memory(xd, vd, mode=mode, steps=depth)
         losses[mode] = contrastive_loss(q, d, temperature, dims)
     tokens = int(batch["query_valid"].sum() + batch["doc_valid"].sum())
     return {"loss": (losses["fast"] + losses["reasoning"]) / 2, "fast": losses["fast"].detach(),
