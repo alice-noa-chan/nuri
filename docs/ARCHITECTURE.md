@@ -236,7 +236,7 @@ A의 혼합 batch를 공개 단계에 맞게 나눈다. 각 단계의 산출물�
 | IT | base | instruction denoising 70% + 구조화 reasoning 과제 15% + text span denoising 15% (망각 방지) | 전체 + length head | `nuri-base-it`, `nuri-base-moe-it` |
 | Embed | dense base | contrastive pair (+ Matryoshka 64/128/256) | encoder, core, P, W_r | `nuri-base-embed` |
 
-**Text span denoising**은 원시 텍스트만으로 readout과 core를 학습시키는 base 단계 objective다. Tokenized document `d`의 경계 `c`와 raw span 길이 `m`을 먼저 정해 `x=d[max(0,c-N):c]`, `y_raw=d[c:c+m]`로 분리한다. `m`은 최소16, 최대 `M-1`이며 해당 document 안의 남은 길이를 넘지 않는다. Target은 `y_raw + EOS`이고 canvas corruption은 §7을 따른다. 먼저 분리한 x만 encoding한다. 전체 document를 양방향 encoding한 후 prefix X를 자르거나 MLM batch의 X cache를 재사용하면 target leakage다. Span과 packing attention은 sample/document 경계를 넘지 않는다.
+**Text span denoising**은 원시 텍스트만으로 readout과 core를 학습시키는 base 단계 objective다. Tokenized document `d`의 경계 `c`와 raw span 길이 `m`을 먼저 정해 `x=d[max(0,c-N):c]`, `y_raw=d[c:c+m]`로 분리한다. `m`은 최소 16, 최대 `M`이며 해당 document 안의 남은 길이를 넘지 않는다. **EOS는 span이 document 끝에 닿을 때만 붙인다** (`y_raw + EOS`). 중간에서 끝나는 span은 EOS 없이 `y_raw`만 target으로 쓴다. 끝에 닿는 span이 이미 M개라면 경계 c를 한 칸 뒤로 옮겨 span이 계속 document 끝에서 끝나도록 하고 EOS 자리를 만든다. Canvas corruption은 §7을 따른다. 먼저 분리한 x만 encoding한다. 전체 document를 양방향 encoding한 후 prefix X를 자르거나 MLM batch의 X cache를 재사용하면 target leakage다. Span과 packing attention은 sample/document 경계를 넘지 않는다.
 
 이 경로가 없으면 base의 readout이 학습되지 않는다. Base 생성 API는 explicit `canvas_len`을 요구하고 자동 length head는 IT 이후 활성화한다. 입력 중간에 sentinel을 두고 빠진 span을 채우는 infill 형태는 후속 실험으로 둔다.
 
