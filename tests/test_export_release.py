@@ -60,3 +60,21 @@ def test_it_export_requires_instruction_tuned_checkpoint(tmp_path):
     with pytest.raises(SystemExit):
         load_script().main(["--checkpoint", str(tmp_path / "ckpt"), "--out", str(tmp_path / "o"), "--name", "n",
                             "--stage", "it"])
+
+
+def test_hf_training_forward_adds_and_clears_moe_aux(tmp_path):
+    from transformers import AutoModelForMaskedLM
+
+    moe = MoEConfig(num_experts=4, expert_ffn_size=32, top_k=2, input_layers=(2,), readout_layers=(2,))
+    save_pretrained(NuriModel(tiny_config(moe=moe)), tmp_path / "ckpt", dtype=torch.float32)
+    load_script().main(["--checkpoint", str(tmp_path / "ckpt"), "--out", str(tmp_path / "r"), "--name", "n",
+                        "--stage", "base"])
+    model = AutoModelForMaskedLM.from_pretrained(str(tmp_path / "r"), trust_remote_code=True,
+                                                 dtype=torch.float32).train()
+    ids = torch.randint(3, 128, (2, 6))
+    plain = torch.nn.functional.cross_entropy(model(input_ids=ids).logits.flatten(0, 1), ids.flatten())
+    for _ in range(3):
+        output = model(input_ids=ids, labels=ids)
+        output.loss.backward()
+    assert output.loss > plain.detach()  # balance + z loss were added
+    assert all(not layer.aux_records for layer in model.model.moe_layers())

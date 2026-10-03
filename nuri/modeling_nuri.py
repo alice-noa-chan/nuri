@@ -52,6 +52,17 @@ class NuriPreTrainedModel(PreTrainedModel):
             gate = self.config.nuri.get("gate_init", 0.1)
             torch.nn.init.constant_(module.gate_logits, math.log(gate / (1 - gate)))
 
+    def _with_moe_aux(self, loss):
+        """Collect this forward's MoE balance/z losses (training mode only) and add them to `loss`.
+
+        Always collecting also clears the records, so repeated training
+        forwards never pile them up.
+        """
+        aux = self.model.pop_moe_aux()["loss"]
+        if loss is None or aux is None:
+            return loss
+        return loss + aux
+
     def encode(self, input_ids, attention_mask=None, mode: str = "fast", dim: int | None = None,
                steps: int | None = None) -> torch.Tensor:
         """Sentence embeddings. mode: "fast" (no reasoning) or "reasoning" (T = steps)."""
@@ -74,6 +85,7 @@ class NuriHFModel(NuriPreTrainedModel):
 
     def forward(self, input_ids, attention_mask=None, **kwargs) -> BaseModelOutput:
         x, _ = self.model.encode(input_ids, attention_mask)
+        self._with_moe_aux(None)  # no loss here; just clear the records
         return BaseModelOutput(last_hidden_state=x)
 
 
@@ -91,7 +103,7 @@ class NuriForMaskedLM(NuriPreTrainedModel):
         loss = None
         if labels is not None:
             loss = F.cross_entropy(logits.flatten(0, 1).float(), labels.flatten(), ignore_index=-100)
-        return MaskedLMOutput(loss=loss, logits=logits)
+        return MaskedLMOutput(loss=self._with_moe_aux(loss), logits=logits)
 
 
 class NuriForSequenceClassification(NuriPreTrainedModel):
@@ -112,7 +124,7 @@ class NuriForSequenceClassification(NuriPreTrainedModel):
         u, r = self.model.pool(x, valid, self.model.reason(x, valid, reasoning_steps))
         logits = self.model.task_logits(u, r)
         loss = F.cross_entropy(logits.float(), labels) if labels is not None else None
-        return SequenceClassifierOutput(loss=loss, logits=logits)
+        return SequenceClassifierOutput(loss=self._with_moe_aux(loss), logits=logits)
 
 
 AUTO_MAP = {
