@@ -1,0 +1,83 @@
+"""Token-choice sparse MoE FFN and the dense/MoE FFN factory (ARCHITECTURE.md §9, D-011)."""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+from nuri.config import NuriConfig
+from nuri.layers import SwiGLU
+
+
+class MoEFFN(nn.Module):
+    """Routed SwiGLU experts plus always-on shared experts.
+
+    Routing is dropless and computed in fp32. Padding tokens are neither
+    routed nor counted in the load statistics. After each forward the layer
+    exposes `last_aux` with the balance loss, router z-loss and per-expert
+    assignment counts; the model sums these into the training loss.
+    """
+
+    def __init__(self, hidden_size: int, num_experts: int, expert_ffn_size: int, top_k: int,
+                 num_shared_experts: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.router = nn.Linear(hidden_size, num_experts, bias=False)
+        # Stacked weights keep the door open for a grouped-GEMM backend.
+        self.w_gate = nn.Parameter(torch.empty(num_experts, hidden_size, expert_ffn_size))
+        self.w_up = nn.Parameter(torch.empty(num_experts, hidden_size, expert_ffn_size))
+        self.w_down = nn.Parameter(torch.empty(num_experts, expert_ffn_size, hidden_size))
+        self.shared = nn.ModuleList(SwiGLU(hidden_size, expert_ffn_size) for _ in range(num_shared_experts))
+        self.last_aux: dict | None = None
+
+    def forward(self, x: torch.Tensor, valid: torch.Tensor | None = None) -> torch.Tensor:
+        shape = x.shape
+        flat = x.reshape(-1, shape[-1])
+        if valid is None:
+            index = torch.arange(flat.shape[0], device=x.device)
+        else:
+            index = valid.reshape(-1).nonzero(as_tuple=True)[0]
+        h = flat[index]
+        out = torch.zeros_like(flat)
+        if h.shape[0] == 0:
+            self.last_aux = None
+            return out.view(shape)
+
+        logits = F.linear(h.float(), self.router.weight.float())
+        probs = logits.softmax(dim=-1)
+        top_p, top_i = probs.topk(self.top_k, dim=-1)
+        weights = (top_p / top_p.sum(dim=-1, keepdim=True)).to(h.dtype)
+
+        routed = torch.zeros_like(h)
+        for e in range(self.num_experts):
+            token, slot = (top_i == e).nonzero(as_tuple=True)
+            if token.numel() == 0:
+                continue
+            xe = h[token]
+            ye = (F.silu(xe @ self.w_gate[e]) * (xe @ self.w_up[e])) @ self.w_down[e]
+            routed.index_add_(0, token, ye * weights[token, slot, None])
+        for expert in self.shared:
+            routed = routed + expert(h)
+        out[index] = routed
+
+        counts = torch.bincount(top_i.reshape(-1), minlength=self.num_experts)
+        load = counts.float() / (self.top_k * h.shape[0])
+        balance = self.num_experts * (load * probs.mean(dim=0)).sum()
+        z_loss = torch.logsumexp(logits, dim=-1).pow(2).mean()
+        self.last_aux = {"balance": balance, "z": z_loss, "counts": counts.detach()}
+        return out.view(shape)
+
+
+def build_ffn(config: NuriConfig, stack: str, layer_number: int) -> nn.Module:
+    """FFNFactory. `stack` is "input", "readout" or "core"; layer_number is 1-based."""
+    moe = config.moe
+    use_moe = moe is not None and (
+        (stack == "input" and layer_number in moe.input_layers)
+        or (stack == "readout" and layer_number in moe.readout_layers)
+    )
+    if not use_moe:
+        return SwiGLU(config.hidden_size, config.ffn_size)
+    return MoEFFN(config.hidden_size, moe.num_experts, moe.expert_ffn_size, moe.top_k,
+                  moe.num_shared_experts)
