@@ -77,7 +77,7 @@ The table above is the structure-check reference (49.3M). The public models use 
 
 Release dense breakdown: embedding 50.3M + input 10 × 7.08M + core 9.44M + readout 2 × 9.44M + embedding head 0.79M.
 
-- **V = 65,536**: 32k is tight for Korean and English plus Japanese (kanji and kana). After training the tokenizer, bytes per token per language are measured for 32k/48k/64k and the size is chosen from that (D-012). If the difference is small, the smaller size wins.
+- **V = 65,536** (decided, D-016): on held-out text, 64k needs about 9-10% fewer tokens than 32k for Korean and Japanese and about 2.5% fewer for English (48k: about 5.6-5.9% and 1.7%). The cost is a 50M instead of 25M tied embedding and an estimated ~4% more training compute per byte of text from the larger vocabulary head. Korean is the primary language, so the difference counts as not small (D-012).
 - **K = 32**: the core costs `T·K` slots per sample, small compared to the whole model (§10). The public models get generous slot capacity.
 - **M = 256**: 64 tokens are too few for general instruction answers. The length head classes grow to `1..256` as well. IT answers longer than 256 are counted and left out of training.
 - **Size rule**: from the dense throughput measured in the 1-hour benchmark of §11, compute how many tokens 8 hours of training gives. Below 3B tokens, shrink to `D=512, L=8` (about 72.4M main weights with V=65536). The per-GPU token counts in earlier drafts depended on different time splits and MFU assumptions and are not used as a budget. Processed input/output tokens and loss-bearing masked tokens are measured separately.
@@ -434,6 +434,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-013 | 2026-10-03 | Release models turn on both QK-norm and random depth `{2,4,8}` | user's choice | user |
 | D-014 | 2026-10-03 | Skip the independent T=1 vs T=4 pilot; report the inference T curve instead | user's choice | user |
 | D-015 | 2026-10-03 | Keep raw/prepared datasets and downloads in ignored data/; keep the source/usage list only in .private/; reuse permitted sibling data without changing that project | user's follow-up | user |
+| D-016 | 2026-10-04 | Tokenizer vocabulary 65,536 (64k) | held-out compression: ~9-10% fewer Korean/Japanese tokens than 32k for ~4% more compute per byte (estimate) | user |
 
 ## 15. Release plan
 
