@@ -8,11 +8,12 @@ version = "0.0.1"
 description = "Bidirectional encoder with recurrent latent reasoning and masked refinement generation"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = ["torch>=2.4", "safetensors>=0.4", "tokenizers>=0.19", "numpy>=1.26"]
+dependencies = ["torch>=2.4", "safetensors>=0.4", "tokenizers>=0.19", "numpy>=1.26", "tqdm>=4.66"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "transformers>=4.45"]
 hf = ["transformers>=4.45"]
+tensorboard = ["tensorboard>=2.16"]
 
 [tool.setuptools.packages.find]
 include = ["nuri*"]

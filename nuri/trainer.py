@@ -19,6 +19,7 @@ import torch
 from .checkpoint import load_training_state, save_pretrained, save_training_state
 from .losses import contrastive_loss, length_loss, sample_mean_ce, token_mean_ce
 from .model import NuriModel
+from .monitoring import TrainingMonitor
 from .schedule import WSDSchedule
 
 # ----- loss for each batch kind ------------------------------------------------------
@@ -94,6 +95,9 @@ class TrainSettings:
     temperature: float = 0.05
     mix: dict[str, float] = field(default_factory=dict)
     tokenizer_dir: str | None = None  # copied into every saved checkpoint
+    stage: str = "training"           # label only; the task mix defines the computation
+    progress: bool = True
+    tensorboard_dir: str | None = None  # None = no event files or TensorBoard import
 
 
 @dataclass
@@ -136,6 +140,8 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     weights, optimizer moments, token totals and random state, so the result
     matches a run that was never interrupted.
     """
+    if settings.log_every <= 0:
+        raise ValueError("log_every must be positive")
     device = device or default_device()
     model.to(device).train()
     out = Path(settings.out_dir)
@@ -155,32 +161,45 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
     records, started = [], time.time()
 
-    with open(out / "train_log.jsonl", "a", encoding="utf-8") as log:
+    with TrainingMonitor(settings.total_steps, start_step, totals["tokens"],
+                         stage=settings.stage, progress=settings.progress,
+                         tensorboard_dir=settings.tensorboard_dir,
+                         resuming=resume_from is not None) as monitor, \
+            open(out / "train_log.jsonl", "a", encoding="utf-8") as log:
         for step in range(start_step, settings.total_steps):
             for group in optimizer.param_groups:
                 group["lr"] = schedule.lr(step)
             name = rng.choices(names, weights)[0]
             depth = rng.choice(model.config.train_depths)
+            schedule_phase = "warmup" if step < schedule.warmup_steps else (
+                "stable" if step < schedule.decay_start else "decay")
+            monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase)
             batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
 
+            monitor.phase("forward")
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
                 result = _task_loss(model, tasks[name].kind, batch, depth, settings)
                 aux = model.pop_moe_aux()
                 loss = result["loss"] + (aux["loss"] if aux["loss"] is not None else 0.0)
 
             optimizer.zero_grad(set_to_none=True)
+            monitor.phase("backward")
             loss.backward()
+            monitor.phase("optimizer")
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
             optimizer.step()
             totals["tokens"] += result["tokens"]
             totals["targets"] += result["targets"]
+            monitor.advance()
 
             if step % settings.log_every == 0 or step == settings.total_steps - 1:
                 record = _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, totals, started)
                 records.append(record)
                 log.write(json.dumps(record) + "\n")
                 log.flush()
-            _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks)
+                monitor.record(record, tasks[name].kind, result["targets"], schedule_phase)
+            _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
+                        on_save=lambda name: monitor.phase(f"saving {name}", force=True))
     return records
 
 
@@ -199,7 +218,8 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
 
 # Settings that may change between the interrupted and the resumed run; they
 # do not change what is computed. Everything else must match exactly.
-RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir")
+RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
+                        "stage", "progress", "tensorboard_dir")
 
 
 def _comparable_settings(settings: TrainSettings) -> dict:
@@ -252,7 +272,8 @@ def _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, total
     return record
 
 
-def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks) -> None:
+def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks,
+                on_save: Callable[[str], None] | None = None) -> None:
     last = step == settings.total_steps - 1
     names = []
     if settings.save_every and (step + 1) % settings.save_every == 0 and not last:
@@ -262,6 +283,8 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
     if last:
         names.append("final")
     for name in names:
+        if on_save is not None:
+            on_save(name)
         save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
         extra = {"totals": dict(totals), "random": _random_state(rng, tasks),
                  "settings": _comparable_settings(settings)}
