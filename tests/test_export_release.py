@@ -40,6 +40,7 @@ def test_export_loads_with_transformers(tmp_path, stage):
         assert all(name.startswith("model.") for name in weights.keys())
     card = (out / "README.md").read_text()
     assert "license: mit" in card and f"nuri-{stage}" in card
+    assert "1e6 tokens" in card and "0 GPU-hours" in card and "one GPU-day" not in card
     assert load_pretrained(out).config.length_head_trained == (stage == "it")  # Nuri loader reads it too
 
 
@@ -69,8 +70,7 @@ def test_hf_training_forward_adds_and_clears_moe_aux(tmp_path):
     save_pretrained(NuriModel(tiny_config(moe=moe)), tmp_path / "ckpt", dtype=torch.float32)
     load_script().main(["--checkpoint", str(tmp_path / "ckpt"), "--out", str(tmp_path / "r"), "--name", "n",
                         "--stage", "base"])
-    model = AutoModelForMaskedLM.from_pretrained(str(tmp_path / "r"), trust_remote_code=True,
-                                                 dtype=torch.float32).train()
+    model = AutoModelForMaskedLM.from_pretrained(str(tmp_path / "r"), trust_remote_code=True).float().train()
     ids = torch.randint(3, 128, (2, 6))
     plain = torch.nn.functional.cross_entropy(model(input_ids=ids).logits.flatten(0, 1), ids.flatten())
     for _ in range(3):

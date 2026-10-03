@@ -79,6 +79,8 @@ def model_card(model: NuriModel, args) -> str:
     c = model.config
     kind = "MoE" if c.moe else "dense"
     params = f"{total / 1e6:.1f}M" + (f" total, {active / 1e6:.1f}M active per token" if c.moe else "")
+    hours = "not given" if args.gpu_hours is None else f"{args.gpu_hours:g} GPU-hours"
+    budget = (f"trained on {args.tokens} tokens" if args.tokens else "trained on an unreported number of tokens")
     usage = {
         "base": "generate_refine(ids, canvas_len=32)  # base models need an explicit answer length",
         "it": "generate_refine(ids, T=4, S=4)  # the length head picks the answer length",
@@ -109,7 +111,7 @@ a masked answer in parallel and refining it, without an autoregressive decoder.
 | vocabulary | {c.vocab_size} |
 | languages | Korean, English (primary), Japanese (some) |
 | training tokens | {args.tokens or "not given"} |
-| hardware | {args.gpu or "not given"}, {args.gpu_hours or "?"} GPU-hours |
+| hardware | {args.gpu or "not given"}, {hours} |
 
 ## Use
 
@@ -128,8 +130,8 @@ does not apply because there is no decoder.
 
 ## Limitations
 
-This is a small research model trained for about one GPU-day. Expect factual
-errors and weak long-form writing. It has not been evaluated for safety.
+This is a small research model, {budget} ({hours}). Expect factual errors
+and weak long-form writing. It has not been evaluated for safety.
 
 ## License
 
@@ -150,7 +152,8 @@ def verify(model: NuriModel, out: Path, stage: str) -> dict:
     report["nuri_loader_max_diff"] = float((x_ref - x_new).abs().max())
 
     from transformers import AutoModelForMaskedLM
-    hf = AutoModelForMaskedLM.from_pretrained(str(out), trust_remote_code=True, dtype=torch.float32).eval()
+    # Loaded in its stored dtype and cast here, which works across transformers versions.
+    hf = AutoModelForMaskedLM.from_pretrained(str(out), trust_remote_code=True).float().eval()
     with torch.no_grad():
         logits_ref = model.vocab_logits(x_ref)
         logits_hf = hf(input_ids=ids).logits
