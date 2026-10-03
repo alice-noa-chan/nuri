@@ -22,8 +22,9 @@ class MoEFFN(nn.Module):
     """
 
     def __init__(self, hidden_size: int, num_experts: int, expert_ffn_size: int, top_k: int,
-                 num_shared_experts: int):
+                 num_shared_experts: int, backend: str = "loop"):
         super().__init__()
+        self.backend = backend
         if not 2 <= top_k <= num_experts:
             # With top_k=1 the renormalized weight is always 1, so the task loss
             # would no longer train the router. That variant needs its own gate.
@@ -85,11 +86,34 @@ class MoEFFN(nn.Module):
 
     def _run_experts(self, grouped: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
         """SwiGLU of each expert on its contiguous slice of `grouped` (rows sorted by expert)."""
+        if self.backend == "grouped" and _grouped_mm_usable(grouped, self.w_gate, self.w_down):
+            offsets = counts.cumsum(0).to(torch.int32)  # end row of each expert's slice
+            gate = _grouped_matmul(grouped, self.w_gate, offsets)
+            up = _grouped_matmul(grouped, self.w_up, offsets)
+            return _grouped_matmul(F.silu(gate) * up, self.w_down, offsets)
         outputs = []
         for e, rows in enumerate(grouped.split(counts.tolist())):
             if rows.shape[0]:
                 outputs.append((F.silu(rows @ self.w_gate[e]) * (rows @ self.w_up[e])) @ self.w_down[e])
         return torch.cat(outputs)
+
+
+def _grouped_mm_usable(x: torch.Tensor, *weights: torch.Tensor) -> bool:
+    """torch._grouped_mm exists and every row/column stride is a multiple of 16 bytes."""
+    if not hasattr(torch, "_grouped_mm"):
+        return False
+    sizes = [x.shape[-1]] + [w.shape[-1] for w in weights] + [w.shape[-2] for w in weights]
+    return all(size * x.element_size() % 16 == 0 for size in sizes)
+
+
+def _grouped_matmul(x: torch.Tensor, weight: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    """Rows offsets[e-1]:offsets[e] of x times weight[e], for every expert e, in one call."""
+    out = torch._grouped_mm(x, weight.to(x.dtype), offs=offsets)
+    if out.requires_grad:
+        # The backward of _grouped_mm rejects gradients with zero strides (e.g.
+        # from .sum()), so hand it a contiguous gradient.
+        out.register_hook(lambda grad: grad.contiguous())
+    return out
 
 
 def build_ffn(config: NuriConfig, stack: str, layer_number: int) -> nn.Module:
@@ -103,4 +127,4 @@ def build_ffn(config: NuriConfig, stack: str, layer_number: int) -> nn.Module:
     if not use_moe:
         return SwiGLU(config.hidden_size, config.ffn_size)
     return MoEFFN(config.hidden_size, moe.num_experts, moe.expert_ffn_size, moe.top_k,
-                  moe.num_shared_experts)
+                  moe.num_shared_experts, moe.backend)

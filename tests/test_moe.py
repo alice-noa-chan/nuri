@@ -94,3 +94,33 @@ def test_core_moe_routes_every_step():
         model.eval()
         model.reason(x, valid, steps=5, halt_tol=float("inf"))  # halting works with a MoE core
         assert model.core.last_steps_used.tolist() == [1, 1]
+
+
+@pytest.mark.skipif(not hasattr(torch, "_grouped_mm"), reason="torch._grouped_mm is not available")
+def test_grouped_backend_matches_the_loop_including_gradients():
+    loop = make_moe()
+    grouped = make_moe()
+    grouped.backend = "grouped"
+    x = torch.randn(3, 7, 16)
+    x_loop, x_grouped = x.clone().requires_grad_(), x.clone().requires_grad_()
+    out_loop, out_grouped = loop(x_loop), grouped(x_grouped)
+    assert torch.allclose(out_loop, out_grouped, atol=1e-5)
+    out_loop.sum().backward()
+    out_grouped.sum().backward()  # .sum() gives a zero-stride gradient; the hook must handle it
+    assert torch.allclose(x_loop.grad, x_grouped.grad, atol=1e-5)
+    for name in ("w_gate", "w_up", "w_down"):
+        assert torch.allclose(getattr(loop, name).grad, getattr(grouped, name).grad, atol=1e-5), name
+
+
+def test_grouped_backend_falls_back_when_unaligned():
+    torch.manual_seed(0)
+    moe = MoEFFN(hidden_size=6, num_experts=3, expert_ffn_size=5, top_k=2, num_shared_experts=0, backend="grouped")
+    for p in (moe.w_gate, moe.w_up, moe.w_down):
+        torch.nn.init.normal_(p, std=0.2)
+    x = torch.randn(2, 4, 6)
+    assert torch.allclose(moe(x), naive(moe, x), atol=1e-5)
+
+
+def test_unknown_backend_is_rejected():
+    with pytest.raises(ValueError):
+        tiny_config(moe=MoEConfig(backend="fast"))

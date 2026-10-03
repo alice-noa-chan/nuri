@@ -20,6 +20,10 @@ class MoEConfig:
     # Experimental (§9, OFF): MoE FFN in the shared reasoning core. The router
     # can pick different experts at different steps although the weights are shared.
     core: bool = False
+    # How expert matmuls run: "loop" (one matmul per expert, the tested default)
+    # or "grouped" (one torch._grouped_mm per projection, no host sync; falls
+    # back to the loop when the op or the tensor alignment is not available).
+    backend: str = "loop"
     # Loss weights are calibrated from logs (§9); these are starting points.
     balance_loss_weight: float = 0.01
     z_loss_weight: float = 0.001
@@ -122,6 +126,8 @@ class NuriConfig:
                 raise ValueError("MoE sizes must be positive")
             if not 2 <= moe.top_k <= moe.num_experts:
                 raise ValueError("MoE top_k must be between 2 and num_experts")
+            if moe.backend not in ("loop", "grouped"):
+                raise ValueError('MoE backend must be "loop" or "grouped"')
             if not all(1 <= i <= self.input_layers for i in moe.input_layers):
                 raise ValueError("MoE input_layers must be 1-based indices of input layers")
             if not all(1 <= i <= self.readout_layers for i in moe.readout_layers):
