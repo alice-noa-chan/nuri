@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from nuri.config import tiny_config
@@ -69,3 +70,44 @@ def test_core_diagnostics_has_one_row_per_state():
 
 def test_sample_examples_is_stable():
     assert sample_examples(EXAMPLES, 2, seed=1) == sample_examples(EXAMPLES, 2, seed=1)
+
+
+def test_retrieval_ties_are_not_all_rank_one():
+    """Constant embeddings cannot retrieve anything; ties are broken by document order."""
+    model = make_model()
+    model.embed = lambda ids, valid, **kwargs: torch.ones(ids.shape[0], 4)
+    pairs = [([5 + i], [9 + i]) for i in range(4)]
+    result = retrieval_metrics(model, pairs, ks=(1, 4))
+    assert result["recall@1"] == 0.25 and result["recall@4"] == 1.0
+    assert abs(result["mrr"] - (1 + 1 / 2 + 1 / 3 + 1 / 4) / 4) < 1e-6
+
+
+def test_over_limit_answers_are_excluded_not_cut():
+    model = make_model()
+    too_long = list(range(3, 3 + model.config.max_response_len))  # + EOS does not fit
+    result = generation_accuracy(model, EXAMPLES + [([5], too_long)], oracle_length=True)
+    assert result["examples"] == 3 and result["excluded"] == 1
+
+
+def test_shuffle_never_leaves_a_singleton_batch():
+    model = make_model()
+    seen = []
+    original = model.generation_memory
+
+    def capture(x, valid, r):
+        seen.append(r.shape[0])
+        return original(x, valid, r)
+
+    model.generation_memory = capture
+    generation_accuracy(model, EXAMPLES, oracle_length=True, batch_size=2, transform_r=shuffle_r)
+    assert seen == [3]  # the singleton tail joined the first batch
+    with pytest.raises(ValueError):
+        generation_accuracy(model, EXAMPLES[:1], oracle_length=True, transform_r=shuffle_r)
+
+
+def test_length_only_accuracy_exposes_length_leaks():
+    model = make_model()
+    yes_no = [([5], [20]), ([6], [20]), ([7], [21, 22])]  # "yes" is 1 token, "no" is 2 tokens
+    result = generation_accuracy(model, yes_no, oracle_length=True)
+    assert result["length_only_accuracy"] == 1.0  # the canvas length alone gives every answer away
+    assert "length_only_accuracy" not in generation_accuracy(model, yes_no)

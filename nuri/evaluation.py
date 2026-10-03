@@ -27,9 +27,29 @@ from .model import NuriModel
 Example = tuple[list[int], list[int]]  # (prompt ids, answer ids without EOS)
 
 
-def _batches(items: Sequence, size: int):
-    for start in range(0, len(items), size):
-        yield items[start:start + size]
+def _batches(items: Sequence, size: int, min_size: int = 1):
+    """Consecutive chunks of `size`. A tail shorter than min_size joins the previous chunk."""
+    chunks = [items[start:start + size] for start in range(0, len(items), size)]
+    if len(chunks) > 1 and len(chunks[-1]) < min_size:
+        tail = chunks.pop()
+        chunks[-1] = list(chunks[-1]) + list(tail)
+    yield from chunks
+
+
+def _length_only_accuracy(answers: list[list[int]]) -> float:
+    """Best exact match a model could get from the answer length alone.
+
+    With the oracle length the canvas size is given, so a model can pick the
+    most common answer of that length without reading the input at all
+    (for example "yes" and "no" with different token counts). Oracle exact
+    match is only meaningful well above this number.
+    """
+    by_length: dict[int, dict[tuple, int]] = {}
+    for answer in answers:
+        counts = by_length.setdefault(len(answer), {})
+        counts[tuple(answer)] = counts.get(tuple(answer), 0) + 1
+    best = sum(max(counts.values()) for counts in by_length.values())
+    return best / max(len(answers), 1)
 
 
 @torch.no_grad()
@@ -40,16 +60,25 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
 
     oracle_length=True gives the canvas the gold length (answer + EOS), which
     isolates denoising errors from length errors. Otherwise the length head
-    picks the length, so the model must be instruction-tuned.
+    picks the length, so the model must be instruction-tuned. Oracle results
+    also report length_only_accuracy: how much the given length alone reveals.
+
+    Examples whose answer plus EOS does not fit M are excluded (never cut)
+    and counted in "excluded". With transform_r, every batch has at least two
+    samples so that shuffling R always swaps it between different samples.
     """
     model.eval()
     device = next(model.parameters()).device
     config = model.config
+    eligible = [(p, list(a)) for p, a in examples if len(a) + 1 <= config.max_response_len]
+    if transform_r is not None and len(eligible) < 2:
+        raise ValueError("R interventions need at least two eligible examples")
+    min_size = 2 if transform_r is not None else 1
     counts = {"correct": 0, "missing_eos": 0, "wrong_length": 0, "total": 0}
-    for chunk in _batches(list(examples), batch_size):
+    for chunk in _batches(eligible, max(batch_size, min_size), min_size):
         prompts = [p[-config.max_input_len:] for p, _ in chunk]
         ids, valid = pad_batch(prompts, config.pad_id)
-        gold_lengths = torch.tensor([min(len(a) + 1, config.max_response_len) for _, a in chunk])
+        gold_lengths = torch.tensor([len(a) + 1 for _, a in chunk])
         result = generate(model, ids.to(device), valid.to(device), steps=steps, rounds=rounds,
                           canvas_len=gold_lengths.to(device) if oracle_length else None,
                           transform_r=transform_r)
@@ -60,10 +89,14 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
             counts["wrong_length"] += length != gold
             counts["total"] += 1
     total = max(counts["total"], 1)
-    return {"exact_match": counts["correct"] / total, "missing_eos_rate": counts["missing_eos"] / total,
-            "length_error_rate": counts["wrong_length"] / total, "examples": counts["total"],
-            "steps": steps if steps is not None else config.default_depth,
-            "rounds": rounds if rounds is not None else config.refine_rounds, "oracle_length": oracle_length}
+    report = {"exact_match": counts["correct"] / total, "missing_eos_rate": counts["missing_eos"] / total,
+              "length_error_rate": counts["wrong_length"] / total, "examples": counts["total"],
+              "excluded": len(examples) - len(eligible),
+              "steps": steps if steps is not None else config.default_depth,
+              "rounds": rounds if rounds is not None else config.refine_rounds, "oracle_length": oracle_length}
+    if oracle_length:
+        report["length_only_accuracy"] = _length_only_accuracy([a for _, a in eligible])
+    return report
 
 
 def depth_curve(model: NuriModel, examples: Sequence[Example], depths=(1, 2, 4, 8, 16), **kwargs) -> list[dict]:
@@ -86,7 +119,14 @@ def shuffle_r(r: torch.Tensor) -> torch.Tensor:
 
 
 def r_interventions(model: NuriModel, examples: Sequence[Example], **kwargs) -> dict:
-    """If accuracy barely drops when R is removed or swapped, the readout is bypassing the core."""
+    """Accuracy with normal R, zeroed R and R shuffled between samples.
+
+    These are measurements, not conclusions. Only when the normal accuracy is
+    clearly above trivial baselines (chance, majority answer, and for oracle
+    length the length_only_accuracy) does a small drop suggest that the
+    readout bypasses the core. An untrained model stays at the floor under
+    every intervention and says nothing about the core.
+    """
     return {"normal": generation_accuracy(model, examples, **kwargs),
             "zero_r": generation_accuracy(model, examples, transform_r=zero_r, **kwargs),
             "shuffled_r": generation_accuracy(model, examples, transform_r=shuffle_r, **kwargs)}
@@ -131,8 +171,11 @@ def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "f
         return torch.cat(out)
 
     scores = embed(0) @ embed(1).T
-    gold = scores.diagonal().unsqueeze(1)
-    ranks = (scores > gold).sum(dim=1) + 1  # 1 = the right document scored highest
+    # Rank the documents of each query by score, breaking ties by document
+    # order (stable sort). Tied scores therefore never all get rank 1.
+    order = scores.float().sort(dim=1, descending=True, stable=True).indices
+    gold = torch.arange(len(pairs), device=scores.device).unsqueeze(1)
+    ranks = (order == gold).float().argmax(dim=1) + 1  # 1 = the right document came first
     result = {f"recall@{k}": float((ranks <= k).float().mean()) for k in ks}
     result.update(mrr=float((1.0 / ranks.float()).mean()), pairs=len(pairs), mode=mode, dim=dim, steps=steps)
     return result
