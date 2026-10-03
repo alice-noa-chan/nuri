@@ -44,7 +44,9 @@ answer canvas [MASK MASK ...] ──► Readout (2 layers, reads [X; R]) ──�
    classification head.
 
 The full design, with every decision and its reason, is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Step-by-step usage of every tool
+(tokenizer comparison, benchmark, training, inference) is in
+[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
 ## Models we plan to release
 
@@ -56,14 +58,15 @@ The full design, with every decision and its reason, is in
 | `nuri-base-it` / `nuri-base-moe-it` | instruction-tuned versions |
 | `nuri-base-embed` | sentence embedding model built from `nuri-base` |
 
-All of them are trained on one A100 80GB or H100 in about one GPU-day in total.
-Intermediate checkpoints are published as revisions.
+The plan is to train all of them on one A100 80GB or H100 in about one GPU-day
+in total, and to publish intermediate checkpoints as revisions. None of them
+has been trained yet.
 
 ## Install
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest          # ~80 tests, a few seconds on CPU
+python -m pytest          # ~130 tests, about 10 seconds on CPU
 ```
 
 Python 3.10+ and PyTorch 2.4+ are required. Training uses bf16 on CUDA and
@@ -94,7 +97,11 @@ python scripts/train.py --stage embed --init runs/nuri-base/final --tokenizer ru
     --pairs pairs.jsonl --out runs/nuri-base-embed --steps 3000
 ```
 
-Use `--preset release-moe` in step 3 for the MoE model. Data formats:
+Use `--preset release-moe` in step 3 for the MoE model. The base stage takes
+its vocabulary size from the tokenizer, and every checkpoint folder gets a copy
+of the tokenizer files, so later stages can omit `--tokenizer`. Add
+`--resume runs/<run>/training_state/<name>.pt` (with the same flags) to
+continue an interrupted run exactly where it stopped. Data formats:
 
 - instructions: `{"messages": [{"role": "user", "content": "..."}], "response": "..."}`
 - pairs: `{"query": "...", "positive": "..."}`
@@ -104,6 +111,22 @@ public checkpoints (`step-N/`, `pre-decay/`, `final/`) and private resume
 state (`training_state/`).
 
 ## Use a checkpoint
+
+From the command line (`tools/infer_nuri.py`, see
+[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for all options):
+
+```bash
+# Base checkpoints need an explicit answer length
+python tools/infer_nuri.py --checkpoint runs/nuri-base/final     --text "Continue this short sentence:" --canvas-len 32 --steps 4 --rounds 4
+
+# Instruction-tuned checkpoints pick the length themselves
+python tools/infer_nuri.py --checkpoint runs/nuri-base-it/final --chat     --text "Explain why the sky looks blue." --max-len 128
+
+# Sentence embeddings
+python tools/infer_nuri.py --checkpoint runs/nuri-base-embed/final --task embed     --mode reasoning --dim 128 --text "A first sentence." --text "Another sentence."
+```
+
+From Python:
 
 ```python
 import torch
@@ -135,9 +158,10 @@ z = model.embed(prompt, mode="reasoning", steps=4, dim=128)
 | `nuri/model.py` | `NuriModel`: assembles everything and the heads |
 | `nuri/generation.py` | the refinement sampler |
 | `nuri/corruption.py`, `nuri/data.py`, `nuri/tasks.py` | masking, corpus format, batch builders, synthetic reasoning tasks |
-| `nuri/losses.py`, `nuri/trainer.py`, `nuri/pipeline.py`, `nuri/schedule.py`, `nuri/checkpoint.py` | training |
+| `nuri/losses.py`, `nuri/trainer.py`, `nuri/pipeline.py`, `nuri/schedule.py`, `nuri/checkpoint.py` | training, resume, checkpoints |
+| `nuri/tokenizer.py` | tokenizer checks and copying tokenizer files into checkpoints |
 | `scripts/` | `train.py`, `tokenize_corpus.py` |
-| `tools/` | tokenizer training, benchmark, the shared-file watcher |
+| `tools/` | tokenizer training, GPU benchmark, text inference CLI, the shared-file watcher |
 | `docs/` | design spec, decision log, agent discussion |
 
 ## How this project is built
