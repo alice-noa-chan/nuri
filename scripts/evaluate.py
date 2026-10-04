@@ -23,6 +23,8 @@ Suites
                  (the core + readout path; works for base models)
   retrieval      Recall@k / MRR on --pairs (JSONL with "query" and "positive")
   diagnostics    per-step core state statistics
+  instructions   generation metrics and coverage on --instructions JSONL ("messages", "response");
+                 oracle length, plus predicted length for a trained length head
 
 Base models have no trained length head, so their generation suites use the
 oracle length only, and the report says so.
@@ -48,7 +50,8 @@ from nuri.pipeline import read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer  # noqa: E402
 
-SUITES = ("reasoning", "curves", "interventions", "halting", "mlm", "denoise", "retrieval", "diagnostics")
+SUITES = ("reasoning", "curves", "interventions", "halting", "mlm", "denoise", "retrieval", "diagnostics",
+          "instructions")
 
 
 def parse_args(argv=None):
@@ -58,7 +61,9 @@ def parse_args(argv=None):
     p.add_argument("--tokenizer", help="defaults to the tokenizer inside --checkpoint")
     p.add_argument("--corpus", default=os.environ.get("NURI_EVAL_CORPUS"), help="held-out corpus folder (mlm)")
     p.add_argument("--pairs", default=os.environ.get("NURI_EVAL_PAIRS"), help="held-out pairs JSONL (retrieval)")
-    p.add_argument("--examples", type=int, default=300, help="examples per generation suite")
+    p.add_argument("--instructions", default=os.environ.get("NURI_EVAL_INSTRUCTIONS"),
+                   help="held-out canonical instruction JSONL; evaluate the whole file")
+    p.add_argument("--examples", type=int, default=300, help="synthetic examples per reasoning generation suite")
     p.add_argument("--documents", type=int, default=500, help="documents for mlm and diagnostics")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -66,12 +71,38 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def instruction_examples(path: str | Path, encode) -> list[tuple[list[int], list[int]]]:
+    """Read the training CLI's canonical rows without filtering or cutting answers."""
+    examples = []
+    try:
+        for index, row in enumerate(read_jsonl(path), start=1):
+            if not isinstance(row, dict) or not isinstance(row.get("response"), str):
+                sys.exit(f"instructions record {index} needs a string response (empty is allowed)")
+            messages = row.get("messages")
+            if not isinstance(messages, list) or not messages:
+                sys.exit(f"instructions record {index} needs a nonempty messages list")
+            for message in messages:
+                if (not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant")
+                        or not isinstance(message.get("content"), str)):
+                    sys.exit(f"instructions record {index} needs valid role/content messages")
+            # Prompt role tags and turn EOS match training. Reference EOS is added by the evaluator.
+            examples.append((encode(chat_prompt_text(messages)), encode(row["response"])))
+    except OSError:
+        sys.exit("instructions input is unavailable or unreadable")
+    except (json.JSONDecodeError, UnicodeError):
+        sys.exit("instructions input must contain valid UTF-8 JSONL")
+    return examples
+
+
 def main(argv=None) -> dict:
     args = parse_args(argv)
+    if "instructions" in args.suites and not args.instructions:
+        sys.exit("instructions needs --instructions (or NURI_EVAL_INSTRUCTIONS)")
     model = load_pretrained(args.checkpoint, device=args.device).eval()
     tokenizer = load_tokenizer(args.tokenizer or args.checkpoint)
     check_tokenizer(tokenizer, model.config)
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False).ids  # noqa: E731
+    natural_examples = instruction_examples(args.instructions, encode) if "instructions" in args.suites else None
 
     report = {"checkpoint": str(args.checkpoint), "length_head_trained": model.config.length_head_trained}
     needs_examples = {"reasoning", "curves", "interventions", "halting"} & set(args.suites)
@@ -98,6 +129,15 @@ def main(argv=None) -> dict:
         report["interventions"] = evaluation.r_interventions(model, examples, oracle_length=oracle)
     if "halting" in args.suites:
         report["halting"] = evaluation.halting_curve(model, examples, oracle_length=oracle)
+
+    if "instructions" in args.suites:
+        oracle = not model.config.length_head_trained
+        report["oracle_length_only"] = oracle
+        result = {"input_examples": len(natural_examples), "oracle_length_only": oracle,
+                  "oracle_length": evaluation.generation_accuracy(model, natural_examples, oracle_length=True)}
+        if not oracle:
+            result["predicted_length"] = evaluation.generation_accuracy(model, natural_examples)
+        report["instructions"] = result
 
     if {"mlm", "denoise", "diagnostics"} & set(args.suites):
         if not args.corpus:

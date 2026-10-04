@@ -84,6 +84,8 @@ def evaluate_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
         command += ["--corpus", str(data["eval_corpus"])]
     if data.get("eval_pairs"):
         command += ["--pairs", str(data["eval_pairs"])]
+    if data.get("eval_instructions"):
+        command += ["--instructions", str(data["eval_instructions"])]
     return command
 
 

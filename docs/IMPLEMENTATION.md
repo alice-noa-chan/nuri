@@ -581,6 +581,38 @@ but it does not guarantee that every sampled problem is absent from training.
 Tokenizer files default to the checkpoint folder and must match its vocabulary
 and special IDs.
 
+Evaluate natural held-out instructions with the optional `instructions` suite:
+
+```powershell
+python scripts/evaluate.py --checkpoint runs/nuri-base-it/final `
+  --suites instructions --instructions $env:NURI_EVAL_INSTRUCTIONS `
+  --output .private/eval/nuri-base-it-instructions.json
+```
+
+`NURI_EVAL_INSTRUCTIONS` supplies the path when `--instructions` is omitted;
+an explicit flag takes precedence. Use a separate held-out JSONL file with the
+same canonical `messages` and string `response` fields as IT training. Messages
+use `system`, `user` or `assistant` roles and string content. Empty responses
+are valid. The CLI uses the training chat prompt format and tokenizes without
+automatic special tokens; the evaluator accounts for the target EOS separately.
+Missing inputs, malformed JSON and invalid rows fail clearly.
+
+The entire supplied file is evaluated. `--examples` continues to control only
+the synthetic reasoning suites. `input_examples` counts all supplied rows;
+each length report counts eligible rows and excluded over-cap answers and shows
+`evaluation_coverage`. Full reference answers remain intact, including answers
+that do not fit the response canvas. The evaluator keeps the last N prompt
+tokens, as IT training does. IT checkpoints report oracle and predicted length;
+base checkpoints report oracle length only. The report includes counts and
+metrics without copying the instruction path or text. Keep evaluation reports
+private and review readable samples separately; exact token match does not
+measure the quality of open-ended answers.
+
+The release runner passes an optional private-plan `data.eval_instructions`
+path through to this flag. Add `instructions` to the desired stage's `evaluate`
+list to run it. The runner never substitutes `data.instructions`, and existing
+plan examples and evaluation suites remain unchanged.
+
 The `denoise` suite measures held-out span reconstruction through the recurrent
 core and readout: per-sample cross-entropy and masked-token accuracy at several
 mask ratios and reasoning depths. MLM accuracy measures the input encoder and
@@ -669,5 +701,7 @@ generation behavior, tokenizer round trips, checkpoint reload, and synthetic
 training. The actual text CLI pipeline has also been exercised from tokenizer
 training through base/IT/embed training and checkpoint-based inference. The
 generated text in this short smoke run is only a pipeline check.
-An A100/H100 run is still needed to establish the real batch size,
-throughput, language quality, and whether changing T/S improves task results.
+Synthetic GPU throughput and intended-batch capacity are now measured in
+[GPU_COMPARISON.md](GPU_COMPARISON.md) and [GPU_CAPACITY.md](GPU_CAPACITY.md).
+Actual-data mixed-stage fit and sustained throughput, trained language quality,
+and whether changing T/S improves task results still need measurements.
