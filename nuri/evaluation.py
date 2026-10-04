@@ -12,6 +12,8 @@ plain dicts that can be written as JSON. Every result reports its settings
   (measures the core + readout path of base models, which MLM skips)
 - retrieval_metrics: Recall@k and MRR for an embedding mode
 - lexical_retrieval_baseline: the same retrieval scored by shared tokens only (no model)
+- retrieval_ranks / lexical_retrieval_ranks / ranking_metrics_from_ranks: per-query ranks and
+  the metrics computed from them, for reports that split queries into groups
 - core_diagnostics: state norm, update norm, slot cosine and effective rank per step
 - halting_curve: exact match vs mean core steps for several halting tolerances
 """
@@ -237,11 +239,11 @@ def span_denoising(model: NuriModel, documents: Sequence[list[int]], ratios=(0.1
 
 
 @torch.no_grad()
-def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "fast", steps: int | None = None,
-                      dim: int | None = None, ks=(1, 5, 10), batch_size: int = 64,
-                      doc_mode: str | None = None) -> dict:
-    """Each query should retrieve its own document among all documents in `pairs`.
+def retrieval_ranks(model: NuriModel, pairs: Sequence[Example], mode: str = "fast", steps: int | None = None,
+                    dim: int | None = None, batch_size: int = 64, doc_mode: str | None = None) -> torch.Tensor:
+    """Rank (1 = first) of each query's own document among all documents in `pairs`.
 
+    Queries and documents are cut to max_input_len, as the model sees them.
     doc_mode (default: same as mode) embeds the documents with another mode,
     e.g. reasoning queries against fast documents. Read such cross-mode
     numbers only for models trained with cross-mode alignment (§6).
@@ -257,47 +259,56 @@ def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "f
             out.append(model.embed(ids.to(device), valid.to(device), mode=side_mode, steps=steps, dim=dim))
         return torch.cat(out)
 
-    result = _ranking_metrics(embed(0, mode) @ embed(1, doc_mode).T, ks)
-    result.update(pairs=len(pairs), mode=mode, doc_mode=doc_mode, dim=dim, steps=steps)
+    return ranks_from_scores(embed(0, mode) @ embed(1, doc_mode).T).cpu()
+
+
+def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "fast", steps: int | None = None,
+                      dim: int | None = None, ks=(1, 5, 10), batch_size: int = 64,
+                      doc_mode: str | None = None) -> dict:
+    """Recall@k and MRR of retrieval_ranks; each query should find its own document."""
+    ranks = retrieval_ranks(model, pairs, mode, steps, dim, batch_size, doc_mode)
+    result = ranking_metrics_from_ranks(ranks, ks)
+    result.update(pairs=len(pairs), mode=mode, doc_mode=doc_mode or mode, dim=dim, steps=steps)
     return result
 
 
-def _ranking_metrics(scores: torch.Tensor, ks=(1, 5, 10)) -> dict:
-    """Recall@k and MRR when document i is the right answer for query i.
+def ranks_from_scores(scores: torch.Tensor) -> torch.Tensor:
+    """Rank (1 = first) of document i for query i, from a (queries x documents) score matrix.
 
     Documents are ranked by score with ties broken by document order (stable
     sort), so tied scores never all get rank 1.
     """
     order = scores.float().sort(dim=1, descending=True, stable=True).indices
     gold = torch.arange(scores.shape[0], device=scores.device).unsqueeze(1)
-    ranks = (order == gold).float().argmax(dim=1) + 1  # 1 = the right document came first
+    return (order == gold).float().argmax(dim=1) + 1
+
+
+def ranking_metrics_from_ranks(ranks: torch.Tensor, ks=(1, 5, 10)) -> dict:
+    """Recall@k and MRR from per-query ranks (an empty set gives zeros)."""
+    if ranks.numel() == 0:
+        return {**{f"recall@{k}": 0.0 for k in ks}, "mrr": 0.0}
+    ranks = ranks.float()
     result = {f"recall@{k}": float((ranks <= k).float().mean()) for k in ks}
-    result["mrr"] = float((1.0 / ranks.float()).mean())
+    result["mrr"] = float((1.0 / ranks).mean())
     return result
 
 
-def lexical_retrieval_baseline(pairs: Sequence[Example], vocab_size: int, ks=(1, 5, 10)) -> dict:
-    """The same retrieval task scored by shared tokens only (TF-IDF cosine), with no model.
+def lexical_retrieval_ranks(pairs: Sequence[Example], vocab_size: int, max_len: int | None = None) -> torch.Tensor:
+    """retrieval_ranks scored by shared tokens only (TF-IDF cosine), with no model.
 
-    If the embedding model barely beats this, the pairs mostly test word
-    overlap, not meaning. Token counts are kept sparse, so this stays cheap
-    for thousands of pairs even with a 64k vocabulary.
+    Token counts are kept sparse, so this stays cheap for thousands of pairs
+    even with a 64k vocabulary. Pass the model's max_input_len as max_len so
+    the baseline sees the same text the model sees; without it the ranks are
+    a full-text diagnostic. Empty texts score 0 against everything.
     """
-    def token_counts(texts: list[list[int]]) -> torch.Tensor:
-        """Sparse (texts x vocabulary) matrix of token counts."""
-        rows = torch.cat([torch.full((len(t),), i) for i, t in enumerate(texts)])
-        cols = torch.cat([torch.tensor(t, dtype=torch.long) for t in texts])
-        return torch.sparse_coo_tensor(torch.stack([rows, cols]), torch.ones(len(cols)),
-                                       (len(texts), vocab_size), check_invariants=True).coalesce()
-
-    queries = token_counts([list(q) for q, _ in pairs])
-    documents = token_counts([list(d) for _, d in pairs])
+    queries = _token_counts([list(q)[:max_len] for q, _ in pairs], vocab_size)
+    documents = _token_counts([list(d)[:max_len] for _, d in pairs], vocab_size)
     # Inverse document frequency over the document side.
-    present = torch.zeros(vocab_size)
-    present.index_add_(0, documents.indices()[1], torch.ones(documents.indices().shape[1]))
+    present = torch.zeros(vocab_size).index_add_(0, documents.indices()[1], torch.ones(documents.indices().shape[1]))
     idf = torch.log((1 + len(pairs)) / (1 + present)) + 1
 
     def weighted(m: torch.Tensor) -> torch.Tensor:
+        """Rows scaled by IDF and normalized to length 1."""
         values = m.values() * idf[m.indices()[1]]
         norms = torch.zeros(m.shape[0]).index_add_(0, m.indices()[0], values ** 2).sqrt().clamp_min(1e-12)
         return torch.sparse_coo_tensor(m.indices(), values / norms[m.indices()[0]], m.shape, check_invariants=True)
@@ -305,9 +316,28 @@ def lexical_retrieval_baseline(pairs: Sequence[Example], vocab_size: int, ks=(1,
     with warnings.catch_warnings():  # PyTorch notes that its internal sparse CSR path is "beta"
         warnings.filterwarnings("ignore", message="Sparse CSR tensor support is in beta")
         scores = torch.sparse.mm(weighted(queries), weighted(documents).t()).to_dense()
-    result = _ranking_metrics(scores, ks)
-    result.update(pairs=len(pairs), mode="lexical-tfidf")
+    return ranks_from_scores(scores)
+
+
+def lexical_retrieval_baseline(pairs: Sequence[Example], vocab_size: int, max_len: int | None = None,
+                               ks=(1, 5, 10)) -> dict:
+    """Recall@k and MRR of lexical_retrieval_ranks.
+
+    If the embedding model barely beats this, the pairs mostly test word
+    overlap, not meaning.
+    """
+    result = ranking_metrics_from_ranks(lexical_retrieval_ranks(pairs, vocab_size, max_len), ks)
+    result.update(pairs=len(pairs), mode="lexical-tfidf", max_len=max_len)
     return result
+
+
+def _token_counts(texts: list[list[int]], vocab_size: int) -> torch.Tensor:
+    """Sparse (texts x vocabulary) matrix of token counts."""
+    rows = [i for i, text in enumerate(texts) for _ in text]
+    cols = [token for text in texts for token in text]
+    indices = torch.tensor([rows, cols], dtype=torch.long).reshape(2, -1)
+    return torch.sparse_coo_tensor(indices, torch.ones(len(cols)), (len(texts), vocab_size),
+                                   check_invariants=True).coalesce()
 
 
 @torch.no_grad()
