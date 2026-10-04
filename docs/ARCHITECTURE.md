@@ -1,6 +1,6 @@
 # Nuri v0 Architecture
 
-Status: design spec with an executable implementation. CPU tests and small correctness runs pass; target-GPU release training, throughput and language quality remain unmeasured.
+Status: design spec with an executable implementation. CPU tests and small correctness runs pass; fixed-shape A100/H100 training throughput is measured in [GPU_COMPARISON.md](GPU_COMPARISON.md). Release training and language quality remain unmeasured.
 
 > **User decisions in §14 take priority.** If the body and §14 disagree, follow §14 and record the conflict in §17 (open questions).
 
