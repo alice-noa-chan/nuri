@@ -586,10 +586,20 @@ core and readout: per-sample cross-entropy and masked-token accuracy at several
 mask ratios and reasoning depths. MLM accuracy measures the input encoder and
 vocabulary head, so report both when evaluating a base checkpoint.
 
-The generation report includes exact token match, missing EOS, and canvas
-length errors. It compares predicted and oracle lengths for IT; base models
+The generation report includes exact content-token match, missing EOS, early
+EOS, and canvas-length errors. Content match alone can count an answer that
+never writes EOS, so read it with the termination metrics. Early EOS means an
+EOS-terminated answer shorter than its reference; a short canvas without EOS
+is counted as missing EOS instead. `canvas_length_mae` compares chosen canvas
+lengths including EOS with reference lengths including EOS. `answer_length_mae`
+compares returned content-token counts with reference content-token counts.
+The length errors can differ even with a correct oracle canvas length.
+It compares predicted and oracle lengths for IT; base models
 use oracle length because their length head is untrained. Over-limit answers
-are excluded and counted. Oracle reports include a length-only answer baseline,
+are excluded and counted; `evaluation_coverage` is the eligible fraction of all
+supplied examples. Other metrics use only eligible examples. Empty eligible
+sets report zero counts and zero-valued metrics, which are not quality results.
+Oracle reports include a length-only answer baseline,
 since the supplied answer length can reveal the label. The T curve uses
 one checkpoint at T=1/2/4/8/16. The S curve uses S=1/2/4/8. The R interventions
 zero the latent state or swap it between samples before length prediction and

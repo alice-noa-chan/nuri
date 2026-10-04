@@ -4,7 +4,7 @@ All functions take token ids, so they work with any tokenizer, and return
 plain dicts that can be written as JSON. Every result reports its settings
 (T, S, number of examples) so numbers are never shown without context.
 
-- generation_accuracy: exact match of generated answers, with EOS error counts
+- generation_accuracy: exact match, EOS errors, length MAE and eligible coverage
 - depth_curve / rounds_curve: the same metric over several T or S
 - r_interventions: normal R vs zeroed R vs R shuffled between samples
 - mlm_accuracy: masked token accuracy on held-out text
@@ -68,7 +68,11 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
     also report length_only_accuracy: how much the given length alone reveals.
 
     Examples whose answer plus EOS does not fit M are excluded (never cut)
-    and counted in "excluded". With transform_r, every batch has at least two
+    and counted in "excluded". Coverage is the eligible fraction of the supplied
+    examples. Early EOS means an EOS-terminated answer shorter than the reference.
+    Canvas-length MAE includes EOS; answer-length MAE uses returned content tokens,
+    including when EOS is missing. Other metrics use eligible examples only.
+    With transform_r, every batch has at least two
     samples so that shuffling R always swaps it between different samples.
     """
     model.eval()
@@ -78,7 +82,8 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
     if transform_r is not None and len(eligible) < 2:
         raise ValueError("R interventions need at least two eligible examples")
     min_size = 2 if transform_r is not None else 1
-    counts = {"correct": 0, "missing_eos": 0, "wrong_length": 0, "total": 0, "core_steps": 0}
+    counts = {"correct": 0, "missing_eos": 0, "early_eos": 0, "wrong_length": 0,
+              "canvas_length_error": 0, "answer_length_error": 0, "total": 0, "core_steps": 0}
     for chunk in _batches(eligible, max(batch_size, min_size), min_size):
         prompts = [p[-config.max_input_len:] for p, _ in chunk]
         ids, valid = pad_batch(prompts, config.pad_id)
@@ -92,12 +97,19 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
                                                             result.lengths.tolist(), gold_lengths.tolist()):
             counts["correct"] += tokens == list(answer)
             counts["missing_eos"] += not ended
+            counts["early_eos"] += ended and len(tokens) < len(answer)
             counts["wrong_length"] += length != gold
+            counts["canvas_length_error"] += abs(length - gold)
+            counts["answer_length_error"] += abs(len(tokens) - len(answer))
             counts["total"] += 1
     total = max(counts["total"], 1)
     report = {"exact_match": counts["correct"] / total, "missing_eos_rate": counts["missing_eos"] / total,
+              "early_eos_rate": counts["early_eos"] / total,
+              "canvas_length_mae": counts["canvas_length_error"] / total,
+              "answer_length_mae": counts["answer_length_error"] / total,
               "length_error_rate": counts["wrong_length"] / total, "examples": counts["total"],
               "excluded": len(examples) - len(eligible),
+              "evaluation_coverage": len(eligible) / max(len(examples), 1),
               "mean_core_steps": counts["core_steps"] / total, "halt_tol": halt_tol,
               "steps": steps if steps is not None else config.default_depth,
               "rounds": rounds if rounds is not None else config.refine_rounds, "oracle_length": oracle_length}
