@@ -81,6 +81,8 @@ def parse_args(argv=None):
                    help="embed stage: also align reasoning-mode queries with fast-mode documents (0 = off)")
     p.add_argument("--pack-mlm", action="store_true",
                    help="base stage: fill each MLM row with several documents (attention stays inside each one)")
+    p.add_argument("--bucket", action="store_true",
+                   help="base/it stages: group span and instruction samples of similar length (less padding)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--corpus", nargs="+", default=env_list("NURI_TEXT_CORPUS"),
                    help='corpus folder(s); mix several as "folder=weight" (e.g. ko=35 en=45)')
@@ -143,7 +145,8 @@ def main(argv=None):
 
     print(f"[{args.stage}] Preparing training tasks...", flush=True)
     if args.stage == "base":
-        tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed, args.pack_mlm)
+        tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed, args.pack_mlm,
+                                args.bucket)
     elif args.stage == "it":
         require(tokenizer, "--tokenizer")
 
@@ -159,7 +162,8 @@ def main(argv=None):
         with tqdm(raw_reasoning, desc="it | tokenizing reasoning examples", unit="example", ascii=True,
                   dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
             reasoning = [tokenize(m, a) for m, a in progress]
-        tasks, mix = instruction_stage(examples, config, args.batch_size, corpus, reasoning, args.seed)
+        tasks, mix = instruction_stage(examples, config, args.batch_size, corpus, reasoning, args.seed,
+                                       bucket=args.bucket)
         config.length_head_trained = True  # saved into every checkpoint of this run
     else:
         require(tokenizer, "--tokenizer")

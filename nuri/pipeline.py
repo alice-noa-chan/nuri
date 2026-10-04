@@ -33,12 +33,24 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
                 yield json.loads(line)
 
 
+# Length bucketing draws this many times a batch of candidates and keeps a
+# similar-length run; the run's padded size stays within one full batch.
+BUCKET_POOL = 8
+
+
+def _bucket(config: NuriConfig, batch_size: int) -> tuple[int, int]:
+    """(token budget, max rows): the padded size of one full batch, and a row cap."""
+    return batch_size * (config.max_input_len + config.max_response_len), batch_size * BUCKET_POOL
+
+
 def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
-                  pack_mlm: bool = False) -> dict[str, Task]:
+                  pack_mlm: bool = False, bucket: bool = False) -> dict[str, Task]:
     """MLM and span batches drawn from the corpus, skipping documents they cannot use.
 
     pack_mlm fills each MLM row with several documents (no padding waste for
-    short documents); span batches always hold one document per row.
+    short documents); span batches always hold one document per row. bucket
+    groups span samples of similar length, so short samples are not padded to
+    the longest one in the batch.
     """
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
@@ -52,12 +64,13 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
         return build_mlm_batch(docs, config, rng, generator)
 
     def span_batch() -> dict:
-        docs = corpus.sample(batch_size, rng, usable=lambda d: len(d) >= 2)  # one token on each side
-        return build_span_batch(docs, config, rng, generator)
+        count = batch_size * BUCKET_POOL if bucket else batch_size
+        docs = corpus.sample(count, rng, usable=lambda d: len(d) >= 2)  # one token on each side
+        return build_span_batch(docs, config, rng, generator, bucket=_bucket(config, batch_size) if bucket else None)
 
     options = {"batch_size": batch_size, "corpus_documents": len(corpus),
                "corpus_weights": getattr(corpus, "weights", None),  # set for a MixedCorpus
-               "pack_mlm": pack_mlm}
+               "pack_mlm": pack_mlm, "bucket": bucket}
     return {"mlm": Task("mlm", mlm_batch, rng, generator, options),
             "span": Task("span", span_batch, rng, generator, options)}
 
@@ -70,32 +83,40 @@ def _usable_examples(examples: list, config: NuriConfig, name: str) -> list:
     return usable
 
 
-def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int, seed: int) -> Task:
+def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int, seed: int,
+                  bucket: bool = False) -> Task:
     """Endless random batches over a pre-filtered list of (prompt ids, answer ids)."""
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
-    return Task(kind, lambda: build_instruction_batch(rng.sample(examples, min(batch_size, len(examples))),
-                                                      config, generator), rng, generator,
-                {"batch_size": batch_size, "examples": len(examples)})
+
+    def next_batch() -> dict:
+        if not bucket:
+            return build_instruction_batch(rng.sample(examples, min(batch_size, len(examples))), config, generator)
+        pool = rng.sample(examples, min(batch_size * BUCKET_POOL, len(examples)))
+        return build_instruction_batch(pool, config, generator, bucket=_bucket(config, batch_size), rng=rng)
+
+    return Task(kind, next_batch, rng, generator,
+                {"batch_size": batch_size, "examples": len(examples), "bucket": bucket})
 
 
-def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False):
-    return _corpus_tasks(corpus, config, batch_size, seed, pack_mlm), {"mlm": 0.5, "span": 0.5}
+def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False,
+               bucket: bool = False):
+    return _corpus_tasks(corpus, config, batch_size, seed, pack_mlm, bucket), {"mlm": 0.5, "span": 0.5}
 
 
 def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpus: TokenCorpus | None = None,
-                      reasoning: list | None = None, seed: int = 0):
+                      reasoning: list | None = None, seed: int = 0, bucket: bool = False):
     examples = _usable_examples(examples, config, "instruction")
-    tasks = {"instruction": _example_task("instruction", examples, config, batch_size, seed)}
+    tasks = {"instruction": _example_task("instruction", examples, config, batch_size, seed, bucket)}
     mix = {"instruction": 0.7}
     if reasoning:
         reasoning = _usable_examples(reasoning, config, "reasoning")
-        tasks["reasoning"] = _example_task("instruction", reasoning, config, batch_size, seed + 1)
+        tasks["reasoning"] = _example_task("instruction", reasoning, config, batch_size, seed + 1, bucket)
         mix["reasoning"] = 0.15
     else:
         mix["instruction"] += 0.15
     if corpus is not None:
-        tasks["span"] = _corpus_tasks(corpus, config, batch_size, seed + 2)["span"]
+        tasks["span"] = _corpus_tasks(corpus, config, batch_size, seed + 2, bucket=bucket)["span"]
         mix["span"] = 0.15
     else:
         mix["instruction"] += 0.15

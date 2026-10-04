@@ -196,22 +196,56 @@ def usable_instruction(example: tuple[list[int], list[int]], config: NuriConfig)
     return bool(prompt) and len(answer) + 1 <= config.max_response_len
 
 
+def length_window(items: list, sizes: list[tuple[int, int]], budget: int, max_rows: int,
+                  rng: random.Random) -> list:
+    """A run of similar-length items whose padded size fits `budget`.
+
+    Items are sorted by total length; from a random start, items are taken in
+    order while rows x (longest input part + longest canvas part) stays within
+    the budget. Similar lengths mean little padding. The function keeps no
+    state between calls, so a resumed run draws exactly the same batches.
+    """
+    order = sorted(range(len(items)), key=lambda i: sum(sizes[i]))
+    chosen, longest_a, longest_b = [], 0, 0
+    for i in order[rng.randrange(len(order)):]:
+        a, b = max(longest_a, sizes[i][0]), max(longest_b, sizes[i][1])
+        if chosen and ((len(chosen) + 1) * (a + b) > budget or len(chosen) >= max_rows):
+            break
+        chosen.append(i)
+        longest_a, longest_b = a, b
+    return [items[i] for i in chosen]
+
+
 def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
-                     generator: torch.Generator | None = None, min_span: int = 16) -> dict:
-    """Text span denoising: encode a prefix, rebuild the following span on the canvas."""
+                     generator: torch.Generator | None = None, min_span: int = 16,
+                     bucket: tuple[int, int] | None = None) -> dict:
+    """Text span denoising: encode a prefix, rebuild the following span on the canvas.
+
+    bucket=(token budget, max rows): pass more documents than one batch needs;
+    a run of similar-length samples is kept (see length_window).
+    """
     pairs = [split_span(doc, config.max_input_len, config.max_response_len, config.eos_id, min_span, rng)
              for doc in documents if len(doc) >= 2]
+    if bucket is not None:
+        pairs = length_window(pairs, [(len(s), len(t)) for s, t in pairs], *bucket, rng)
     return _canvas_batch([p[0] for p in pairs], [p[1] for p in pairs], config, generator)
 
 
 def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config: NuriConfig,
-                            generator: torch.Generator | None = None) -> dict:
+                            generator: torch.Generator | None = None,
+                            bucket: tuple[int, int] | None = None, rng: random.Random | None = None) -> dict:
     """examples: (prompt ids, answer ids without EOS).
 
     EOS is appended to every answer (a real ending). Answers longer than M
     after EOS are dropped, never cut, and counted in "dropped". Prompts keep
     their last N tokens, since the end of a conversation matters most.
+    bucket=(token budget, max rows) with rng keeps only a run of
+    similar-length examples (see length_window).
     """
+    if bucket is not None:
+        usable = [e for e in examples if usable_instruction(e, config)]
+        sizes = [(min(len(p), config.max_input_len), len(a) + 1) for p, a in usable]
+        examples = length_window(usable, sizes, *bucket, rng) if usable else []
     prompts, targets = [], []
     for prompt, answer in examples:
         if not usable_instruction((prompt, answer), config):
