@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import random
+import signal
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -120,6 +122,7 @@ class TrainSettings:
     gradient_checkpointing: bool = False  # recompute block activations in backward (same results, less memory)
     compile: bool = False             # torch.compile the blocks in place (same weights and names)
     native_gqa: bool = False          # let SDPA consume compact grouped K/V heads (runtime option)
+    save_every_minutes: float = 0.0   # also save training_state/latest.pt this often (0 = off)
 
 
 @dataclass
@@ -193,9 +196,10 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
     records, started = [], time.time()
+    last_timed_save = time.monotonic()
     _reset_cuda_peaks(device)
 
-    with TrainingMonitor(settings.total_steps, start_step, totals["tokens"],
+    with _StopOnSigterm(), TrainingMonitor(settings.total_steps, start_step, totals["tokens"],
                          stage=settings.stage, progress=settings.progress,
                          tensorboard_dir=settings.tensorboard_dir,
                          resuming=resume_from is not None) as monitor, \
@@ -252,6 +256,19 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
                 _reset_cuda_peaks(device)
             _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
                         on_save=lambda name: monitor.phase(f"saving {name}", force=True))
+
+            # A requested stop or the timed save writes only the full training
+            # state (no public weights): the smallest save that resumes exactly.
+            finished = step == settings.total_steps - 1
+            stop = _stop_requested.is_set() and not finished
+            timed = (settings.save_every_minutes > 0 and not finished
+                     and time.monotonic() - last_timed_save >= settings.save_every_minutes * 60)
+            if stop or timed:
+                monitor.phase("saving latest state", force=True)
+                path = _save_state(model, optimizer, settings, step, totals, out, rng, tasks, LATEST_STATE)
+                last_timed_save = time.monotonic()
+                if stop:
+                    raise TrainingInterrupted(step + 1, path)
     return records
 
 
@@ -320,7 +337,55 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
 # Settings that may change between the interrupted and the resumed run; they
 # do not change what is computed. Everything else must match exactly.
 RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
-                        "stage", "progress", "tensorboard_dir", "gradient_checkpointing", "compile")
+                        "stage", "progress", "tensorboard_dir", "gradient_checkpointing", "compile",
+                        "save_every_minutes")
+
+
+# Exit code of scripts/train.py after a requested stop (EX_TEMPFAIL: "try again").
+INTERRUPTED_EXIT_CODE = 75
+LATEST_STATE = "latest"
+
+
+class TrainingInterrupted(Exception):
+    """Training stopped early on request; the full state is in `path`."""
+
+    def __init__(self, step: int, path: Path):
+        super().__init__(f"training stopped after step {step}; resume from {path}")
+        self.step, self.path = step, path
+
+
+_stop_requested = threading.Event()
+
+
+def request_stop() -> None:
+    """Ask a running train() to save and stop after the current optimizer step."""
+    _stop_requested.set()
+
+
+def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - signal handler signature
+    request_stop()
+
+
+class _StopOnSigterm:
+    """While active, SIGTERM (a preempted cloud VM, `kill`) requests a clean stop.
+
+    Only the main thread may install signal handlers; elsewhere (and where
+    SIGTERM does not exist) the handler is simply not installed and
+    request_stop() still works.
+    """
+
+    def __enter__(self):
+        _stop_requested.clear()
+        self.previous = None
+        if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+            self.previous = signal.signal(signal.SIGTERM, _on_sigterm)
+        return self
+
+    def __exit__(self, *exc):
+        if self.previous is not None:
+            signal.signal(signal.SIGTERM, self.previous)
+        _stop_requested.clear()
+        return False
 
 
 # Settings added after the first training states were written, with the value
@@ -457,6 +522,13 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
         if on_save is not None:
             on_save(name)
         save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
-        extra = {"totals": dict(totals), "random": _random_state(rng, tasks),
-                 "settings": _comparable_settings(settings), "task_options": _task_options(tasks)}
-        save_training_state(out / "training_state" / f"{name}.pt", model, optimizer, step + 1, extra)
+        _save_state(model, optimizer, settings, step, totals, out, rng, tasks, name)
+
+
+def _save_state(model, optimizer, settings, step, totals, out: Path, rng, tasks, name: str) -> Path:
+    """Write training_state/<name>.pt for resuming after `step` (atomic)."""
+    extra = {"totals": dict(totals), "random": _random_state(rng, tasks),
+             "settings": _comparable_settings(settings), "task_options": _task_options(tasks)}
+    path = out / "training_state" / f"{name}.pt"
+    save_training_state(path, model, optimizer, step + 1, extra)
+    return path

@@ -43,7 +43,7 @@ from nuri.model import NuriModel  # noqa: E402
 from nuri.pipeline import base_stage, embedding_stage, instruction_stage, read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size  # noqa: E402
-from nuri.trainer import TrainSettings, train  # noqa: E402
+from nuri.trainer import INTERRUPTED_EXIT_CODE, TrainingInterrupted, TrainSettings, train  # noqa: E402
 
 
 def positive_int(value):
@@ -70,6 +70,9 @@ def parse_args(argv=None):
     p.add_argument("--tensorboard", action="store_true", help="write TensorBoard events to <out>/tensorboard")
     p.add_argument("--tensorboard-dir", help="custom event directory; also enables TensorBoard")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
+    p.add_argument("--save-every-minutes", type=float, default=0.0,
+                   help="also save the full training state to training_state/latest.pt this often (0 = off); "
+                        "SIGTERM always saves it and exits with code 75 so the run can be resumed")
     p.add_argument("--grad-accum", type=int, default=1,
                    help="micro-batches per optimizer step; effective batch = batch size x grad accum")
     p.add_argument("--gradient-checkpointing", action="store_true",
@@ -183,12 +186,18 @@ def main(argv=None):
                              stage=args.stage, progress=not args.no_progress, tensorboard_dir=tensorboard_dir,
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None,
                              grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
-                             compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa)
+                             compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa,
+                             save_every_minutes=args.save_every_minutes)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)
     print(f"[{args.stage}] {'Restoring state and continuing' if args.resume else 'Starting'} training...", flush=True)
-    records = train(model, tasks, settings, resume_from=args.resume)
+    try:
+        records = train(model, tasks, settings, resume_from=args.resume)
+    except TrainingInterrupted as stop:
+        print(f"[{args.stage}] stopped on request after step {stop.step}; "
+              f"resume with --resume {stop.path}", flush=True)
+        sys.exit(INTERRUPTED_EXIT_CODE)
     if records:
         print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
     else:

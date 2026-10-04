@@ -452,6 +452,8 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 
 **Intermediate checkpoints** are published as revisions (branches) of the base repositories: `step-*` about every 1B tokens, and `pre-decay` right before the LR decay. The LR schedule is warmup–stable–decay (WSD), decaying over roughly the last 15%. `pre-decay` is a good starting point for continued training.
 
+**Saving under preemption.** Training states and `model.safetensors` are written atomically (temporary file, fsync, rename), so a killed process leaves the previous complete file and never a truncated newest one. `--save-every-minutes` also writes the full state to `training_state/latest.pt` on a timer, which matters on interruptible hosts where `step-*` saves are hours apart. SIGTERM (a preempted VM, `kill`) stops training after the current optimizer step, saves `latest.pt` and exits with code 75; `scripts/run_release.py` then stops the plan, and rerunning the same plan resumes that stage from its newest state. The time a full-state save takes on the target disk must fit the provider's shutdown grace period; it is measured in the first hour.
+
 **Package contents**
 - `model.safetensors` (bf16), `config.json`, `LICENSE` (MIT)
 - `modeling_nuri.py`: for HF `trust_remote_code`, wiring `AutoModel`, `AutoModelForMaskedLM` and `AutoModelForSequenceClassification`.

@@ -5,6 +5,11 @@ Two kinds of files are kept apart:
   are what gets released.
 - Training state: optimizer, step and RNG state for resuming. Never released.
 
+Both are written atomically: the bytes go to a temporary file next to the
+destination, which is flushed to disk and then renamed over it. A process
+killed in the middle of a save (a preempted GPU host, for example) leaves the
+previous complete file in place, never a truncated one.
+
 The token embedding is stored once as `embedding.weight`; the vocabulary
 head reuses it at run time, so no tensor is shared under two names.
 """
@@ -12,8 +17,10 @@ head reuses it at run time, so no tensor is shared under two names.
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
+from typing import Callable
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -23,16 +30,40 @@ from .model import NuriModel
 from .tokenizer import copy_tokenizer_files
 
 
+def atomic_write(path: str | Path, write: Callable[[Path], None]) -> None:
+    """Call write(temporary path), flush it to disk, then rename it over `path`.
+
+    os.replace is atomic on one file system, so readers see either the old
+    complete file or the new complete file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        write(temporary)
+        with open(temporary, "rb+") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def save_pretrained(model: NuriModel, folder: str | Path, dtype: torch.dtype = torch.bfloat16,
                     tokenizer_dir: str | Path | None = None) -> None:
-    """Write config.json + model.safetensors, plus the tokenizer files when given."""
+    """Write config.json + model.safetensors, plus the tokenizer files when given.
+
+    model.safetensors is written last, so its presence means the folder is
+    complete (scripts/run_release.py relies on this).
+    """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     model.config.save(folder / "config.json")
-    weights = {name: t.detach().to("cpu", dtype).contiguous() for name, t in model.state_dict().items()}
-    save_file(weights, str(folder / "model.safetensors"), metadata={"format": "pt"})
     if tokenizer_dir is not None:
         copy_tokenizer_files(tokenizer_dir, folder)
+    weights = {name: t.detach().to("cpu", dtype).contiguous() for name, t in model.state_dict().items()}
+    atomic_write(folder / "model.safetensors",
+                 lambda temporary: save_file(weights, str(temporary), metadata={"format": "pt"}))
 
 
 def load_pretrained(folder: str | Path, device="cpu", dtype: torch.dtype = torch.float32) -> NuriModel:
@@ -53,8 +84,7 @@ def load_pretrained(folder: str | Path, device="cpu", dtype: torch.dtype = torch
 
 def save_training_state(path: str | Path, model, optimizer, step: int, extra: dict | None = None) -> None:
     """Full state for resuming a run. Kept private; never uploaded."""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+    state = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "step": step,
@@ -62,7 +92,8 @@ def save_training_state(path: str | Path, model, optimizer, step: int, extra: di
         "torch_rng": torch.get_rng_state(),
         "python_rng": random.getstate(),
         "extra": extra or {},
-    }, path)
+    }
+    atomic_write(path, lambda temporary: torch.save(state, temporary))
 
 
 def training_state_config(path: str | Path) -> NuriConfig:

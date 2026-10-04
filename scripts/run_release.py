@@ -36,7 +36,9 @@ PYTHON = sys.executable
 
 # Plan keys passed straight through to scripts/train.py as --flags.
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
-               "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight")
+               "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes")
+# scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
+INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
 TRAIN_SWITCHES = ("gradient_checkpointing", "compile", "tensorboard", "no_progress", "pack_mlm", "bucket", "native_gqa")
 DATA_FLAGS = {"base": ("corpus", "tokenizer"), "it": ("corpus", "tokenizer", "instructions"),
@@ -111,10 +113,19 @@ def _trained_tokens(stage_dir: Path) -> int | None:
     return json.loads(lines[-1]).get("tokens") if lines else None
 
 
-def run(command: list[str], dry_run: bool) -> None:
+def run(command: list[str], dry_run: bool) -> int:
+    """Run one step of the plan. Returns the exit code (0 on success or dry run).
+
+    A stopped training run (exit code 75, state saved) is returned to the
+    caller; any other failure raises as before.
+    """
     print("$ " + " ".join(command), flush=True)
-    if not dry_run:
-        subprocess.run(command, check=True, cwd=ROOT)
+    if dry_run:
+        return 0
+    code = subprocess.run(command, cwd=ROOT).returncode
+    if code not in (0, INTERRUPTED_EXIT_CODE):
+        raise subprocess.CalledProcessError(code, command)
+    return code
 
 
 def main(argv=None):
@@ -138,10 +149,15 @@ def main(argv=None):
             print(f"[{name}] already trained, skipping training", flush=True)
         else:
             started = time.time()
-            run(train_command(name, spec, plan, out), args.dry_run)
+            code = run(train_command(name, spec, plan, out), args.dry_run)
             if not args.dry_run:
                 record["train_seconds"] += time.time() - started
                 summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            if code == INTERRUPTED_EXIT_CODE:
+                # Stop the whole plan; running the same command again resumes
+                # this stage from its newest training state.
+                print(f"[{name}] training was stopped and saved; rerun this plan to resume", flush=True)
+                sys.exit(INTERRUPTED_EXIT_CODE)
         if spec.get("evaluate"):
             run(evaluate_command(name, spec, plan, out), args.dry_run)
         if spec.get("release_name"):
