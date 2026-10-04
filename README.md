@@ -14,7 +14,8 @@ Nuri is an **encoder-only language model** that can also reason in a hidden
 Languages: Korean and English first, some Japanese. License: MIT.
 
 > Status: the model code, training loop and tests are implemented. A100/H100
-> training calibration is available in [GPU comparison](docs/GPU_COMPARISON.md).
+> training calibration is available in [GPU comparison](docs/GPU_COMPARISON.md)
+> and [A100 batch capacity](docs/GPU_CAPACITY.md).
 > No release model has been trained or evaluated for quality yet. Design numbers
 > remain estimates unless they are explicitly identified as measured.
 

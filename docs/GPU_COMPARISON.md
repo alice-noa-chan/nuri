@@ -4,6 +4,11 @@ Measured on October 4, 2026 (UTC). This is a small training-throughput
 comparison using synthetic random token IDs. It is not a trained-model
 evaluation. No release training has started.
 
+A subsequent [A100 batch-capacity measurement](GPU_CAPACITY.md) covers
+microbatches 32/64, packed MLM and selected-depth checks. Its stage forecast
+supersedes the smaller-batch planning proxy; the measurements below are kept
+as the original host comparison.
+
 ## Same workload on both hosts
 
 - Final vocabulary: 65,536 entries.

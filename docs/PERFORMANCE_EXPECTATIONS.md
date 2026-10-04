@@ -1,8 +1,9 @@
 # Performance expectations
 
 Date: October 4, 2026. Release training has not started. The completed GPU
-comparison measures synthetic training computation, not model quality or
-response latency. See [GPU_COMPARISON.md](GPU_COMPARISON.md) for measurements.
+comparison and batch-capacity follow-up measure synthetic training computation,
+not model quality or response latency. See [GPU_COMPARISON.md](GPU_COMPARISON.md)
+and [GPU_CAPACITY.md](GPU_CAPACITY.md) for measurements.
 
 ## What to expect first
 
@@ -33,21 +34,29 @@ More MoE weights do not establish better quality than dense.
 
 ## What the measured budget suggests
 
-For the tested A100 shapes, the existing stage-budget calculation gives:
+For the measured A100 batch-64 candidates, the stage-budget calculation gives:
 
-| Eight-hour base window | Input positions | Canvas positions | Status |
-|---|---:|---:|---|
-| Dense | about 1.995B | about 0.249B | Estimate |
-| Portable loop MoE | about 1.267B | about 0.158B | Estimate |
+| Eight-hour base window | Input positions | Canvas positions | Combined positions | Status |
+|---|---:|---:|---:|---|
+| Dense | about 2.688B | about 0.336B | about 3.024B | Estimate |
+| Portable loop MoE | about 2.211B | about 0.276B | about 2.487B | Estimate |
 
-These estimates use microbatch 8, input length 1,024, canvas length 256,
-equal weights on measured T=2/4/8 mean latency, and a 0.9 usable-time factor.
+These estimates use microbatch 64 without checkpointing, input length 1,024,
+canvas length 256, equal MLM/span task weights, equal weights on measured
+T=2/4/8 mean latency, and an assumed 0.9 usable-time factor.
 They count repeated processing exposures. They are not unique text tokens,
 loss-bearing target counts, generated output or a quality prediction.
 The benchmark excludes data loading and host-side batch building, and uses
 approximate corruption workloads.
-Intended microbatch, packing, checkpointing, variable lengths and gradient
-accumulation still need matching calibration before fixing release steps.
+Dense passes the current combined-position 3B size rule by only 0.798%; input
+alone remains below 3B. Real-data overhead and padding can erase that narrow
+margin; the size rule still needs actual valid-token throughput.
+Fresh-process batch fit does not establish mixed-stage fit; embedding pairs
+at T=8 allocate 74.13 GiB on a device reporting 79.25 GiB. Checkpointing was
+not measured because no OOM triggered the conditional cases. Real data,
+variable lengths and gradient accumulation still need matching calibration
+before fixing release optimizer steps. The earlier batch-8 comparison remains
+historical evidence, not the current intended-batch forecast.
 
 A small budget can still support useful encoder learning.
 [Cramming](https://proceedings.mlr.press/v202/geiping23a.html) demonstrated
