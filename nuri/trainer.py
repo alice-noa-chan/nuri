@@ -264,7 +264,7 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             # A requested stop or the timed save writes only the full training
             # state (no public weights): the smallest save that resumes exactly.
             finished = step == settings.total_steps - 1
-            stop = _stop_requested.is_set() and not finished
+            stop = _stop.requested and not finished
             timed = (settings.save_every_minutes > 0 and not finished
                      and time.monotonic() - last_timed_save >= settings.save_every_minutes * 60)
             if stop or timed:
@@ -358,12 +358,23 @@ class TrainingInterrupted(Exception):
         self.step, self.path = step, path
 
 
-_stop_requested = threading.Event()
+class _StopFlag:
+    """A plain boolean, set from a signal handler and read by the training loop.
+
+    Deliberately not a threading.Event: Event.set takes a lock, and a second
+    signal arriving while the first handler holds it would deadlock. Setting
+    an attribute takes no lock, so the handler is safe to re-enter.
+    """
+
+    requested = False
+
+
+_stop = _StopFlag()
 
 
 def request_stop() -> None:
     """Ask a running train() to save and stop after the current optimizer step."""
-    _stop_requested.set()
+    _stop.requested = True
 
 
 def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - signal handler signature
@@ -379,7 +390,7 @@ class _StopOnSigterm:
     """
 
     def __enter__(self):
-        _stop_requested.clear()
+        _stop.requested = False
         self.previous = None
         if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
             self.previous = signal.signal(signal.SIGTERM, _on_sigterm)
@@ -388,7 +399,7 @@ class _StopOnSigterm:
     def __exit__(self, *exc):
         if self.previous is not None:
             signal.signal(signal.SIGTERM, self.previous)
-        _stop_requested.clear()
+        _stop.requested = False
         return False
 
 

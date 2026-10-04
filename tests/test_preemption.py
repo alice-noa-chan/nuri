@@ -124,20 +124,17 @@ def _runner(tmp_path, monkeypatch, codes, on_wait=None):
     class FakeChild:
         def __init__(self, command, cwd):  # noqa: ARG002
             calls.append(command)
-            self.signals = []
+            self.pid = -1
 
         def wait(self):
             if on_wait is not None:
                 on_wait()
             return codes.pop(0)
 
-        def poll(self):
-            return None
-
-        def send_signal(self, signum):
-            self.signals.append(signum)
-
+    killed = []
     monkeypatch.setattr(run_release.subprocess, "Popen", FakeChild)
+    monkeypatch.setattr(run_release.os, "kill", lambda pid, signum: killed.append((pid, signum)))
+    run_release.killed = killed
     return run_release, path, calls
 
 
@@ -167,6 +164,21 @@ def test_runner_forwards_sigterm_to_the_running_step(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as info:
         run_release.main([str(path)])
     assert info.value.code == INTERRUPTED_EXIT_CODE and len(calls) == 1
+    assert run_release.killed == [(-1, signal.SIGTERM)]
+
+
+def test_signal_handlers_take_no_locks():
+    """A re-entered handler must not block: both handlers only set a flag (and kill a pid)."""
+    import signal
+
+    from nuri import trainer
+
+    trainer._stop.requested = False
+    trainer._on_sigterm(signal.SIGTERM, None)
+    trainer._on_sigterm(signal.SIGTERM, None)  # a second signal is harmless
+    assert trainer._stop.requested is True
+    trainer._stop.requested = False
+    assert not hasattr(trainer, "_stop_requested")  # the lock-based Event is gone
 
 
 def test_runner_needs_the_final_state_before_skipping_a_stage(tmp_path, monkeypatch):

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -130,9 +131,14 @@ class _ForwardSigterm:
         self.received = False
 
     def _forward(self, signum, frame):  # noqa: ARG002 - signal handler signature
+        # Lock-free on purpose (a second signal may re-enter this handler):
+        # set a flag and signal the child's pid directly, without Popen.poll()
+        # or send_signal(), which take Popen's internal lock.
         self.received = True
-        if self.child.poll() is None:
-            self.child.send_signal(signal.SIGTERM)
+        try:
+            os.kill(self.child.pid, signal.SIGTERM)
+        except OSError:
+            pass  # the child already exited
 
     def __enter__(self):
         self.previous = None
