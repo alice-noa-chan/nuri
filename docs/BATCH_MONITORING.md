@@ -37,3 +37,13 @@ memory together. A bound on combined padded tokens alone does not bound
 latent slots or vocabulary logits. Exercise the planned task mix, complete
 canvas masking and the largest trained depth before fixing a release batch.
 CPU correctness checks cannot replace that GPU measurement.
+
+When resuming into the same TensorBoard directory, the monitor keeps existing
+event files and purges steps after the checkpoint. TensorBoard reads filenames
+in lexical order, so a new writer may wait until the next wall-clock second
+before opening its file. This avoids reading same-second writer counters,
+process IDs or host names in the wrong order. If existing events are dated in
+the future, correct the system clock or use a new `tensorboard_dir`; the monitor
+raises an error before writing. It waits at most once, for about one second;
+a clock that does not advance or an unparseable event filename also raises a
+clear error without changing previous event files.

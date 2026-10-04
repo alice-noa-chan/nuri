@@ -138,6 +138,95 @@ def test_resume_purges_stale_events_and_preserves_saved_progress(tmp_path, monke
     assert [p.step for p in read_events(tmp_path / "events").Scalars("loss/total")] == [1, 2, 3, 4, 5, 6]
 
 
+@pytest.mark.parametrize("reversed_field", ["counter", "process", "host"])
+def test_same_second_resume_orders_real_events_before_purging(tmp_path, monkeypatch, reversed_field):
+    pytest.importorskip("tensorboard")
+    from tensorboard.summary.writer import event_file_writer
+
+    clock = {"now": 1_700_000_000.25, "slept": 0.0}
+    identity = {"counter": 9 if reversed_field == "counter" else 0,
+                "process": 99 if reversed_field == "process" else 20,
+                "host": "z" if reversed_field == "host" else "same-host"}
+
+    def advance_clock(seconds):
+        clock["now"] += seconds
+        clock["slept"] += seconds
+
+    monkeypatch.setattr("nuri.monitoring.time.time", lambda: clock["now"])
+    monkeypatch.setattr("nuri.monitoring.time.sleep", advance_clock)
+    monkeypatch.setattr(event_file_writer._global_uid, "get", lambda: identity["counter"])
+    monkeypatch.setattr(event_file_writer.os, "getpid", lambda: identity["process"])
+    monkeypatch.setattr(event_file_writer.socket, "gethostname", lambda: identity["host"])
+    folder = tmp_path / "events"
+
+    def write_points(monitor, first, last, offset=0):
+        for step in range(first, last):
+            monitor.record({"step": step, "task": "mlm", "depth": 0,
+                            "loss": step + 1 + offset, "lr": 1e-3,
+                            "grad_norm": 1.0, "tokens": (step + 1) * 10}, "mlm", 1, "stable")
+
+    with TrainingMonitor(6, 0, 0, progress=False, tensorboard_dir=folder) as monitor:
+        write_points(monitor, 0, 6)
+    first_file = next(folder.iterdir())
+    original_bytes = first_file.read_bytes()
+    live_events = read_events(folder)
+    identity.update(counter=10 if reversed_field == "counter" else 1,
+                    process=10 if reversed_field == "process" else 20,
+                    host="a" if reversed_field == "host" else "same-host")
+    with TrainingMonitor(6, 3, 30, progress=False, tensorboard_dir=folder, resuming=True) as monitor:
+        write_points(monitor, 3, 6, offset=100)
+
+    # The real reader must keep old 1..3 and replace stale 4..6 on both loads.
+    for events in (live_events.Reload(), read_events(folder)):
+        points = events.Scalars("loss/total")
+        assert [point.step for point in points] == [1, 2, 3, 4, 5, 6]
+        assert [point.value for point in points] == pytest.approx([1, 2, 3, 104, 105, 106])
+    assert clock["slept"] == pytest.approx(0.751)
+    assert sorted(folder.iterdir())[0] == first_file
+    assert first_file.read_bytes() == original_bytes
+
+
+def test_future_dated_resume_events_fail_without_writing(tmp_path, monkeypatch):
+    pytest.importorskip("tensorboard")
+    clock = {"now": 1_700_000_002.25}
+    monkeypatch.setattr("nuri.monitoring.time.time", lambda: clock["now"])
+    folder = tmp_path / "events"
+    with TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder):
+        pass
+    originals = {path.name: path.read_bytes() for path in folder.iterdir()}
+    clock["now"] -= 1
+    with pytest.raises(RuntimeError, match="system clock.*new tensorboard_dir"):
+        TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder, resuming=True)
+    assert {path.name: path.read_bytes() for path in folder.iterdir()} == originals
+
+
+def test_stalled_resume_clock_waits_once_then_fails_without_writing(tmp_path, monkeypatch):
+    pytest.importorskip("tensorboard")
+    monkeypatch.setattr("nuri.monitoring.time.time", lambda: 1_700_000_000.25)
+    waits = []
+    monkeypatch.setattr("nuri.monitoring.time.sleep", waits.append)
+    folder = tmp_path / "events"
+    with TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder):
+        pass
+    originals = {path.name: path.read_bytes() for path in folder.iterdir()}
+    with pytest.raises(RuntimeError, match="clock did not advance"):
+        TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder, resuming=True)
+    assert waits == pytest.approx([0.751])
+    assert {path.name: path.read_bytes() for path in folder.iterdir()} == originals
+
+
+def test_unordered_legacy_event_name_is_rejected_without_changes(tmp_path):
+    pytest.importorskip("tensorboard")
+    folder = tmp_path / "events"
+    with TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder):
+        pass
+    next(folder.iterdir()).rename(folder / "events.out.tfevents.unknown")
+    originals = {path.name: path.read_bytes() for path in folder.iterdir()}
+    with pytest.raises(RuntimeError, match="numeric timestamp.*new tensorboard_dir"):
+        TrainingMonitor(1, 0, 0, progress=False, tensorboard_dir=folder, resuming=True)
+    assert {path.name: path.read_bytes() for path in folder.iterdir()} == originals
+
+
 def test_resumed_throughput_counts_only_new_tokens(monkeypatch):
     class Clock:
         now = 10.0

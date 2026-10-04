@@ -8,6 +8,31 @@ from pathlib import Path
 from tqdm import tqdm
 
 
+def _wait_for_resume_event_order(directory: str | Path):
+    """Keep a resumed event file after older files in TensorBoard's name order."""
+    timestamps = []
+    for path in Path(directory).glob("events.out.tfevents.*"):
+        timestamp = path.name.split(".")[3]
+        if not path.is_file() or not timestamp.isascii() or not timestamp.isdigit():
+            raise RuntimeError("TensorBoard event filenames need a numeric timestamp; "
+                               "choose a new tensorboard_dir.")
+        timestamps.append(int(timestamp))
+    if not timestamps:
+        return
+    latest = max(timestamps)
+    # TensorBoard filenames use whole seconds, then host/PID/unpadded counter.
+    # A later second prevents counter 10 from sorting before counter 9.
+    now = time.time()
+    if latest > int(now):
+        raise RuntimeError("TensorBoard events are dated in the future; correct the system clock "
+                           "or choose a new tensorboard_dir.")
+    if latest == int(now):
+        time.sleep(latest + 1 - now + 0.001)
+    if int(time.time()) <= latest:
+        raise RuntimeError("The TensorBoard filename clock did not advance; correct the system clock "
+                           "or choose a new tensorboard_dir.")
+
+
 class TrainingMonitor:
     """Observe completed updates without touching tensors or random state.
 
@@ -30,6 +55,8 @@ class TrainingMonitor:
                 from torch.utils.tensorboard import SummaryWriter
             except ImportError as error:
                 raise RuntimeError('TensorBoard needs: python -m pip install -e ".[tensorboard]"') from error
+            if resuming:
+                _wait_for_resume_event_order(tensorboard_dir)
             # The checkpoint holds completed steps. Hide later, stale points
             # when the same event directory is used after an interruption.
             self.writer = SummaryWriter(str(tensorboard_dir),
