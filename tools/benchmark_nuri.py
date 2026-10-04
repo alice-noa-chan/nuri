@@ -40,6 +40,9 @@ def run_benchmark(
     iterations: int = 5,
     seed: int = 0,
     native_gqa: bool = False,
+    gradient_checkpointing: bool = False,
+    pack_mlm: bool = False,
+    packed_document_length: int = 256,
 ) -> dict:
     if task not in {"mlm", "denoise", "pairs", "embed-fast", "embed-reasoning", "generate"}:
         raise ValueError("Unknown benchmark task")
@@ -49,6 +52,12 @@ def run_benchmark(
         raise ValueError("Pairs benchmarks require --training")
     if task == "pairs" and batch_size < 2:
         raise ValueError("Pairs benchmarks require batch_size >= 2")
+    if gradient_checkpointing and not training:
+        raise ValueError("Gradient checkpointing requires a training benchmark")
+    if pack_mlm and (task != "mlm" or not training):
+        raise ValueError("Packed MLM requires --training --task mlm")
+    if pack_mlm and not 1 <= packed_document_length < input_length:
+        raise ValueError("Packed document length must be positive and shorter than the input row")
     if min(batch_size, input_length, output_length, iterations, rounds) < 1 or warmup < 0:
         raise ValueError("Lengths, batch size, iterations, and rounds must be positive; warmup may be zero")
     if input_length > config.max_input_len or (task != "pairs" and output_length > config.max_response_len):
@@ -67,6 +76,7 @@ def run_benchmark(
     torch.manual_seed(seed)
     model = NuriModel(config).to(runtime_device)
     model.set_native_gqa(native_gqa)
+    model.set_gradient_checkpointing(gradient_checkpointing)
     model.train(training)
     pair_settings = TrainSettings(out_dir="", total_steps=1, peak_lr=5e-5) if task == "pairs" else None
     if pair_settings is not None:
@@ -75,6 +85,11 @@ def run_benchmark(
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4) if training else None
     clean_input = torch.randint(3, config.vocab_size, (batch_size, input_length), device=runtime_device)
     valid_input = torch.ones_like(clean_input, dtype=torch.bool)
+    segments = None
+    if pack_mlm:
+        # Equal-size synthetic documents exercise the real isolation mask.
+        document_ids = torch.arange(input_length, device=runtime_device) // packed_document_length
+        segments = document_ids.expand(batch_size, -1)
     if task == "pairs":
         documents = torch.randint(3, config.vocab_size, (batch_size, input_length), device=runtime_device)
         # Row-aligned labels exercise the real pair loss; random text is not a quality test.
@@ -113,7 +128,7 @@ def run_benchmark(
                 loss_mask = torch.rand(clean_input.shape, device=runtime_device) < 0.3
                 loss_mask[:, 0] = True
                 corrupted = clean_input.masked_fill(loss_mask, config.mask_id)
-                x, _ = model.encode(corrupted, valid_input)
+                x, _ = model.encode(corrupted, valid_input, segments=segments)
                 logits = model.mlm_logits(x, loss_mask)
                 loss = token_mean_ce(logits, clean_input[loss_mask])
             else:
@@ -169,6 +184,10 @@ def run_benchmark(
         "device_name": torch.cuda.get_device_name(runtime_device) if runtime_device.type == "cuda" else "CPU",
         "torch_version": torch.__version__,
         "native_gqa": native_gqa,
+        "gradient_checkpointing": gradient_checkpointing,
+        "pack_mlm": pack_mlm,
+        "packed_document_length": packed_document_length if pack_mlm else None,
+        "packed_documents_per_row": math.ceil(input_length / packed_document_length) if pack_mlm else None,
         "attention_execution": ("native_sdpa_gqa" if native_gqa else "repeat_kv_gqa")
                                if config.num_kv_heads not in (None, config.num_heads) else "mha",
         "autocast_dtype": dtype,
@@ -198,6 +217,8 @@ def run_benchmark(
             "Training includes forward, backward, clipping, and an AdamW step.",
             "Input throughput counts observed input tokens once per measured iteration.",
             "Pairs training counts query plus document tokens and includes both embedding modes; host batch building is excluded.",
+            "Packed MLM uses synthetic equal-size documents and the real isolation mask; actual text lengths and host packing are excluded.",
+            "Synthetic corruption selects about 30% of MLM positions and 50% of canvas positions; this is not the trainer's full corruption distribution.",
             "Generation throughput counts each output sequence once, not one copy per refinement round.",
             "Compare tasks, lengths, T, S, batch size, and dtype before comparing throughput.",
         ],
@@ -211,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", choices=["mlm", "denoise", "pairs", "embed-fast", "embed-reasoning", "generate"], default="denoise")
     parser.add_argument("--training", action="store_true")
     parser.add_argument("--native-gqa", action="store_true", help="use compact GQA heads in supported SDPA")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="recompute encoder/readout activations during backward")
+    parser.add_argument("--pack-mlm", action="store_true", help="benchmark document-isolated synthetic packed MLM training")
+    parser.add_argument("--packed-document-length", type=int, default=256, help="tokens per synthetic packed document; must be shorter than the input row")
     parser.add_argument("--moe-backend", choices=["loop", "grouped"], help="override the configured expert backend")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
@@ -234,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size, input_length=args.input_length, output_length=args.output_length,
         steps=args.steps, rounds=args.rounds, warmup=args.warmup, iterations=args.iterations, seed=args.seed,
         native_gqa=args.native_gqa,
+        gradient_checkpointing=args.gradient_checkpointing,
+        pack_mlm=args.pack_mlm, packed_document_length=args.packed_document_length,
     )
     text = json.dumps(results, indent=2) + "\n"
     if args.output:

@@ -197,6 +197,37 @@ kernel errors propagate. The conservative CUDA policy currently allows BF16
 on capability 9.0 or higher; verify newer support on the actual runtime.
 The matching active FFN width does not imply matching wall time.
 
+To measure the existing activation-checkpointing path, add
+`--gradient-checkpointing` to a training benchmark. The JSON records the flag.
+It recomputes encoder/readout blocks during backward; measure its memory and
+time rather than assuming that a larger batch is faster.
+
+For packed MLM calibration, use `--training --task mlm --pack-mlm` and declare
+`--packed-document-length`. This builds synthetic equal-size documents inside
+each row and passes their document IDs to the encoder's real isolation mask.
+The final document may be shorter. Its length must be positive and shorter
+than the input row, so the test always contains at least two documents.
+For example:
+
+```powershell
+python tools/benchmark_nuri.py `
+  --preset release-dense --training --task mlm `
+  --device cuda --dtype bfloat16 --batch-size 32 `
+  --input-length 1024 --output-length 256 `
+  --pack-mlm --packed-document-length 256 `
+  --gradient-checkpointing --warmup 5 --iterations 20 `
+  --output runs/benchmarks/packed-mlm-checkpointed.json
+```
+
+Both switches default to OFF. Packing is supported only for MLM training;
+checkpointing requires training. Invalid combinations fail before model
+allocation. The report records the packed document length and count, while
+input throughput still counts each row token once. This does not measure
+actual document lengths, host packing costs, sparse kernels or unpadding.
+Synthetic MLM selects about 30% of positions for its loss, and synthetic
+denoising selects about 50%; the trainer uses its own corruption distribution.
+Match runtime options and corruption workload before budgeting real training.
+
 A CPU smoke benchmark uses much smaller settings:
 
 ```powershell
