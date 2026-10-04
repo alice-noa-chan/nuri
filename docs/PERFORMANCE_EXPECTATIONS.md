@@ -73,8 +73,8 @@ uncertainty. Training source records stay private.
 |---|---|---|
 | MLM and span reconstruction | Held-out CE/accuracy, mask rate and target counts; distinguish partial targets from a fully masked canvas | Masked-token and denoising suites exist |
 | Retrieval | Recall@1/5/10 and MRR, identical candidate pools, fast/reasoning modes and each embedding dimension | Retrieval scoring exists; it assumes one row-aligned gold candidate |
-| Short generation | Predicted-length exact match for IT; oracle-length diagnostic; EOS, coverage and format checks | Synthetic generation conditions, missing EOS, chosen-length errors and over-cap counts exist |
-| Latent reasoning | Same-checkpoint T/S curves and normal/zero/shuffled state above frozen task baselines | Curves and state interventions exist; they are not an independently trained architecture comparison |
+| Short generation | Predicted-length exact match for IT; oracle-length diagnostic; EOS, coverage and format checks | Synthetic generation conditions, missing EOS, chosen-length errors and over-cap counts exist; oracle reports include `length_only_accuracy` (the best exact match from answer length alone) |
+| Latent reasoning | Same-checkpoint T/S curves and normal/zero/shuffled state above frozen task baselines | Curves, state interventions and a halting curve (accuracy vs mean core steps) exist on a `shared` split (training name pools, new combinations) plus an `eval` stress split (unseen names); `scripts/ablate.py --seeds` compares variants with mean/std; none of these is an independently trained release-scale comparison |
 | Classification | A labeled probe with fixed splits, majority baseline, accuracy and macro-F1 | Additional analysis is needed; there is no classification release stage |
 | Serving speed | Complete embedding/generation call, representative lengths and batches, actual T/S, mean/median/p95 and memory | No trained-model inference latency has been measured |
 
