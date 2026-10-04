@@ -104,3 +104,27 @@ def test_marker_matches_are_not_printed(run, capsys):
         pub.main([str(path)], api=FakeApi())
     captured = capsys.readouterr()
     assert "secret" not in (captured.out + captured.err).casefold()
+
+
+def test_tokenizer_repository_is_built_checked_and_listed_first(run, monkeypatch):
+    path, out, _ = run
+    monkeypatch.setattr(pub, "verify_tokenizer", lambda folder, release: {
+        "vocab_size": 128, "pad_id": 0, "mask_id": 1, "eos_id": 2, "round_trip": True, "ok": True})
+    api = FakeApi()
+    uploads = pub.main([str(path), "--tokenizer-repo", "nuri-tokenizer", "--push", "--namespace", "me",
+                        "--visibility", "public"], api=api)
+    assert (uploads[0]["repo"], uploads[0]["kind"]) == ("nuri-tokenizer", "tokenizer")
+    folder = out / "release" / "nuri-tokenizer"
+    assert sorted(p.name for p in folder.iterdir()) == ["LICENSE", "README.md", "tokenizer.json"]
+    assert "model.safetensors" not in {p.name for p in folder.iterdir()}
+    assert ("upload", "me/nuri-tokenizer", "main") in api.calls and ("repo", "me/nuri-tokenizer", False) in api.calls
+
+
+def test_releases_with_different_tokenizers_block_publication(run, monkeypatch):
+    path, out, _ = run
+    (out / "release" / "nuri-base-it" / "tokenizer.json").write_text('{"different": true}', encoding="utf-8")
+    api = FakeApi()
+    with pytest.raises(SystemExit):
+        pub.main([str(path), "--tokenizer-repo", "nuri-tokenizer", "--push", "--namespace", "me",
+                  "--visibility", "public"], api=api)
+    assert api.calls == []

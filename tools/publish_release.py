@@ -16,6 +16,12 @@ any upload every folder must pass three checks:
 3. no file contains a line of .private/provenance-markers.txt (matched
    case-insensitively; the match itself is never printed).
 
+With --tokenizer-repo NAME the shared tokenizer is also published as its own
+repository (section 15 lists "nuri-tokenizer"). Its files are taken from the
+release folders, which must all carry the identical tokenizer; the folder is
+verified by loading the tokenizer, matching its vocabulary size and special
+token ids to the model config, and round-tripping a short trilingual text.
+
 Usage
   python tools/publish_release.py plan.json --intermediate              # dry run
   python tools/publish_release.py plan.json --intermediate --push \
@@ -25,7 +31,9 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,8 +42,11 @@ ROOT = Path(__file__).resolve().parent.parent
 MARKERS = ROOT / ".private" / "provenance-markers.txt"
 CODE_FILES = {"config.py", "layers.py", "moe.py", "encoder.py", "core.py", "readout.py", "model.py",
               "generation.py", "configuration_nuri.py", "modeling_nuri.py"}
-ALLOWED_FILES = {"model.safetensors", "config.json", "LICENSE", "README.md", "tokenizer.json",
-                 "tokenizer_config.json", "special_tokens_map.json"} | CODE_FILES
+TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
+ALLOWED_FILES = {"model.safetensors", "config.json", "LICENSE", "README.md", *TOKENIZER_FILES} | CODE_FILES
+REQUIRED = {"model": {"model.safetensors", "config.json", "LICENSE", "README.md"},
+            "tokenizer": {"tokenizer.json", "LICENSE", "README.md"}}
+ROUND_TRIP_TEXT = "Nuri reads 한국어, English and 日本語."
 TEXT_SUFFIXES = {".json", ".md", ".py", ""}  # LICENSE has no suffix
 
 
@@ -51,7 +62,7 @@ def load_markers(path: Path | None = None) -> list[str]:
     return [line.strip().casefold() for line in lines if line.strip() and not line.lstrip().startswith("#")]
 
 
-def check_folder(folder: Path, markers: list[str]) -> None:
+def check_folder(folder: Path, markers: list[str], kind: str = "model") -> None:
     """Raise PublishError unless the folder is verified, allow-listed and marker-free."""
     report = folder.parent / f"{folder.name}.verify.json"
     if not report.exists() or not json.loads(report.read_text(encoding="utf-8")).get("ok"):
@@ -61,7 +72,7 @@ def check_folder(folder: Path, markers: list[str]) -> None:
                         or p.parent != folder)
     if unexpected:
         raise PublishError(f"{folder.name}: files outside the allow-list: {', '.join(unexpected)}")
-    missing = {"model.safetensors", "config.json", "LICENSE", "README.md"} - {p.name for p in files}
+    missing = REQUIRED[kind] - {p.name for p in files}
     if missing:
         raise PublishError(f"{folder.name}: missing {', '.join(sorted(missing))}")
     for path in files:
@@ -69,6 +80,77 @@ def check_folder(folder: Path, markers: list[str]) -> None:
             text = path.read_text(encoding="utf-8", errors="replace").casefold()
             if any(marker in text for marker in markers):
                 raise PublishError(f"{folder.name}: {path.name} contains a private provenance marker")
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_tokenizer_folder(release_folders: list[Path], out: Path, name: str) -> None:
+    """Write out/<name> with the shared tokenizer, LICENSE, a short card and a verification report."""
+    sources = [f for f in release_folders if (f / "tokenizer.json").exists()]
+    if not sources:
+        raise PublishError(f"{name}: no release folder contains tokenizer.json")
+    first = sources[0]
+    for other in sources[1:]:
+        for file in TOKENIZER_FILES:
+            a, b = first / file, other / file
+            if a.exists() != b.exists() or (a.exists() and _digest(a) != _digest(b)):
+                raise PublishError(f"{name}: {other.name} carries a different {file}")
+    out.mkdir(parents=True, exist_ok=True)
+    for file in TOKENIZER_FILES:
+        if (first / file).exists():
+            shutil.copy2(first / file, out / file)
+    shutil.copy2(ROOT / "LICENSE", out / "LICENSE")
+    report = verify_tokenizer(out, first)
+    (out / "README.md").write_text(tokenizer_card(name, report), encoding="utf-8")
+    (out.parent / f"{out.name}.verify.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+
+def verify_tokenizer(folder: Path, release: Path) -> dict:
+    """Load the tokenizer, check it against the model config, and round-trip a short text."""
+    sys.path.insert(0, str(ROOT))
+    from nuri.config import NuriConfig
+    from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size
+
+    tokenizer = load_tokenizer(folder)
+    config = NuriConfig.from_dict(json.loads((release / "config.json").read_text(encoding="utf-8"))["nuri"])
+    report = {"vocab_size": vocab_size(tokenizer), "pad_id": config.pad_id, "mask_id": config.mask_id,
+              "eos_id": config.eos_id}
+    try:
+        check_tokenizer(tokenizer, config)
+        ids = tokenizer.encode(ROUND_TRIP_TEXT, add_special_tokens=False).ids
+        report["round_trip"] = tokenizer.decode(ids).replace(" ", "") == ROUND_TRIP_TEXT.replace(" ", "")
+        report["ok"] = report["round_trip"]
+    except ValueError as error:
+        report.update(ok=False, error=str(error))
+    return report
+
+
+def tokenizer_card(name: str, report: dict) -> str:
+    return f"""---
+license: mit
+language: [ko, en, ja]
+library_name: tokenizers
+tags: [nuri, tokenizer]
+---
+
+# {name}
+
+The tokenizer shared by every Nuri model: {report['vocab_size']:,} entries for Korean and English
+(primary) and some Japanese. Special token ids: `[PAD]` {report['pad_id']}, `[MASK]` {report['mask_id']},
+`[EOS]` {report['eos_id']}; chat roles use `<|system|>`, `<|user|>` and `<|assistant|>`.
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("{name}")
+```
+
+## License
+
+MIT
+"""
 
 
 def intermediate_checkpoints(stage_dir: Path) -> list[Path]:
@@ -95,13 +177,13 @@ def plan_uploads(plan: dict, intermediate: bool, export: bool = True) -> list[di
         name = spec.get("release_name")
         if not name:
             continue
-        uploads.append({"repo": name, "revision": "main", "folder": out / "release" / name})
+        uploads.append({"repo": name, "revision": "main", "folder": out / "release" / name, "kind": "model"})
         if intermediate:
             for checkpoint in intermediate_checkpoints(out / stage_name):
                 folder = out / "release-revisions" / name / checkpoint.name
                 if export:
                     export_intermediate(checkpoint, folder, name, spec["stage"])
-                uploads.append({"repo": name, "revision": checkpoint.name, "folder": folder})
+                uploads.append({"repo": name, "revision": checkpoint.name, "folder": folder, "kind": "model"})
     return uploads
 
 
@@ -126,17 +208,26 @@ def main(argv=None, api=None) -> list[dict]:
     p.add_argument("--push", action="store_true", help="really upload (default: dry run)")
     p.add_argument("--namespace", help="Hub user or organization (required with --push)")
     p.add_argument("--visibility", choices=("public", "private"), help="required with --push")
+    p.add_argument("--tokenizer-repo", help='also publish the shared tokenizer, e.g. "nuri-tokenizer"')
     args = p.parse_args(argv)
     if args.push and not (args.namespace and args.visibility):
         p.error("--push needs --namespace and --visibility")
 
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     uploads = plan_uploads(plan, args.intermediate, export=args.push or args.intermediate)
-    markers = load_markers()
     failures = []
+    if args.tokenizer_repo:
+        folder = Path(plan["out"]) / "release" / args.tokenizer_repo
+        try:
+            build_tokenizer_folder([u["folder"] for u in uploads if u["revision"] == "main"], folder,
+                                   args.tokenizer_repo)
+        except PublishError as error:
+            failures.append(str(error))
+        uploads.insert(0, {"repo": args.tokenizer_repo, "revision": "main", "folder": folder, "kind": "tokenizer"})
+    markers = load_markers()
     for item in uploads:
         try:
-            check_folder(item["folder"], markers)
+            check_folder(item["folder"], markers, item["kind"])
             item["checked"] = True
         except PublishError as error:
             item["checked"] = False
