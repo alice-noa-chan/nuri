@@ -18,6 +18,9 @@ Languages: Korean and English first, some Japanese. License: MIT.
 > No release model has been trained or evaluated for quality yet. Design numbers
 > remain estimates unless they are explicitly identified as measured.
 
+See [performance expectations](docs/PERFORMANCE_EXPECTATIONS.md) for the
+first uses to test, current limits and the proposed quality evaluation.
+
 ## How it works
 
 ```
