@@ -640,6 +640,15 @@ from the effect on the length head.
 
 Retrieval reports Recall@k and MRR for matched query/document modes and supported
 embedding prefixes, with stable document order used to break score ties.
+It also reports token-overlap strata under `retrieval_overlap`. Each query
+stratum competes against the complete held-out document pool, with a TF-IDF
+baseline on the same truncated inputs. Special tokens are excluded only from
+overlap diagnostics. Overall scores reuse the same ranks, so these strata do
+not require extra model passes. Empty token sides are excluded and counted
+under `retrieval_input`; empty populations provide no quality evidence.
+High-overlap accuracy alone does not establish semantic retrieval quality.
+Use the private audit and optional immutable preparation workflow in
+[PAIR_PREPARATION.md](PAIR_PREPARATION.md) before choosing a pair sampling policy.
 R-shuffle batches contain at least two eligible samples; a singleton tail is
 merged so every sample receives another sample's state. Core diagnostics report state/update norms, slot cosine,
 and effective rank per recurrent step. Diagnostics characterize behavior;
@@ -705,3 +714,7 @@ Synthetic GPU throughput and intended-batch capacity are now measured in
 [GPU_COMPARISON.md](GPU_COMPARISON.md) and [GPU_CAPACITY.md](GPU_CAPACITY.md).
 Actual-data mixed-stage fit and sustained throughput, trained language quality,
 and whether changing T/S improves task results still need measurements.
+
+Training also records actual batch shapes, valid/padded positions and CUDA
+allocator peaks for calibration. See [BATCH_MONITORING.md](BATCH_MONITORING.md)
+for per-update counts, accumulation and memory measurement boundaries.

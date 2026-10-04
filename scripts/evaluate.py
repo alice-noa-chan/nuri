@@ -21,7 +21,8 @@ Suites
   mlm            masked-token accuracy on --corpus (a held-out corpus folder)
   denoise        held-out span reconstruction loss at 15/50/100% masking, at T = 1/4/8
                  (the core + readout path; works for base models)
-  retrieval      Recall@k / MRR on --pairs (JSONL with "query" and "positive")
+  retrieval      Recall@k / MRR and query-overlap strata on --pairs ("query", "positive");
+                 each stratum keeps the same complete document candidate pool
   diagnostics    per-step core state statistics
   instructions   generation metrics and coverage on --instructions JSONL ("messages", "response");
                  oracle length, plus predicted length for a trained length head
@@ -47,6 +48,7 @@ from nuri import evaluation  # noqa: E402
 from nuri.checkpoint import load_pretrained  # noqa: E402
 from nuri.data import TokenCorpus, chat_prompt_text  # noqa: E402
 from nuri.pipeline import read_jsonl  # noqa: E402
+from nuri.retrieval_report import overlap_stratified_retrieval  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer  # noqa: E402
 
@@ -94,15 +96,38 @@ def instruction_examples(path: str | Path, encode) -> list[tuple[list[int], list
     return examples
 
 
+def pair_examples(path: str | Path, encode) -> tuple[list, dict]:
+    """Validate the whole supplied file, counting empty token sides explicitly."""
+    pairs, supplied = [], 0
+    try:
+        for index, row in enumerate(read_jsonl(path), start=1):
+            if (not isinstance(row, dict) or not isinstance(row.get("query"), str)
+                    or not isinstance(row.get("positive"), str)):
+                sys.exit(f"pairs record {index} needs string query and positive fields")
+            supplied += 1
+            query, document = encode(row["query"]), encode(row["positive"])
+            if query and document:
+                pairs.append((query, document))
+    except OSError:
+        sys.exit("pairs input is unavailable or unreadable")
+    except (json.JSONDecodeError, UnicodeError):
+        sys.exit("pairs input must contain valid UTF-8 JSONL")
+    return pairs, {"supplied_pairs": supplied, "evaluated_pairs": len(pairs),
+                   "excluded_empty_pairs": supplied - len(pairs)}
+
+
 def main(argv=None) -> dict:
     args = parse_args(argv)
     if "instructions" in args.suites and not args.instructions:
         sys.exit("instructions needs --instructions (or NURI_EVAL_INSTRUCTIONS)")
+    if "retrieval" in args.suites and not args.pairs:
+        sys.exit("retrieval needs --pairs (or NURI_EVAL_PAIRS)")
     model = load_pretrained(args.checkpoint, device=args.device).eval()
     tokenizer = load_tokenizer(args.tokenizer or args.checkpoint)
     check_tokenizer(tokenizer, model.config)
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False).ids  # noqa: E731
     natural_examples = instruction_examples(args.instructions, encode) if "instructions" in args.suites else None
+    retrieval_pairs, retrieval_input = pair_examples(args.pairs, encode) if "retrieval" in args.suites else (None, None)
 
     report = {"checkpoint": str(args.checkpoint), "length_head_trained": model.config.length_head_trained}
     needs_examples = {"reasoning", "curves", "interventions", "halting"} & set(args.suites)
@@ -154,19 +179,15 @@ def main(argv=None) -> dict:
             report["diagnostics"] = evaluation.core_diagnostics(model, documents[:64], steps=16)
 
     if "retrieval" in args.suites:
-        if not args.pairs:
-            sys.exit("retrieval needs --pairs (or NURI_EVAL_PAIRS)")
-        pairs = [(encode(r["query"]), encode(r["positive"])) for r in read_jsonl(args.pairs)]
-        pairs = [(q, d) for q, d in pairs if q and d]
-        report["retrieval"] = [evaluation.retrieval_metrics(model, pairs, mode=mode, dim=dim)
-                               for mode in ("fast", "reasoning") for dim in (64, 128, None)
-                               if dim is None or dim <= model.config.embed_dim]
-        # Reasoning queries against fast documents; meaningful only after cross-mode alignment (§6).
-        report["retrieval"].append(evaluation.retrieval_metrics(model, pairs, mode="reasoning", doc_mode="fast"))
-        # Shared-token score with no model, on the same truncated text the model sees:
-        # the embedding should clearly beat it.
-        report["retrieval_lexical_baseline"] = evaluation.lexical_retrieval_baseline(
-            pairs, model.config.vocab_size, max_len=model.config.max_input_len)
+        report["retrieval_input"] = retrieval_input
+        special_ids = set(token_id for token_id, token in tokenizer.get_added_tokens_decoder().items()
+                          if token.special)
+        special_ids.update((model.config.pad_id, model.config.mask_id, model.config.eos_id))
+        overlap = overlap_stratified_retrieval(model, retrieval_pairs, special_ids=sorted(special_ids))
+        report["retrieval_overlap"] = overlap
+        # Reuse the overall ranks: strata do not trigger extra model scoring.
+        report["retrieval"] = overlap["overall"]["model"]
+        report["retrieval_lexical_baseline"] = overlap["overall"]["lexical_tfidf"]
 
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:
