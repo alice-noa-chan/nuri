@@ -369,6 +369,8 @@ The token budget is set after measuring throughput as `processed_tokens/sec × a
 
 PyTorch SDPA is the first backend candidate; fused backends supported on the real GPU are measured. FlashAttention, unpadding, packing, checkpointing and compile are added to fit the environment. A dense attention mask or an API name alone is never assumed to run local attention as a fast sparse kernel. The GPU runtime is decided later; training has not been tried in the current Windows workspace.
 
+Padding on the real data (final 64k corpora, microbatch 64): 88% of documents are shorter than N=1024 (median 361 tokens), so only 44% of unpacked MLM positions, 26% of span-denoising positions and 24% of instruction positions are real tokens. `--pack-mlm` fills MLM rows to 100%. Span and instruction samples carry one canvas each and cannot be packed the same way; `--bucket` draws 8× more candidates and keeps a run of similar-length samples whose padded size fits one full batch (rows × (N+M)), which roughly doubles the real-token share (span 0.26 → 0.51, instruction 0.24 → 0.48) at about 45 ms of host time per span batch. The selection keeps no state between calls, so resume stays exact. The D-017 first-hour check counts real (non-padding) tokens.
+
 ## 12. Success criteria and ablations
 
 The core questions are whether latent recurrence helps task performance and whether both uses survive on one backbone.

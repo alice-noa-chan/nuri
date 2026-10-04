@@ -23,7 +23,9 @@
         "denoise",
         "diagnostics"
       ],
-      "release_name": "nuri-base"
+      "release_name": "nuri-base",
+      "pack_mlm": true,
+      "bucket": true
     },
     "base-moe": {
       "stage": "base",
@@ -36,7 +38,9 @@
         "denoise",
         "diagnostics"
       ],
-      "release_name": "nuri-base-moe"
+      "release_name": "nuri-base-moe",
+      "pack_mlm": true,
+      "bucket": true
     },
     "it-dense": {
       "stage": "it",
@@ -48,7 +52,8 @@
         "curves",
         "interventions"
       ],
-      "release_name": "nuri-base-it"
+      "release_name": "nuri-base-it",
+      "bucket": true
     },
     "it-moe": {
       "stage": "it",
@@ -60,7 +65,8 @@
         "curves",
         "interventions"
       ],
-      "release_name": "nuri-base-moe-it"
+      "release_name": "nuri-base-moe-it",
+      "bucket": true
     },
     "embed": {
       "stage": "embed",
