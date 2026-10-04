@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -113,19 +115,61 @@ def _trained_tokens(stage_dir: Path) -> int | None:
     return json.loads(lines[-1]).get("tokens") if lines else None
 
 
+class _ForwardSigterm:
+    """While a child step runs, pass SIGTERM on to it and remember that it came.
+
+    Without this, `kill <runner pid>` would stop the runner but leave
+    scripts/train.py running without the chance to save. A host supervisor
+    may still signal the whole process group; the child then simply sees
+    SIGTERM once from each. (On Windows, send_signal(SIGTERM) terminates the
+    child, so a clean save there needs a POSIX host.)
+    """
+
+    def __init__(self, child: subprocess.Popen):
+        self.child = child
+        self.received = False
+
+    def _forward(self, signum, frame):  # noqa: ARG002 - signal handler signature
+        self.received = True
+        if self.child.poll() is None:
+            self.child.send_signal(signal.SIGTERM)
+
+    def __enter__(self):
+        self.previous = None
+        if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+            self.previous = signal.signal(signal.SIGTERM, self._forward)
+        return self
+
+    def __exit__(self, *exc):
+        if self.previous is not None:
+            signal.signal(signal.SIGTERM, self.previous)
+        return False
+
+
 def run(command: list[str], dry_run: bool) -> int:
     """Run one step of the plan. Returns the exit code (0 on success or dry run).
 
     A stopped training run (exit code 75, state saved) is returned to the
-    caller; any other failure raises as before.
+    caller; any other failure raises as before, unless SIGTERM arrived while
+    the step ran: then the plan stops with code 75 (rerun to continue).
     """
     print("$ " + " ".join(command), flush=True)
     if dry_run:
         return 0
-    code = subprocess.run(command, cwd=ROOT).returncode
+    child = subprocess.Popen(command, cwd=ROOT)
+    with _ForwardSigterm(child) as forward:
+        code = child.wait()
+    if forward.received:
+        return INTERRUPTED_EXIT_CODE
     if code not in (0, INTERRUPTED_EXIT_CODE):
         raise subprocess.CalledProcessError(code, command)
     return code
+
+
+def _finished(stage_dir: Path) -> bool:
+    """A stage is done when its final weights and its final full state both exist."""
+    return ((stage_dir / "final" / "model.safetensors").exists()
+            and (stage_dir / "training_state" / "final.pt").exists())
 
 
 def main(argv=None):
@@ -145,7 +189,7 @@ def main(argv=None):
         if args.only and name not in args.only:
             continue
         record = summary.setdefault(name, {"train_seconds": 0.0})
-        if (out / name / "final" / "model.safetensors").exists():
+        if _finished(out / name):
             print(f"[{name}] already trained, skipping training", flush=True)
         else:
             started = time.time()
@@ -158,10 +202,12 @@ def main(argv=None):
                 # this stage from its newest training state.
                 print(f"[{name}] training was stopped and saved; rerun this plan to resume", flush=True)
                 sys.exit(INTERRUPTED_EXIT_CODE)
-        if spec.get("evaluate"):
-            run(evaluate_command(name, spec, plan, out), args.dry_run)
-        if spec.get("release_name"):
-            run(export_command(name, spec, plan, out, record["train_seconds"] / 3600), args.dry_run)
+        for command in ([evaluate_command(name, spec, plan, out)] if spec.get("evaluate") else []) + (
+                [export_command(name, spec, plan, out, record["train_seconds"] / 3600)]
+                if spec.get("release_name") else []):
+            if run(command, args.dry_run) == INTERRUPTED_EXIT_CODE:
+                print(f"[{name}] stopped during evaluation/export; rerun this plan to continue", flush=True)
+                sys.exit(INTERRUPTED_EXIT_CODE)
 
     if not args.dry_run:
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

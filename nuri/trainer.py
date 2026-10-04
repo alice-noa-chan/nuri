@@ -195,6 +195,10 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     start_step = 0
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
+        if start_step >= settings.total_steps and not (out / "final" / "model.safetensors").exists():
+            # The run finished, but the process stopped between final.pt and
+            # the final weights: write them now from the restored state.
+            save_pretrained(model, out / "final", tokenizer_dir=settings.tokenizer_dir)
     records, started = [], time.time()
     last_timed_save = time.monotonic()
     _reset_cuda_peaks(device)
@@ -521,8 +525,11 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
     for name in names:
         if on_save is not None:
             on_save(name)
-        save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
+        # The full state first, the public weights last: final/model.safetensors
+        # is the runner's "stage finished" marker, so it may only appear once
+        # final.pt is safely on disk.
         _save_state(model, optimizer, settings, step, totals, out, rng, tasks, name)
+        save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
 
 
 def _save_state(model, optimizer, settings, step, totals, out: Path, rng, tasks, name: str) -> Path:
