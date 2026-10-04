@@ -100,7 +100,9 @@ def test_timed_saves_write_latest_and_do_not_block_resume(tmp_path):
     model, tasks, settings = fresh(corpus, tmp_path / "run", save_every_minutes=1e-9)
     train(model, tasks, settings, device=torch.device("cpu"))
     latest = torch.load(tmp_path / "run" / "training_state" / "latest.pt", weights_only=False)
-    assert latest["step"] == settings.total_steps - 1  # the last timed save, before the final step
+    # Timed saves happen after steps without a regular checkpoint (which resets the
+    # timer instead) and never after the final step.
+    assert 1 <= latest["step"] < settings.total_steps
     assert "save_every_minutes" in RESUME_FREE_SETTINGS
 
     # The timed-save interval may change between the interrupted and the resumed run.
@@ -247,3 +249,30 @@ def test_sigterm_handler_is_installed_only_while_training(tmp_path):
     train(model, tasks, settings, device=torch.device("cpu"))
     assert seen and all(handler is trainer._on_sigterm for handler in seen)
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_stop_at_a_checkpoint_boundary_writes_one_state_and_completes_on_resume(tmp_path, monkeypatch):
+    from nuri import trainer
+    from nuri.checkpoint import load_pretrained
+
+    corpus = toy_corpus(tmp_path / "corpus")
+    model, tasks, settings = fresh(corpus, tmp_path / "full", save_every=3)
+    train(model, tasks, settings, device=torch.device("cpu"))
+
+    written = []
+    original = trainer.save_training_state
+    monkeypatch.setattr(trainer, "save_training_state",
+                        lambda path, *a, **k: (written.append(Path(path).name), original(path, *a, **k))[1])
+    stopped, tasks, settings = fresh(corpus, tmp_path / "stopped", save_every=3)
+    with pytest.raises(TrainingInterrupted) as info:  # the stop arrives during step 3, a step-3 boundary
+        train(stopped, stop_after(tasks, 3), settings, device=torch.device("cpu"))
+    assert info.value.step == 3 and written == ["latest.pt"]  # one full-state save, nothing else
+    assert not (tmp_path / "stopped" / "step-3").exists()
+
+    resumed, tasks, settings = fresh(corpus, tmp_path / "stopped", save_every=3)
+    train(resumed, tasks, settings, device=torch.device("cpu"), resume_from=info.value.path)
+    for name in ("step-3", "final"):
+        expected = load_pretrained(tmp_path / "full" / name).state_dict()
+        actual = load_pretrained(tmp_path / "stopped" / name).state_dict()
+        assert all(torch.equal(expected[k], actual[k]) for k in expected), name
+    assert (tmp_path / "stopped" / "training_state" / "step-3.pt").exists()

@@ -195,10 +195,12 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     start_step = 0
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
-        if start_step >= settings.total_steps and not (out / "final" / "model.safetensors").exists():
-            # The run finished, but the process stopped between final.pt and
-            # the final weights: write them now from the restored state.
-            save_pretrained(model, out / "final", tokenizer_dir=settings.tokenizer_dir)
+        # Checkpoints due at the resumed boundary that were not completed (a
+        # stop skips them; a crash may land between state and weights) are
+        # written now from the restored state, which is exactly what they
+        # would have contained.
+        if start_step > 0:
+            _complete_checkpoints(model, optimizer, schedule, settings, start_step - 1, totals, out, rng, tasks)
     records, started = [], time.time()
     last_timed_save = time.monotonic()
     _reset_cuda_peaks(device)
@@ -258,21 +260,27 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
                 kind = tasks[name].kind if name in tasks else "mixed"
                 monitor.record(record, kind, result["targets"], schedule_phase)
                 _reset_cuda_peaks(device)
-            _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
-                        on_save=lambda name: monitor.phase(f"saving {name}", force=True))
-
-            # A requested stop or the timed save writes only the full training
-            # state (no public weights): the smallest save that resumes exactly.
+            # A requested stop is handled before any regular checkpoint, so the
+            # shutdown writes exactly one full state (latest.pt) inside the
+            # provider's grace period. Regular checkpoints due at this step are
+            # completed when the run resumes. The last step always finishes.
             finished = step == settings.total_steps - 1
-            stop = _stop.requested and not finished
-            timed = (settings.save_every_minutes > 0 and not finished
-                     and time.monotonic() - last_timed_save >= settings.save_every_minutes * 60)
-            if stop or timed:
+            if _stop.requested and not finished:
                 monitor.phase("saving latest state", force=True)
                 path = _save_state(model, optimizer, settings, step, totals, out, rng, tasks, LATEST_STATE)
+                raise TrainingInterrupted(step + 1, path)
+
+            saved = _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
+                                on_save=lambda name: monitor.phase(f"saving {name}", force=True))
+            if saved:
+                last_timed_save = time.monotonic()  # a regular full state also resets the timer
+            elif (settings.save_every_minutes > 0 and not finished
+                  and time.monotonic() - last_timed_save >= settings.save_every_minutes * 60):
+                # The timed save writes only the full training state (no public
+                # weights): the smallest save that resumes exactly.
+                monitor.phase("saving latest state", force=True)
+                _save_state(model, optimizer, settings, step, totals, out, rng, tasks, LATEST_STATE)
                 last_timed_save = time.monotonic()
-                if stop:
-                    raise TrainingInterrupted(step + 1, path)
     return records
 
 
@@ -523,8 +531,8 @@ def _cuda_peaks(device: torch.device) -> dict:
             "cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device)}
 
 
-def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks,
-                on_save: Callable[[str], None] | None = None) -> None:
+def _checkpoint_names(schedule, settings, step: int) -> list[str]:
+    """The regular checkpoints due after optimizer step `step`."""
     last = step == settings.total_steps - 1
     names = []
     if settings.save_every and (step + 1) % settings.save_every == 0 and not last:
@@ -533,6 +541,22 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
         names.append("pre-decay")
     if last:
         names.append("final")
+    return names
+
+
+def _complete_checkpoints(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks) -> None:
+    """Write whatever part of the checkpoints due after `step` is missing."""
+    for name in _checkpoint_names(schedule, settings, step):
+        if not (out / "training_state" / f"{name}.pt").exists():
+            _save_state(model, optimizer, settings, step, totals, out, rng, tasks, name)
+        if not (out / name / "model.safetensors").exists():
+            save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
+
+
+def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks,
+                on_save: Callable[[str], None] | None = None) -> bool:
+    """Write the regular checkpoints due after `step`; True if any was written."""
+    names = _checkpoint_names(schedule, settings, step)
     for name in names:
         if on_save is not None:
             on_save(name)
@@ -541,6 +565,7 @@ def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, r
         # final.pt is safely on disk.
         _save_state(model, optimizer, settings, step, totals, out, rng, tasks, name)
         save_pretrained(model, out / name, tokenizer_dir=settings.tokenizer_dir)
+    return bool(names)
 
 
 def _save_state(model, optimizer, settings, step, totals, out: Path, rng, tasks, name: str) -> Path:
