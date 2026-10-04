@@ -1,4 +1,4 @@
-"""Turn measured GPU benchmarks into step counts for a release plan (ARCHITECTURE.md §3, §11, §15).
+"""Estimate stage steps from synthetic GPU benchmarks (ARCHITECTURE.md §3, §11, §15).
 
 Usage
   python scripts/plan_budget.py plan.json --out plan.budgeted.json
@@ -22,9 +22,14 @@ For each budgeted stage the script
   batches; embed: pairs), times grad_accum,
 - sets "steps" so that hours * overhead are used, and "save_every" so a
   checkpoint lands about every 1B processed tokens (§15),
-- reports processed tokens. For the dense base stage it applies the size
-  rule of §3: fewer than 3B tokens in the budget means the release preset
-  is too large for this GPU, and the report says so.
+- reports synthetic processed positions, not actual non-padding tokens.
+  D-017 keeps the dense release size. A low estimate recommends moving
+  base time from MoE to dense within the shared day and all five stages.
+  The first real-data hour must calibrate valid-token rates in every case;
+  an estimate above 3B does not establish launch readiness.
+
+Writing --out marks the budget as a synthetic proxy. It does not approve
+the plan or perform the recommended time reallocation.
 
 Benchmarks must use the same batch size and lengths as the plan's stage;
 a mismatch is reported, because seconds per step only transfer between
@@ -58,7 +63,7 @@ def load_benchmark(path: str) -> dict:
 
 
 def tokens_per_iteration(bench: dict) -> float:
-    """Observed input tokens (both sides for pairs) plus canvas positions."""
+    """Synthetic input positions (both pair sides) plus canvas positions."""
     return bench["batch_size"] * (bench["input_length"] * bench.get("input_sequences_per_sample", 1)
                                  + (bench.get("output_length") or 0))
 
@@ -81,10 +86,16 @@ def budget_stage(name: str, stage: dict, budget: dict, overhead: float) -> dict:
     steps = max(1, int(budget["hours"] * 3600 * overhead / seconds_per_step))
     report = {"stage": name, "hours": budget["hours"], "seconds_per_step": round(seconds_per_step, 4),
               "steps": steps, "tokens_per_step": tokens_per_step, "processed_tokens": steps * tokens_per_step,
+              "token_count_kind": "synthetic_positions",
               "save_every": max(1, math.ceil(CHECKPOINT_TOKENS / tokens_per_step)), "warnings": warnings}
     if stage["stage"] == "base" and stage.get("preset", "release-dense") == "release-dense":
-        report["size_rule"] = ("ok" if report["processed_tokens"] >= SIZE_RULE_TOKENS else
-                               "shrink: fewer than 3B tokens in the budget; use D=512, L=8 (ARCHITECTURE.md §3)")
+        report["size_rule"] = (
+            "calibrate: synthetic estimate reaches 3B; verify actual valid-token rate (D-017)"
+            if report["processed_tokens"] >= SIZE_RULE_TOKENS else
+            "reallocate: synthetic estimate is below 3B; keep the dense release size, "
+            "measure actual valid-token rate and move base time from MoE to dense "
+            "within the shared day and all five stages (D-017)"
+        )
     return report
 
 
@@ -109,11 +120,12 @@ def main(argv=None) -> list[dict]:
 
     for r in reports:
         line = (f"{r['stage']:<12} {r['hours']:>5.2f} h  {r['seconds_per_step']:.3f} s/step  {r['steps']:>8,} steps  "
-                f"{r['processed_tokens'] / 1e9:6.2f}B tokens")
+                f"{r['processed_tokens'] / 1e9:6.2f}B synthetic positions")
         print(line + (f"  [{r['size_rule']}]" if "size_rule" in r else ""))
         for warning in r["warnings"]:
             print(f"  warning: {warning}")
     if args.out:
+        plan.setdefault("budget", {})["calibration_status"] = "synthetic_proxy"
         Path(args.out).write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return reports
 

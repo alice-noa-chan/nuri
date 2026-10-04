@@ -48,17 +48,31 @@ def test_steps_tokens_and_checkpoint_cadence(tmp_path):
     tokens_per_step = 0.5 * 64 * 1024 + 0.5 * 64 * (1024 + 256)
     assert base["processed_tokens"] == pytest.approx(base["steps"] * tokens_per_step)
     assert base["save_every"] == -(-1e9 // tokens_per_step)  # about every 1B tokens
-    assert base["size_rule"] == "ok"
+    assert base["size_rule"].startswith("calibrate:")
+    assert base["token_count_kind"] == "synthetic_positions"
     assert it["seconds_per_step"] == pytest.approx(1.0)  # grad_accum 2 x 0.5 s
     written = json.loads((tmp_path / "out.json").read_text())
+    assert written["budget"]["calibration_status"] == "synthetic_proxy"
     assert written["stages"]["base-dense"]["steps"] == base["steps"]
     assert written["stages"]["it-dense"]["steps"] == it["steps"] and "save_every" not in written["stages"]["it-dense"]
 
 
-def test_slow_gpu_triggers_the_size_rule(tmp_path):
+def test_slow_gpu_recommends_reallocation_without_changing_the_plan(tmp_path, capsys):
     plan = make_plan(tmp_path, mlm_seconds=4.0, span_seconds=6.0)
-    base = load_script().main([str(plan)])[0]
-    assert base["processed_tokens"] < 3e9 and base["size_rule"].startswith("shrink")
+    original = json.loads(plan.read_text())
+    output = tmp_path / "budgeted.json"
+    base = load_script().main([str(plan), "--out", str(output)])[0]
+    assert base["processed_tokens"] < 3e9
+    assert base["size_rule"].startswith("reallocate:")
+    assert "keep the dense release size" in base["size_rule"]
+    assert "actual valid-token rate" in base["size_rule"]
+    assert "shared day and all five stages (D-017)" in base["size_rule"]
+    printed = capsys.readouterr().out
+    assert "synthetic positions" in printed and "shrink" not in printed
+    written = json.loads(output.read_text())
+    assert written["stages"]["base-dense"]["preset"] == "release-dense"
+    assert written["budget"]["stages"] == original["budget"]["stages"]
+    assert written["stages"].keys() == original["stages"].keys()
 
 
 def test_mismatched_batch_and_non_training_benchmarks(tmp_path):
@@ -70,3 +84,13 @@ def test_mismatched_batch_and_non_training_benchmarks(tmp_path):
     bench(tmp_path / "mlm.json", 0.4, training=False)
     with pytest.raises(ValueError, match="--training"):
         load_script().main([str(plan_path)])
+
+
+def test_no_measurements_does_not_establish_calibration(tmp_path):
+    plan = tmp_path / "empty.json"
+    plan.write_text(json.dumps({"stages": {}}))
+    output = tmp_path / "budgeted.json"
+    assert load_script().main([str(plan), "--out", str(output)]) == []
+    written = json.loads(output.read_text())
+    assert written["stages"] == {}
+    assert written["budget"]["calibration_status"] == "synthetic_proxy"
