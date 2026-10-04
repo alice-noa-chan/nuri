@@ -43,7 +43,8 @@ from nuri.model import NuriModel  # noqa: E402
 from nuri.pipeline import base_stage, embedding_stage, instruction_stage, read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size  # noqa: E402
-from nuri.trainer import INTERRUPTED_EXIT_CODE, TrainingInterrupted, TrainSettings, train  # noqa: E402
+from nuri.trainer import (INTERRUPTED_EXIT_CODE, NONFINITE_EXIT_CODE, NonFiniteTraining,  # noqa: E402
+                          TrainingInterrupted, TrainSettings, train)
 
 
 def positive_int(value):
@@ -198,6 +199,9 @@ def main(argv=None):
         print(f"[{args.stage}] stopped on request after step {stop.step}; "
               f"resume with --resume {stop.path}", flush=True)
         sys.exit(INTERRUPTED_EXIT_CODE)
+    except NonFiniteTraining as error:
+        print(f"[{args.stage}] stopped: {error}", flush=True)
+        sys.exit(NONFINITE_EXIT_CODE)
     if records:
         print(f"done: last loss {records[-1]['loss']:.4f}, checkpoints in {args.out}")
     else:

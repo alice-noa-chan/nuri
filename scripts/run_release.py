@@ -172,6 +172,20 @@ def run(command: list[str], dry_run: bool) -> int:
     return code
 
 
+def write_summary(path: Path, summary: dict) -> None:
+    """Write run_summary.json atomically (temporary file, fsync, rename).
+
+    A runner killed mid-write leaves the previous complete summary, so the
+    next invocation can still read it and resume.
+    """
+    temporary = path.with_name(path.name + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(summary, indent=2))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
 def _finished(stage_dir: Path) -> bool:
     """A stage is done when its final weights and its final full state both exist."""
     return ((stage_dir / "final" / "model.safetensors").exists()
@@ -199,10 +213,13 @@ def main(argv=None):
             print(f"[{name}] already trained, skipping training", flush=True)
         else:
             started = time.time()
-            code = run(train_command(name, spec, plan, out), args.dry_run)
-            if not args.dry_run:
-                record["train_seconds"] += time.time() - started
-                summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            try:
+                code = run(train_command(name, spec, plan, out), args.dry_run)
+            finally:
+                # Count the attempt's time even when the step failed.
+                if not args.dry_run:
+                    record["train_seconds"] += time.time() - started
+                    write_summary(summary_path, summary)
             if code == INTERRUPTED_EXIT_CODE:
                 # Stop the whole plan; running the same command again resumes
                 # this stage from its newest training state.
@@ -216,7 +233,7 @@ def main(argv=None):
                 sys.exit(INTERRUPTED_EXIT_CODE)
 
     if not args.dry_run:
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        write_summary(summary_path, summary)
         print(json.dumps(summary, indent=2))
 
 

@@ -276,3 +276,61 @@ def test_stop_at_a_checkpoint_boundary_writes_one_state_and_completes_on_resume(
         actual = load_pretrained(tmp_path / "stopped" / name).state_dict()
         assert all(torch.equal(expected[k], actual[k]) for k in expected), name
     assert (tmp_path / "stopped" / "training_state" / "step-3.pt").exists()
+
+
+def _nonfinite_after(trainer, monkeypatch, calls: int, where: str):
+    """From the `calls`-th optimizer step on, make the loss NaN or the gradient norm inf."""
+    count = {"n": 0}
+    if where == "loss":
+        original = trainer._task_loss
+
+        def task_loss(*args, **kwargs):
+            result = original(*args, **kwargs)
+            count["n"] += 1
+            if count["n"] >= calls:
+                result["loss"] = result["loss"] * float("nan")
+            return result
+        monkeypatch.setattr(trainer, "_task_loss", task_loss)
+    else:
+        original = torch.nn.utils.clip_grad_norm_
+
+        def clip(*args, **kwargs):
+            norm = original(*args, **kwargs)
+            count["n"] += 1
+            return torch.tensor(float("inf")) if count["n"] >= calls else norm
+        monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", clip)
+
+
+@pytest.mark.parametrize("where", ["loss", "gradient"])
+def test_nonfinite_values_stop_before_the_update_and_save_nothing(tmp_path, monkeypatch, where):
+    from nuri import trainer
+
+    corpus = toy_corpus(tmp_path / "corpus")
+    model, tasks, settings = fresh(corpus, tmp_path / "run", save_every=1, save_every_minutes=1e-9)
+    _nonfinite_after(trainer, monkeypatch, 3, where)
+    request_stop_on = stop_after(tasks, 3)  # a stop request arrives on the same step
+
+    states = tmp_path / "run" / "training_state"
+    with pytest.raises(trainer.NonFiniteTraining) as info:
+        train(model, request_stop_on, settings, device=torch.device("cpu"))
+    assert info.value.step == 2
+    assert sorted(p.name for p in states.iterdir()) == ["step-1.pt", "step-2.pt"]  # no latest.pt, no step-3
+    assert all(torch.isfinite(t).all() for t in model.state_dict().values() if t.is_floating_point())
+    assert trainer.NONFINITE_EXIT_CODE == 3
+
+
+def test_runner_summary_is_atomic_and_counts_failed_attempts(tmp_path, monkeypatch):
+    run_release, path, calls = _runner(tmp_path, monkeypatch, [1])
+    with pytest.raises(run_release.subprocess.CalledProcessError):
+        run_release.main([str(path)])
+    summary_path = tmp_path / "out" / "run_summary.json"
+    first = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert "train_seconds" in first["base-dense"]  # the failed attempt was recorded
+
+    def broken_replace(source, target):
+        raise OSError("killed during the rename")
+
+    monkeypatch.setattr(run_release.os, "replace", broken_replace)
+    with pytest.raises(OSError):
+        run_release.write_summary(summary_path, {"broken": True})
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == first  # the previous summary survives

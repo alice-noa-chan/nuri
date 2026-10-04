@@ -248,6 +248,14 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
 
             monitor.phase("optimizer")
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
+            # One host sync per update: a NaN/inf loss (including the MoE aux
+            # terms) gives a non-finite gradient norm, and either one stops the
+            # run before optimizer.step, so neither the weights nor any saved
+            # state (latest.pt, step-*, final) can contain it. Recovery resumes
+            # from the previous complete state.
+            losses = torch.stack([micro[4].float() for micro in micro_batches])
+            if not bool(torch.isfinite(grad_norm) & torch.isfinite(losses).all()):
+                raise NonFiniteTraining(step, name)
             optimizer.step()
             monitor.advance()
 
@@ -356,6 +364,19 @@ RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
 # Exit code of scripts/train.py after a requested stop (EX_TEMPFAIL: "try again").
 INTERRUPTED_EXIT_CODE = 75
 LATEST_STATE = "latest"
+
+
+# Exit code of scripts/train.py when a loss or gradient is NaN/inf (no update, no save).
+NONFINITE_EXIT_CODE = 3
+
+
+class NonFiniteTraining(Exception):
+    """A loss or the gradient norm was NaN/inf: the update and any save were skipped."""
+
+    def __init__(self, step: int, task: str):
+        super().__init__(f"non-finite loss or gradient at step {step} (task {task}); "
+                         "no update was applied and no state was saved")
+        self.step, self.task = step, task
 
 
 class TrainingInterrupted(Exception):
