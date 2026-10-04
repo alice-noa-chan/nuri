@@ -47,6 +47,14 @@ def _bucket(config: NuriConfig, batch_size: int) -> tuple[int, int, int]:
             batch_size * BUCKET_MAX_ROWS)
 
 
+def _bucket_options(config: NuriConfig, batch_size: int, enabled: bool) -> dict:
+    """Persist the selection policy so older/different buckets cannot resume silently."""
+    if not enabled:
+        return {}
+    return {"bucket_policy": {"version": 2, "candidate_multiplier": BUCKET_POOL,
+                              "limits": list(_bucket(config, batch_size))}}
+
+
 def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
                   pack_mlm: bool = False, bucket: bool = False) -> dict[str, Task]:
     """MLM and span batches drawn from the corpus, skipping documents they cannot use.
@@ -74,7 +82,8 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
 
     options = {"batch_size": batch_size, "corpus_documents": len(corpus),
                "corpus_weights": getattr(corpus, "weights", None),  # set for a MixedCorpus
-               "pack_mlm": pack_mlm, "bucket": bucket}
+               "pack_mlm": pack_mlm, "bucket": bucket,
+               **_bucket_options(config, batch_size, bucket)}
     return {"mlm": Task("mlm", mlm_batch, rng, generator, options),
             "span": Task("span", span_batch, rng, generator, options)}
 
@@ -100,7 +109,8 @@ def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int
         return build_instruction_batch(pool, config, generator, bucket=_bucket(config, batch_size), rng=rng)
 
     return Task(kind, next_batch, rng, generator,
-                {"batch_size": batch_size, "examples": len(examples), "bucket": bucket})
+                {"batch_size": batch_size, "examples": len(examples), "bucket": bucket,
+                 **_bucket_options(config, batch_size, bucket)})
 
 
 def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False,
