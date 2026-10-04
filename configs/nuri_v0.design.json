@@ -283,7 +283,23 @@
       "ja(minor)"
     ],
     "license": "MIT",
-    "training_budget": "~24 GPU-hours total across all released models, 1x A100 80GB or H100",
+    "training_budget": "Historical one-day plan; the current Vast run follows D-018 below",
+    "current_run_budget": {
+      "decision": "D-018",
+      "provider": "Vast.ai",
+      "gpu": "1x compatible A100 80GB on-demand",
+      "strict_total_usd_below": 50,
+      "maximum_rented_wall_hours": 44,
+      "minimum_transfer_and_cleanup_reserve_usd": 3,
+      "duration_rule": "shorten_from_live_compute_disk_transfer_quote_before_rental",
+      "included_time": "startup_calibration_training_evaluation_retrieval_teardown",
+      "training_allocation_ratio": [22, 10, 2.5, 2, 1],
+      "optimizer_steps": "set_only_after_actual_input_cuda_memory_rate_and_recovery_gates",
+      "embedding_presentation_equivalents_maximum": 4,
+      "evaluation_order": "after_all_five_training_stages_and_exports",
+      "budget_controls": "host_process_group_supervisor_and_independent_local_provider_deletion_guard",
+      "historical_decisions": "D-003_D-006_and_D-017_one_day_allocations_remain_recorded"
+    },
     "base_time_policy": {
       "decision": "D-017",
       "dense_hours": 9,
