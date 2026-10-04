@@ -88,6 +88,13 @@ class TrainingMonitor:
         for key in ("denoise", "length", "fast", "reasoning", "cross_mode", "moe_balance", "moe_z"):
             if key in record:
                 metrics[key] = f"{record[key]:.4f}"
+        summary = record.get("batch_summary", {})
+        if summary:
+            metrics.update(rows=summary["rows"],
+                           shape=f"{summary['max_input_width']}/{summary['max_canvas_width']}",
+                           valid=f"{summary['valid_fraction']:.0%}")
+        if "cuda_peak_allocated_bytes" in record:
+            metrics["peak GiB"] = f"{record['cuda_peak_allocated_bytes'] / 2**30:.2f}"
         self.bar.set_postfix(metrics, refresh=False)
         if self.writer is None:
             return
@@ -118,6 +125,11 @@ class TrainingMonitor:
         for key in ("moe_balance", "moe_z"):
             if key in record:
                 scalars[f"moe/{key.removeprefix('moe_')}"] = record[key]
+        for key, value in summary.items():
+            scalars[f"batch/{key}"] = value
+        for key in ("cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"):
+            if key in record:
+                scalars[f"memory/{key}"] = record[key]
         for tag, value in scalars.items():
             self.writer.add_scalar(tag, value, step)
         for layer, counts in enumerate(record.get("expert_counts", [])):

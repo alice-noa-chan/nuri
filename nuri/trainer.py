@@ -193,6 +193,7 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
     records, started = [], time.time()
+    _reset_cuda_peaks(device)
 
     with TrainingMonitor(settings.total_steps, start_step, totals["tokens"],
                          stage=settings.stage, progress=settings.progress,
@@ -214,11 +215,14 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
                 depth = rng.choice(model.config.train_depths)
                 monitor.begin_step(name, depth if tasks[name].kind != "mlm" else 0, schedule_phase,
                                    micro=micro + 1, micro_count=settings.grad_accum)
-                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in tasks[name].next_batch().items()}
+                batch = tasks[name].next_batch()
+                shape = _batch_shape(tasks[name].kind, batch, depth)
+                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
 
                 monitor.phase("forward")
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
                     result = _task_loss(model, tasks[name].kind, batch, depth, settings)
+                    result["batch_shape"] = shape
                     aux = model.pop_moe_aux()
                     loss = result["loss"] + (aux["loss"] if aux["loss"] is not None else 0.0)
 
@@ -239,11 +243,13 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
 
             if step % settings.log_every == 0 or step == settings.total_steps - 1:
                 record = _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, totals, started)
+                record.update(_cuda_peaks(device))
                 records.append(record)
                 log.write(json.dumps(record) + "\n")
                 log.flush()
                 kind = tasks[name].kind if name in tasks else "mixed"
                 monitor.record(record, kind, result["targets"], schedule_phase)
+                _reset_cuda_peaks(device)
             _maybe_save(model, optimizer, schedule, settings, step, totals, out, rng, tasks,
                         on_save=lambda name: monitor.phase(f"saving {name}", force=True))
     return records
@@ -264,7 +270,8 @@ def _merge_micro_batches(micro_batches: list, tasks: dict[str, Task]) -> tuple:
     loss = torch.stack([m[4] for m in micro_batches]).mean()
 
     merged = {"loss": loss, "tokens": sum(r["tokens"] for r in results),
-              "targets": sum(r["targets"] for r in results)}
+              "targets": sum(r["targets"] for r in results),
+              "batch_shapes": [r["batch_shape"] for r in results]}
     for key in ("denoise", "length", "fast", "reasoning", "cross_mode"):
         values = [r[key] for r in results if key in r]
         if values:
@@ -369,6 +376,8 @@ def _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, total
     record = {"step": step, "task": name, "depth": depth, "loss": float(loss.detach()), "lr": schedule.lr(step),
               "grad_norm": float(grad_norm), "tokens": totals["tokens"], "targets": totals["targets"],
               "seconds": round(time.time() - started, 1)}
+    record["batch_shapes"] = result["batch_shapes"]
+    record["batch_summary"] = _summarize_batch_shapes(result["batch_shapes"])
     for key in ("denoise", "length", "fast", "reasoning", "cross_mode"):
         if key in result:
             record[key] = float(result[key])
@@ -377,6 +386,61 @@ def _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, total
         record["moe_z"] = float(aux["z"])
         record["expert_counts"] = [c.tolist() for c in aux["counts"]]
     return record
+
+
+def _batch_shape(kind: str, batch: dict, depth: int) -> dict:
+    """Numeric batch geometry only; inspect host masks before the GPU transfer."""
+    if kind == "pairs":
+        views = [(batch["query_ids"], batch["query_valid"]),
+                 (batch["doc_ids"], batch["doc_valid"])]
+    else:
+        views = [(batch["input_ids"], batch["input_valid"])]
+    rows = views[0][0].shape[0]
+    shape = {
+        "kind": kind, "rows": rows, "depth": 0 if kind == "mlm" else depth,
+        "input_width": max(ids.shape[1] for ids, _ in views),
+        "padded_input_tokens": sum(ids.numel() for ids, _ in views),
+        "valid_input_tokens": sum(int(valid.sum()) for _, valid in views),
+        "canvas_width": 0, "padded_canvas_tokens": 0, "valid_canvas_tokens": 0,
+    }
+    if kind == "pairs":
+        shape.update(query_width=views[0][0].shape[1], document_width=views[1][0].shape[1],
+                     targets=rows)
+    elif kind == "mlm":
+        shape["targets"] = int(batch["target_mask"].sum())
+    else:
+        shape.update(canvas_width=batch["canvas"].shape[1],
+                     padded_canvas_tokens=batch["canvas"].numel(),
+                     valid_canvas_tokens=int(batch["canvas_valid"].sum()),
+                     targets=int(batch["loss_mask"].sum()))
+    return shape
+
+
+def _summarize_batch_shapes(shapes: list[dict]) -> dict:
+    """One optimizer update: row presentations and tokens sum across microbatches."""
+    summary = {key: sum(shape[key] for shape in shapes) for key in (
+        "rows", "padded_input_tokens", "valid_input_tokens", "padded_canvas_tokens",
+        "valid_canvas_tokens", "targets")}
+    summary.update(microbatches=len(shapes), max_rows=max(shape["rows"] for shape in shapes),
+                   max_input_width=max(shape["input_width"] for shape in shapes),
+                   max_canvas_width=max(shape["canvas_width"] for shape in shapes))
+    padded = summary["padded_input_tokens"] + summary["padded_canvas_tokens"]
+    valid = summary["valid_input_tokens"] + summary["valid_canvas_tokens"]
+    summary["valid_fraction"] = valid / max(padded, 1)
+    return summary
+
+
+def _reset_cuda_peaks(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def _cuda_peaks(device: torch.device) -> dict:
+    """Allocator peaks since the previous sampled record, not estimated batch memory."""
+    if device.type != "cuda":
+        return {}
+    return {"cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+            "cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device)}
 
 
 def _maybe_save(model, optimizer, schedule, settings, step, totals, out: Path, rng, tasks,
