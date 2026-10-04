@@ -196,20 +196,24 @@ def usable_instruction(example: tuple[list[int], list[int]], config: NuriConfig)
     return bool(prompt) and len(answer) + 1 <= config.max_response_len
 
 
-def length_window(items: list, sizes: list[tuple[int, int]], budget: int, max_rows: int,
-                  rng: random.Random) -> list:
-    """A run of similar-length items whose padded size fits `budget`.
+def length_window(items: list, sizes: list[tuple[int, int]], input_budget: int, canvas_budget: int,
+                  max_rows: int, rng: random.Random) -> list:
+    """A run of similar-length items whose padded batch stays within every limit.
 
     Items are sorted by total length; from a random start, items are taken in
-    order while rows x (longest input part + longest canvas part) stays within
-    the budget. Similar lengths mean little padding. The function keeps no
-    state between calls, so a resumed run draws exactly the same batches.
+    order while rows x longest input part <= input_budget, rows x longest
+    canvas part <= canvas_budget and rows <= max_rows. The input and canvas
+    limits are separate, so a run of very short inputs cannot turn into far
+    more canvas positions (and vocabulary logits) than a full batch has.
+    Similar lengths mean little padding. The function keeps no state between
+    calls, so a resumed run draws exactly the same batches.
     """
     order = sorted(range(len(items)), key=lambda i: sum(sizes[i]))
     chosen, longest_a, longest_b = [], 0, 0
     for i in order[rng.randrange(len(order)):]:
         a, b = max(longest_a, sizes[i][0]), max(longest_b, sizes[i][1])
-        if chosen and ((len(chosen) + 1) * (a + b) > budget or len(chosen) >= max_rows):
+        rows = len(chosen) + 1
+        if chosen and (rows * a > input_budget or rows * b > canvas_budget or rows > max_rows):
             break
         chosen.append(i)
         longest_a, longest_b = a, b
@@ -218,10 +222,10 @@ def length_window(items: list, sizes: list[tuple[int, int]], budget: int, max_ro
 
 def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
                      generator: torch.Generator | None = None, min_span: int = 16,
-                     bucket: tuple[int, int] | None = None) -> dict:
+                     bucket: tuple[int, int, int] | None = None) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
 
-    bucket=(token budget, max rows): pass more documents than one batch needs;
+    bucket=(input budget, canvas budget, max rows): pass more documents than one batch needs;
     a run of similar-length samples is kept (see length_window).
     """
     pairs = [split_span(doc, config.max_input_len, config.max_response_len, config.eos_id, min_span, rng)
@@ -233,13 +237,13 @@ def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random
 
 def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config: NuriConfig,
                             generator: torch.Generator | None = None,
-                            bucket: tuple[int, int] | None = None, rng: random.Random | None = None) -> dict:
+                            bucket: tuple[int, int, int] | None = None, rng: random.Random | None = None) -> dict:
     """examples: (prompt ids, answer ids without EOS).
 
     EOS is appended to every answer (a real ending). Answers longer than M
     after EOS are dropped, never cut, and counted in "dropped". Prompts keep
     their last N tokens, since the end of a conversation matters most.
-    bucket=(token budget, max rows) with rng keeps only a run of
+    bucket=(input budget, canvas budget, max rows) with rng keeps only a run of
     similar-length examples (see length_window).
     """
     if bucket is not None:

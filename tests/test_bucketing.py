@@ -20,18 +20,27 @@ def test_window_fits_the_budget_and_keeps_similar_lengths():
     rng = random.Random(0)
     sizes = [(rng.randrange(1, 33), rng.randrange(1, 17)) for _ in range(200)]
     for _ in range(50):
-        chosen = length_window(list(range(200)), sizes, budget=8 * 48, max_rows=64, rng=rng)
+        chosen = length_window(list(range(200)), sizes, input_budget=8 * 32, canvas_budget=8 * 16,
+                               max_rows=32, rng=rng)
         rows = [sizes[i] for i in chosen]
-        padded = len(rows) * (max(a for a, _ in rows) + max(b for _, b in rows))
-        assert chosen and (padded <= 8 * 48 or len(rows) == 1)
-        assert len(rows) <= 64
+        assert chosen and len(rows) <= 32
+        assert len(rows) * max(a for a, _ in rows) <= 8 * 32
+        assert len(rows) * max(b for _, b in rows) <= 8 * 16
+
+
+def test_short_inputs_cannot_inflate_the_canvas():
+    # Input width 1 with canvas width 159: one combined budget of 64 x (1024 + 256)
+    # would accept 512 rows and 81,408 canvas positions instead of 16,384.
+    sizes = [(1, 159)] * 600
+    chosen = length_window(list(range(600)), sizes, 64 * 1024, 64 * 256, 64 * 4, random.Random(0))
+    assert len(chosen) * 159 <= 64 * 256
 
 
 def test_window_is_a_pure_function_of_the_rng_state():
     sizes = [(i % 30 + 1, i % 15 + 1) for i in range(100)]
     a, b = random.Random(7), random.Random(7)
     for _ in range(10):
-        assert length_window(list(range(100)), sizes, 400, 64, a) == length_window(list(range(100)), sizes, 400, 64, b)
+        assert length_window(list(range(100)), sizes, 300, 150, 64, a) == length_window(list(range(100)), sizes, 300, 150, 64, b)
 
 
 def test_bucketed_batches_have_less_padding(tmp_path):

@@ -34,13 +34,17 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
 
 
 # Length bucketing draws this many times a batch of candidates and keeps a
-# similar-length run; the run's padded size stays within one full batch.
+# similar-length run. The run's padded input and canvas each stay within one
+# full batch, and it has at most BUCKET_MAX_ROWS times the nominal rows, which
+# bounds the latent-slot work of the core (rows x K).
 BUCKET_POOL = 8
+BUCKET_MAX_ROWS = 4
 
 
-def _bucket(config: NuriConfig, batch_size: int) -> tuple[int, int]:
-    """(token budget, max rows): the padded size of one full batch, and a row cap."""
-    return batch_size * (config.max_input_len + config.max_response_len), batch_size * BUCKET_POOL
+def _bucket(config: NuriConfig, batch_size: int) -> tuple[int, int, int]:
+    """(input budget, canvas budget, max rows) for one bucketed batch."""
+    return (batch_size * config.max_input_len, batch_size * config.max_response_len,
+            batch_size * BUCKET_MAX_ROWS)
 
 
 def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
