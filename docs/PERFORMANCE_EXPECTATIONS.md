@@ -36,10 +36,10 @@ More MoE weights do not establish better quality than dense.
 
 For the measured A100 batch-64 candidates, the stage-budget calculation gives:
 
-| Eight-hour base window | Input positions | Canvas positions | Combined positions | Status |
+| Current D-017 base window | Input positions | Canvas positions | Combined positions | Status |
 |---|---:|---:|---:|---|
-| Dense | about 2.688B | about 0.336B | about 3.024B | Estimate |
-| Portable loop MoE | about 2.211B | about 0.276B | about 2.487B | Estimate |
+| Dense, 9 hours | about 3.024B | about 0.378B | about 3.402B | Synthetic estimate |
+| Portable loop MoE, 7 hours | about 1.934B | about 0.242B | about 2.176B | Synthetic estimate |
 
 These estimates use microbatch 64 without checkpointing, input length 1,024,
 canvas length 256, equal MLM/span task weights, equal weights on measured
@@ -48,9 +48,11 @@ They count repeated processing exposures. They are not unique text tokens,
 loss-bearing target counts, generated output or a quality prediction.
 The benchmark excludes data loading and host-side batch building, and uses
 approximate corruption workloads.
-Dense passes the current combined-position 3B size rule by only 0.798%; input
-alone remains below 3B. Real-data overhead and padding can erase that narrow
-margin; the size rule still needs actual valid-token throughput.
+The historical eight-hour dense proxy exceeded 3B combined positions by only
+0.798%. D-017 keeps the dense size, starts from nine/seven hours and moves time
+from MoE to dense if the first real-data valid-token projection falls short.
+Real-data overhead and padding mean even the new synthetic projection does
+not establish 3B valid training positions within the shared day.
 Fresh-process batch fit does not establish mixed-stage fit; embedding pairs
 at T=8 allocate 74.13 GiB on a device reporting 79.25 GiB. Checkpointing was
 not measured because no OOM triggered the conditional cases. Real data,

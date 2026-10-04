@@ -284,7 +284,16 @@
     ],
     "license": "MIT",
     "training_budget": "~24 GPU-hours total across all released models, 1x A100 80GB or H100",
-    "shrink_rule": "if measured dense throughput gives <3B tokens in 8h, use hidden 512 / input layers 8",
+    "base_time_policy": {
+      "decision": "D-017",
+      "dense_hours": 9,
+      "moe_hours": 7,
+      "dense_size": "keep_release_geometry",
+      "dense_target_valid_processed_positions": 3000000000,
+      "first_hour_check": "measure_actual_valid_input_and_canvas_throughput",
+      "below_target": "move_time_from_moe_to_dense_within_shared_day_and_preserve_all_five_stages",
+      "historical_rule": "D-009 eight-hour shrink rule is superseded by D-017"
+    },
     "dense": {
       "vocab_size": "65536 candidate; decided by tokenizer experiment (D-012)",
       "hidden_size": 768,

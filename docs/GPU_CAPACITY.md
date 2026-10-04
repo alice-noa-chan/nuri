@@ -87,6 +87,10 @@ checkpoints or evaluates. Confirm actual stage memory before using batch 64.
 
 ## Stage-budget estimate
 
+The eight-hour calculation below preserves the original D-009 comparison.
+The current D-017 plan uses nine hours for dense and seven for MoE; its derived
+projection is shown separately after the historical calculation.
+
 Use mean latency, not the mean of throughputs. For each base family:
 
 ```text
@@ -108,13 +112,29 @@ optimizer update. It does not directly prescribe release optimizer steps.
 | Dense | 0.631952 | 41,015 | 2,687,959,040 | 335,994,880 | 3,023,953,920 |
 | Portable loop MoE | 0.768396 | 33,732 | 2,210,660,352 | 276,332,544 | 2,486,992,896 |
 
-The current D-009 dense size rule counts input plus canvas positions. The
+The historical D-009 dense size rule counted input plus canvas positions. The
 dense estimate passes 3B by only 23,953,920 positions, or **0.798%**. Input
 alone is 2.688B. Extra unavailable time of about 0.7 percentage points beyond
 the assumed 10% can erase the combined-position margin. This is a provisional
 arithmetic pass, not a robust real-data budget or an automatic architecture
-decision. A hypothetical packed-MLM substitution lowers the estimate to
+decision. D-017 now keeps the dense size and reallocates base time instead
+of applying that historical shrink rule. A hypothetical packed-MLM substitution
+lowers the estimate to
 3.012B combined; it is not selected as the default here.
+
+For the current D-017 split, using the same unrounded latencies and factor:
+
+| Current base window | Timed iteration proxy | Input positions | Canvas positions | Combined positions |
+|---|---:|---:|---:|---:|
+| Dense, 9 hours | 46,142 | 3,023,962,112 | 377,995,264 | 3,401,957,376 |
+| Portable loop MoE, 7 hours | 29,516 | 1,934,360,576 | 241,795,072 | 2,176,155,648 |
+
+These are synthetic projections, not additional measured training runs.
+The first real-data hour checks valid-token throughput; if needed, D-017
+moves time from MoE to dense. That adjustment must preserve all five stages,
+evaluation/retrieval time and the shared 24-hour ceiling. It does not guarantee
+that 3B actual valid positions fit. Record the resulting unequal time/token
+budgets and report any remaining feasibility shortfall.
 
 For a 1.5-hour embedding window with the same factor and uniform T=2/4/8
 latency, the proxy is 4,236 iterations, 271,104 repeated pair presentations
