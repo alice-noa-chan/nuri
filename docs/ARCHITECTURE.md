@@ -354,14 +354,14 @@ This is a tentative split for the day when data and runtime are ready. Longer pr
 | Time | Work | Output |
 |---|---|---|
 | 1 hour | leakage/mask/gradient checks, GPU benchmark, small overfit | backend, batch size, peak memory, throughput |
-| 8 hours | dense pretraining | `nuri-base` + intermediate checkpoints |
-| 8 hours | MoE pretraining (same data order as dense) | `nuri-base-moe` + intermediate checkpoints |
+| 9 hours | dense pretraining (D-017) | `nuri-base` + intermediate checkpoints |
+| 7 hours | MoE pretraining (same data order as dense; D-017) | `nuri-base-moe` + intermediate checkpoints |
 | 1.5 hours | dense instruction tuning | `nuri-base-it` |
 | 1.5 hours | MoE instruction tuning | `nuri-base-moe-it` |
 | 1.5 hours | contrastive embedding training from the dense base | `nuri-base-embed` |
 | 2.5 hours | evaluation, export, load checks before release | release packages |
 
-There is no room for a T=1 vs T=4 pilot in these 24 hours. It is not run separately; instead the inference T curve (T=1/2/4/8/16) of the main checkpoint is reported (D-014). That is not an independent training comparison, so it is not used as evidence that recurrence helps. Stage objectives follow §8-C.
+The 9/7-hour base split follows D-017: at the measured A100 microbatch-64 rates the dense base gets about 3.4B processed positions and the loop MoE base about 2.2B. During the first real-data hour, compare the measured valid-token rate with the projection; if the dense base would fall below 3B, shift more hours from the MoE base. There is no room for a T=1 vs T=4 pilot in these 24 hours. It is not run separately; instead the inference T curve (T=1/2/4/8/16) of the main checkpoint is reported (D-014). That is not an independent training comparison, so it is not used as evidence that recurrence helps. Stage objectives follow §8-C.
 
 A GPU-time-based pilot is not a fully equal-FLOP comparison. Train tokens and measured FLOPs are recorded too. A main checkpoint and a pilot with different training amounts are never compared to claim one architecture is better.
 
@@ -435,6 +435,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-014 | 2026-10-03 | Skip the independent T=1 vs T=4 pilot; report the inference T curve instead | user's choice | user |
 | D-015 | 2026-10-03 | Keep raw/prepared datasets and downloads in ignored data/; keep the source/usage list only in .private/; reuse permitted sibling data without changing that project | user's follow-up | user |
 | D-016 | 2026-10-04 | Tokenizer vocabulary 65,536 (64k) | held-out compression: ~9-10% fewer Korean/Japanese tokens than 32k for ~4% more compute per byte (estimate) | user |
+| D-017 | 2026-10-04 | Keep the dense release size and give the dense base 9 hours and the MoE base 7 hours; if the first real-data hour projects the dense base below 3B processed positions, move more time from the MoE base instead of shrinking | A100 microbatch-64 calibration: 8 h dense = 3.02B, only 0.8% above the D-009 rule (docs/GPU_CAPACITY.md) | user |
 
 ## 15. Release plan
 

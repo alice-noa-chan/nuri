@@ -77,14 +77,14 @@
     "overhead": 0.9,
     "stages": {
       "base-dense": {
-        "hours": 8,
+        "hours": 9,
         "benchmarks": {
           "mlm": "runs/bench/dense-mlm.json",
           "span": "runs/bench/dense-denoise.json"
         }
       },
       "base-moe": {
-        "hours": 8,
+        "hours": 7,
         "benchmarks": {
           "mlm": "runs/bench/moe-mlm.json",
           "span": "runs/bench/moe-denoise.json"
