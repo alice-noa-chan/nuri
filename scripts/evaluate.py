@@ -163,6 +163,8 @@ def main(argv=None) -> dict:
                                if dim is None or dim <= model.config.embed_dim]
         # Reasoning queries against fast documents; meaningful only after cross-mode alignment (§6).
         report["retrieval"].append(evaluation.retrieval_metrics(model, pairs, mode="reasoning", doc_mode="fast"))
+        # Shared-token score with no model: the embedding should clearly beat it.
+        report["retrieval_lexical_baseline"] = evaluation.lexical_retrieval_baseline(pairs, model.config.vocab_size)
 
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:

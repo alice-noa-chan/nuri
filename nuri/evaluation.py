@@ -11,6 +11,7 @@ plain dicts that can be written as JSON. Every result reports its settings
 - span_denoising: held-out span reconstruction loss at fixed mask ratios
   (measures the core + readout path of base models, which MLM skips)
 - retrieval_metrics: Recall@k and MRR for an embedding mode
+- lexical_retrieval_baseline: the same retrieval scored by shared tokens only (no model)
 - core_diagnostics: state norm, update norm, slot cosine and effective rank per step
 - halting_curve: exact match vs mean core steps for several halting tolerances
 """
@@ -18,6 +19,7 @@ plain dicts that can be written as JSON. Every result reports its settings
 from __future__ import annotations
 
 import random
+import warnings
 from typing import Callable, Sequence
 
 import torch
@@ -255,15 +257,56 @@ def retrieval_metrics(model: NuriModel, pairs: Sequence[Example], mode: str = "f
             out.append(model.embed(ids.to(device), valid.to(device), mode=side_mode, steps=steps, dim=dim))
         return torch.cat(out)
 
-    scores = embed(0, mode) @ embed(1, doc_mode).T
-    # Rank the documents of each query by score, breaking ties by document
-    # order (stable sort). Tied scores therefore never all get rank 1.
+    result = _ranking_metrics(embed(0, mode) @ embed(1, doc_mode).T, ks)
+    result.update(pairs=len(pairs), mode=mode, doc_mode=doc_mode, dim=dim, steps=steps)
+    return result
+
+
+def _ranking_metrics(scores: torch.Tensor, ks=(1, 5, 10)) -> dict:
+    """Recall@k and MRR when document i is the right answer for query i.
+
+    Documents are ranked by score with ties broken by document order (stable
+    sort), so tied scores never all get rank 1.
+    """
     order = scores.float().sort(dim=1, descending=True, stable=True).indices
-    gold = torch.arange(len(pairs), device=scores.device).unsqueeze(1)
+    gold = torch.arange(scores.shape[0], device=scores.device).unsqueeze(1)
     ranks = (order == gold).float().argmax(dim=1) + 1  # 1 = the right document came first
     result = {f"recall@{k}": float((ranks <= k).float().mean()) for k in ks}
-    result.update(mrr=float((1.0 / ranks.float()).mean()), pairs=len(pairs), mode=mode, doc_mode=doc_mode, dim=dim,
-                  steps=steps)
+    result["mrr"] = float((1.0 / ranks.float()).mean())
+    return result
+
+
+def lexical_retrieval_baseline(pairs: Sequence[Example], vocab_size: int, ks=(1, 5, 10)) -> dict:
+    """The same retrieval task scored by shared tokens only (TF-IDF cosine), with no model.
+
+    If the embedding model barely beats this, the pairs mostly test word
+    overlap, not meaning. Token counts are kept sparse, so this stays cheap
+    for thousands of pairs even with a 64k vocabulary.
+    """
+    def token_counts(texts: list[list[int]]) -> torch.Tensor:
+        """Sparse (texts x vocabulary) matrix of token counts."""
+        rows = torch.cat([torch.full((len(t),), i) for i, t in enumerate(texts)])
+        cols = torch.cat([torch.tensor(t, dtype=torch.long) for t in texts])
+        return torch.sparse_coo_tensor(torch.stack([rows, cols]), torch.ones(len(cols)),
+                                       (len(texts), vocab_size), check_invariants=True).coalesce()
+
+    queries = token_counts([list(q) for q, _ in pairs])
+    documents = token_counts([list(d) for _, d in pairs])
+    # Inverse document frequency over the document side.
+    present = torch.zeros(vocab_size)
+    present.index_add_(0, documents.indices()[1], torch.ones(documents.indices().shape[1]))
+    idf = torch.log((1 + len(pairs)) / (1 + present)) + 1
+
+    def weighted(m: torch.Tensor) -> torch.Tensor:
+        values = m.values() * idf[m.indices()[1]]
+        norms = torch.zeros(m.shape[0]).index_add_(0, m.indices()[0], values ** 2).sqrt().clamp_min(1e-12)
+        return torch.sparse_coo_tensor(m.indices(), values / norms[m.indices()[0]], m.shape, check_invariants=True)
+
+    with warnings.catch_warnings():  # PyTorch notes that its internal sparse CSR path is "beta"
+        warnings.filterwarnings("ignore", message="Sparse CSR tensor support is in beta")
+        scores = torch.sparse.mm(weighted(queries), weighted(documents).t()).to_dense()
+    result = _ranking_metrics(scores, ks)
+    result.update(pairs=len(pairs), mode="lexical-tfidf")
     return result
 
 
