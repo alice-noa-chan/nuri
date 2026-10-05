@@ -184,19 +184,35 @@ def test_signal_handlers_take_no_locks():
 
 
 def test_runner_needs_the_final_state_before_skipping_a_stage(tmp_path, monkeypatch):
-    run_release, path, calls = _runner(tmp_path, monkeypatch, [0, 0, 0, 0])
+    def write_evaluation_result():
+        command = calls[-1]
+        if "evaluate.py" in command[1]:
+            output = Path(command[command.index("--output") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({"status": "synthetic_fixture"}), encoding="utf-8")
+
+    run_release, path, calls = _runner(tmp_path, monkeypatch, [0, 0, 0, 0], on_wait=write_evaluation_result)
+    monkeypatch.setattr(run_release.platform, "platform", lambda: "synthetic-platform")
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    toy_corpus(tmp_path / "heldout")
+    plan["data"]["eval_corpus"] = str(tmp_path / "heldout")
+    path.write_text(json.dumps(plan), encoding="utf-8")
     stage = tmp_path / "out" / "base-dense"
     (stage / "final").mkdir(parents=True)
     (stage / "final" / "model.safetensors").write_bytes(b"weights")
+    CONFIG.save(stage / "final" / "config.json")
     run_release.main([str(path)])
     assert "--stage" in calls[0] and "base" in calls[0]  # trained again: final.pt was missing
 
     (stage / "training_state").mkdir()
     (stage / "training_state" / "final.pt").write_bytes(b"state")
     calls.clear()
-    run_release, path, calls = _runner(tmp_path, monkeypatch, [0, 0, 0])
+    run_release, path, calls = _runner(tmp_path, monkeypatch, [0, 0, 0], on_wait=write_evaluation_result)
+    path.write_text(json.dumps(plan), encoding="utf-8")
     run_release.main([str(path)])
-    assert "evaluate.py" in calls[0][1]  # skipped training, went straight to evaluation
+    assert "export_release.py" in calls[0][1]  # completed training and bound evaluation were both reused
+    assert not any(Path(command[1]).name == "train.py" and "--stage" in command
+                   and command[command.index("--stage") + 1] == "base" for command in calls)
 
 
 def test_final_weights_appear_only_after_the_final_state(tmp_path, monkeypatch):

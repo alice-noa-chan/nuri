@@ -13,7 +13,9 @@ def test_public_weights_roundtrip(tmp_path):
     save_pretrained(model, tmp_path, dtype=torch.float32)
     loaded = load_pretrained(tmp_path).eval()
     names = list(loaded.state_dict())
-    assert sum("embedding" in n for n in names) == 1  # one embedding, reused by the vocabulary head
+    assert names.count("embedding.weight") == 1  # token table is stored once and tied to the vocabulary head
+    assert "readout.position_embedding.weight" in names
+    assert not any(name.startswith("vocab_head.") for name in names)
     ids = torch.randint(3, 128, (2, 6))
     x1, valid = model.encode(ids)
     x2, _ = loaded.encode(ids)
