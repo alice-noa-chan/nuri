@@ -5,9 +5,9 @@ representations before more production training. It fits a small supervised
 head on frozen features. It does not update an encoder, evaluate the generator,
 or establish performance after full task-specific fine-tuning.
 
-The feature extractor and ridge-probe runner are implemented. Actual comparison
-scores are pending completed private inputs. Exact inputs, model revisions,
-protocol receipts and results stay in ignored private storage.
+The feature extractor and ridge-probe runner are implemented. The first
+comparison is running on CPU. Exact inputs, model revisions, protocol receipts
+and detailed results stay in ignored private storage.
 Never put data names, sources or example text into this document or Git.
 
 ## What is compared
@@ -37,8 +37,13 @@ actual extraction time. Do not silently give one model more original text.
 
 Prepare integer-labeled rows with stable IDs. Separate original text/family
 groups before selection, then audit exact duplicates again after clipping.
-Preserve publisher split boundaries and record any further selection privately.
-This does not prove absence from the encoders' earlier pretraining corpora.
+Keep publisher-held-out groups outside head fitting and record selection
+privately. If native holdouts fail isolation, a privately declared diagnostic
+may instead assign wholly isolated components of the original training pool
+to independent internal train/valid/reserved-test splits before any scores.
+Label that task as train-pool-derived, not an official publisher dev/test score.
+Keep the original all-label closure and cross-native exclusions. Neither policy
+proves absence from the encoders' earlier pretraining corpora.
 
 The preliminary protocol uses up to 1,024 training rows and 256 validation
 rows per task. Completion test remains reserved. All models receive the same
@@ -89,6 +94,23 @@ encoders use eager attention and disable reference compilation when exposed by
 their configuration. Required missing encoder weights are rejected; an unused
 pooler and surplus pretraining heads are recorded separately. This is a declared
 CPU diagnostic rather than a comparison of optimized GPU inference kernels.
+
+Some pinned upstream checkpoints only provide binary weights. Before using
+them, verify the original file hash, load with `torch.load(weights_only=True)`
+on CPU, and convert every named tensor to safetensors without casting or
+removing aliases. Clone shared storage into separate contiguous tensors while
+preserving both key names. Reread the derivative and verify every shape, dtype
+and raw tensor byte sequence, finite values, and the unchanged original file.
+Record upstream revision, original and derivative hashes privately. The
+upstream revision describes lineage; the actual loaded derivative is also
+hash-bound. Keep strict required-weight loading checks.
+
+Use a separate whole-process deadline that remains active for the entire
+owned process group. Preserve failed attempts and their logs. A continuation
+can reuse only verified completed results under the unchanged assessment
+protocol; remaining jobs use fresh artifacts. Bind any weight-format
+conversion separately. Report active processing time separately from transfer,
+preparation and gaps between attempts.
 
 Progress identifies loading, the split/text field, feature batches and probe
 regularization candidates. TensorBoard contains real `train` and `valid` probe
