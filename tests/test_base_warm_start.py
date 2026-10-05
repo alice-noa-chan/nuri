@@ -30,15 +30,16 @@ def test_base_init_loads_weights_and_tokenizer_before_fresh_training(tmp_path, m
     original_train = train_cli.train
     inspected = []
 
-    def inspect_then_train(model, tasks, settings, resume_from):
+    def inspect_then_train(model, tasks, settings, resume_from, validation=None, test=None):
         assert model.config.hidden_size == 32  # the tiny preset would build 64
         assert not model.config.length_head_trained
         assert settings.tokenizer_dir == str(checkpoint)
         assert resume_from is None
+        assert validation is None and test is None
         for name, tensor in original.state_dict().items():
             assert torch.equal(tensor, model.state_dict()[name]), name
         inspected.append(True)
-        return original_train(model, tasks, settings, device=torch.device("cpu"))
+        return original_train(model, tasks, settings, device=torch.device("cpu"), validation=validation, test=test)
 
     monkeypatch.setattr(train_cli, "train", inspect_then_train)
     out = tmp_path / "continued"
@@ -65,8 +66,9 @@ def test_resume_has_priority_over_initializer(tmp_path, monkeypatch):
     monkeypatch.setattr(train_cli, "load_pretrained", refuse_initializer)
     calls = []
 
-    def inspect_resume(model, tasks, settings, resume_from):
+    def inspect_resume(model, tasks, settings, resume_from, validation=None, test=None):
         assert model.config is resumed
+        assert validation is None and test is None
         calls.append(resume_from)
         return []
 
