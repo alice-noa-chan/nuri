@@ -150,7 +150,10 @@ def test_grad_accum_matches_one_big_batch(tmp_path):
 
     def run(accum, out):
         torch.manual_seed(0)
-        model = NuriModel(config)
+        # Separate and combined backwards can cancel tiny FP32 gradients in
+        # different orders. Adam's small epsilon amplifies that rounding. Use
+        # double model arithmetic to check the accumulation rule itself.
+        model = NuriModel(config).double()
         source = iter(batches * 4)
         tasks = {"instruction": Task("instruction", lambda: next(source))}
         settings = TrainSettings(out_dir=str(tmp_path / out), total_steps=1, peak_lr=1e-2, warmup_steps=0,
@@ -161,7 +164,7 @@ def test_grad_accum_matches_one_big_batch(tmp_path):
     accumulated, record = run(2, "accum")
     # Reference: average the two losses by hand and take one AdamW step.
     torch.manual_seed(0)
-    reference = NuriModel(config)
+    reference = NuriModel(config).double()
     from nuri.trainer import canvas_loss, make_optimizer
     optimizer = make_optimizer(reference, TrainSettings(out_dir="unused", total_steps=1, peak_lr=1e-2))
     for group in optimizer.param_groups:
