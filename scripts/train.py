@@ -9,6 +9,10 @@ Examples
   python scripts/train.py --stage it --init runs/nuri-base/final --tokenizer $NURI_TOKENIZER \
       --instructions $NURI_IT_DATA --corpus $NURI_TEXT_CORPUS --out runs/nuri-base-it --steps 3000
 
+  # further base training from checkpoint weights, with a fresh optimizer/schedule
+  python scripts/train.py --stage base --init runs/repaired-base --corpus $NURI_TEXT_CORPUS \
+      --out runs/continued-base --steps 20000 --batch-size 64
+
   # continue an interrupted run (same flags plus --resume)
   python scripts/train.py --stage base ... --resume runs/nuri-base/training_state/step-2000.pt
 
@@ -57,8 +61,9 @@ def positive_int(value):
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage", choices=["base", "it", "embed"], required=True)
-    p.add_argument("--preset", choices=sorted(PRESETS), default="release-dense", help="model size for --stage base")
-    p.add_argument("--init", help="checkpoint folder to start from (required for it/embed unless --resume)")
+    p.add_argument("--preset", choices=sorted(PRESETS), default="release-dense", help="model size for scratch Base initialization")
+    p.add_argument("--init", help="checkpoint weights for a fresh run (required for it/embed unless --resume); "
+                                "--resume takes priority and restores the full run")
     p.add_argument("--out", required=True)
     p.add_argument("--steps", type=int, required=True)
     p.add_argument("--batch-size", type=int, default=32)
@@ -126,12 +131,15 @@ def main(argv=None):
     print(f"[{args.stage}] Loading tokenizer and checking vocabulary options...", flush=True)
     tokenizer = load_tokenizer(tokenizer_path) if tokenizer_path else None
     if args.stage == "base" and tokenizer is None:
-        print("warning: no --tokenizer; using the preset vocabulary size and saving no tokenizer files")
+        print("warning: no --tokenizer; retaining the model vocabulary size and saving no tokenizer files")
 
     if args.resume:
         print(f"[{args.stage}] Building model from the resume configuration...", flush=True)
         # The interrupted run decides the model shape; its weights are loaded by train().
         model = NuriModel(training_state_config(args.resume))
+    elif args.init:
+        print(f"[{args.stage}] Loading initial checkpoint weights for a fresh training run...", flush=True)
+        model = load_pretrained(args.init)
     elif args.stage == "base":
         print(f"[{args.stage}] Initializing model weights...", flush=True)
         # The embedding needs exactly one row per token id of the real tokenizer.
@@ -141,6 +149,9 @@ def main(argv=None):
         print(f"[{args.stage}] Loading initial checkpoint weights...", flush=True)
         model = load_pretrained(require(args.init, "--init"))
     config = model.config
+    if args.stage == "base":
+        # Base continuation does not calibrate natural answer lengths.
+        config.length_head_trained = False
     if tokenizer is not None:
         check_tokenizer(tokenizer, config)
     if args.corpus:
