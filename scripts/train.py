@@ -30,6 +30,8 @@ shown above. File formats:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import random
 import sys
@@ -42,19 +44,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nuri.checkpoint import load_pretrained, training_state_config  # noqa: E402
 from nuri.config import PRESETS  # noqa: E402
-from nuri.data import chat_prompt_text, open_corpus  # noqa: E402
+from nuri.data import chat_prompt_text, open_corpus, usable_instruction  # noqa: E402
 from nuri.model import NuriModel  # noqa: E402
 from nuri.pipeline import base_stage, embedding_stage, instruction_stage, read_jsonl  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size  # noqa: E402
 from nuri.trainer import (INTERRUPTED_EXIT_CODE, NONFINITE_EXIT_CODE, NonFiniteTraining,  # noqa: E402
-                          TrainingInterrupted, TrainSettings, train)
+                          HoldoutSet, TrainingInterrupted, TrainSettings, train)
 
 
 def positive_int(value):
     number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
     return number
 
 
@@ -75,6 +84,10 @@ def parse_args(argv=None):
     p.add_argument("--no-progress", action="store_true", help="disable tqdm bars; keep setup messages and logs")
     p.add_argument("--tensorboard", action="store_true", help="write TensorBoard events to <out>/tensorboard")
     p.add_argument("--tensorboard-dir", help="custom event directory; also enables TensorBoard")
+    p.add_argument("--holdout-config", default=os.environ.get("NURI_HOLDOUT_CONFIG"),
+                   help="private JSON with explicit valid/test inputs; no training-input fallback")
+    p.add_argument("--valid-every", type=nonnegative_int, default=None,
+                   help="validation interval in completed updates (0 = completion only); requires --holdout-config")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
     p.add_argument("--save-every-minutes", type=float, default=0.0,
                    help="also save the full training state to training_state/latest.pt this often (0 = off); "
@@ -101,7 +114,10 @@ def parse_args(argv=None):
     p.add_argument("--pairs", default=os.environ.get("NURI_PAIR_DATA"))
     p.add_argument("--reasoning-examples", type=int, default=20000,
                    help="synthetic reasoning examples for the it stage (0 = none)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.valid_every is not None and not args.holdout_config:
+        p.error("--valid-every requires --holdout-config")
+    return args
 
 
 def env_list(name: str) -> list[str] | None:
@@ -120,8 +136,163 @@ def encode(tokenizer, text: str) -> list[int]:
     return tokenizer.encode(text, add_special_tokens=False).ids
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resource_path(spec: str, directory: Path, corpus: bool = False) -> tuple[Path, str]:
+    path, separator, weight = spec.rpartition("=") if corpus and "=" in spec else (spec, "", "")
+    resolved = (directory / path).resolve()
+    return resolved, str(resolved) + (separator + weight if separator else "")
+
+
+def load_holdout_config(args) -> dict | None:
+    """Validate explicit split paths before allocating the model.
+
+    Optional manifest hashes are preparation bindings, not a replacement for
+    the full runtime byte checks of a private deployment preflight.
+    """
+    if not args.holdout_config:
+        return None
+    path = Path(args.holdout_config).resolve()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    allowed = {"schema_version", "valid_every", "batch_size", "valid", "test",
+               "input_manifest", "input_manifest_sha256", "exposure_caveats"}
+    if not isinstance(data, dict) or data.get("schema_version") != 1 or set(data) - allowed:
+        raise ValueError("holdout config needs schema_version 1 and supported fields")
+    data["valid_every"] = args.valid_every if args.valid_every is not None else data.get("valid_every", 0)
+    data["batch_size"] = data.get("batch_size", args.batch_size)
+    if (type(data["valid_every"]) is not int or data["valid_every"] < 0
+            or type(data["batch_size"]) is not int or data["batch_size"] < 1):
+        raise ValueError("holdout interval must be nonnegative and batch size positive")
+    resources = {"train": [], "valid": [], "test": []}
+    for name, values in (("corpus", args.corpus or []), ("instructions", [args.instructions] if args.instructions else []),
+                         ("pairs", [args.pairs] if args.pairs else [])):
+        for spec in values:
+            resolved, _ = _resource_path(spec, Path.cwd(), name == "corpus")
+            resources["train"].append((name, resolved))
+    for split in ("valid", "test"):
+        block = data.get(split)
+        keys = {"corpus", "instructions", "reasoning", "pairs", "batches_per_task", "seed", "depth", "exposure_caveats"}
+        if not isinstance(block, dict) or set(block) - keys:
+            raise ValueError("holdout config needs explicit valid and test blocks with supported fields")
+        for key, default in (("batches_per_task", 8), ("seed", 0), ("depth", 4)):
+            block[key] = block.get(key, default)
+            if type(block[key]) is not int or block[key] < (1 if key == "batches_per_task" else 0):
+                raise ValueError(f"invalid holdout {key}")
+        required = "corpus" if args.stage == "base" else "instructions" if args.stage == "it" else "pairs"
+        if not block.get(required) or (args.stage == "it" and args.corpus and not block.get("corpus")):
+            raise ValueError("each holdout split needs its own stage inputs, including span corpus when trained")
+        if "corpus" in block and (not isinstance(block["corpus"], list) or not block["corpus"]):
+            raise ValueError("holdout corpus must be a nonempty list of folder specifications")
+        for name in ("corpus", "instructions", "reasoning", "pairs"):
+            values = block.get(name, []) if name == "corpus" else ([block[name]] if block.get(name) else [])
+            resolved_values = []
+            for spec in values:
+                if not isinstance(spec, str) or not spec:
+                    raise ValueError("holdout paths must be nonempty strings")
+                resolved, value = _resource_path(spec, path.parent, name == "corpus")
+                if not resolved.exists():
+                    raise ValueError("a configured holdout input does not exist")
+                resources[split].append((name, resolved))
+                resolved_values.append(value)
+            if values:
+                block[name] = resolved_values if name == "corpus" else resolved_values[0]
+    for left, right in (("train", "valid"), ("train", "test"), ("valid", "test")):
+        if {path for _, path in resources[left]} & {path for _, path in resources[right]}:
+            raise ValueError("train, valid and test must use distinct resolved input paths")
+    if data.get("input_manifest"):
+        manifest_path = (path.parent / data["input_manifest"]).resolve()
+        if not data.get("input_manifest_sha256") or _file_sha256(manifest_path) != data["input_manifest_sha256"]:
+            raise ValueError("holdout input manifest hash mismatch")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        hashes = {}
+        for entry in manifest["files"]:
+            resource = (manifest_path.parent / entry["path"]).resolve()
+            digest = entry["sha256"]
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest) or resource in hashes):
+                raise ValueError("input manifest needs unique paths and lowercase SHA256 values")
+            hashes[resource] = digest
+        signatures = {}
+        for split, entries in resources.items():
+            signatures[split] = set()
+            for name, resource in entries:
+                files = (resource / "tokens.bin", resource / "offsets.npy") if name == "corpus" else (resource,)
+                if any(file not in hashes for file in files):
+                    raise ValueError("holdout input manifest does not cover all selected inputs")
+                # Equal-length corpora can have identical offsets without sharing tokens.
+                kind = "corpus" if name == "corpus" else "jsonl"
+                signatures[split].add((kind, tuple(hashes[file] for file in files)))
+        for left, right in (("train", "valid"), ("train", "test"), ("valid", "test")):
+            if signatures[left] & signatures[right]:
+                raise ValueError("manifest declares identical content across train, valid or test")
+    elif data.get("input_manifest_sha256"):
+        raise ValueError("input_manifest_sha256 requires input_manifest")
+    data["config_sha256"] = _file_sha256(path)
+    return data
+
+
+def _holdout_examples(path, tokenizer, config, limit, seed, pairs=False):
+    """A fixed uniform reservoir of eligible rows, with bounded retained memory."""
+    rng, selected, eligible, seen = random.Random(seed), [], 0, 0
+    for row in read_jsonl(path):
+        seen += 1
+        example = (encode(tokenizer, row["query"]), encode(tokenizer, row["positive"])) if pairs else (
+            encode(tokenizer, chat_prompt_text(row["messages"])), encode(tokenizer, row["response"]))
+        if not (all(example) if pairs else usable_instruction(example, config)):
+            continue
+        eligible += 1
+        if len(selected) < limit:
+            selected.append(example)
+        else:
+            index = rng.randrange(eligible)
+            if index < limit:
+                selected[index] = example
+    return selected, {"source_rows": seen, "eligible_rows": eligible, "selected_pool_rows": len(selected),
+                      "excluded_rows": seen - eligible, "selection": "fixed_uniform_reservoir"}
+
+
+def build_holdouts(data, args, config, tokenizer) -> tuple[HoldoutSet | None, HoldoutSet | None]:
+    if data is None:
+        return None, None
+    sets = []
+    for split in ("valid", "test"):
+        block, batch_size = data[split], data["batch_size"]
+        seed, count = block["seed"], block["batches_per_task"]
+        corpus = open_corpus(block["corpus"]) if block.get("corpus") else None
+        selections = {}
+        if args.stage == "base":
+            tasks, _ = base_stage(corpus, config, batch_size, seed, args.pack_mlm, args.bucket)
+        elif args.stage == "it":
+            require(tokenizer, "--tokenizer for holdout instructions")
+            limit = batch_size * count * (8 if args.bucket else 1)
+            examples, selections["instruction"] = _holdout_examples(block["instructions"], tokenizer, config, limit, seed)
+            reasoning = None
+            if block.get("reasoning"):
+                reasoning, selections["reasoning"] = _holdout_examples(block["reasoning"], tokenizer, config, limit, seed + 1)
+            tasks, _ = instruction_stage(examples, config, batch_size, corpus, reasoning, seed, bucket=args.bucket)
+        else:
+            require(tokenizer, "--tokenizer for holdout pairs")
+            pairs, selections["pairs"] = _holdout_examples(block["pairs"], tokenizer, config, batch_size * count, seed, pairs=True)
+            tasks, _ = embedding_stage(pairs, config, batch_size, seed)
+        for name, selection in selections.items():
+            if name in tasks:
+                tasks[name].options.update(selection)
+        metadata = {"config_sha256": data["config_sha256"],
+                    "input_manifest_sha256": data.get("input_manifest_sha256"),
+                    "exposure_caveats": block.get("exposure_caveats", data.get("exposure_caveats", []))}
+        sets.append(HoldoutSet(tasks, count, seed, block["depth"], metadata))
+    return tuple(sets)
+
+
 def main(argv=None):
     args = parse_args(argv)
+    holdout_config = load_holdout_config(args)
     # Seed before building the model so --seed fully fixes the initial weights.
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -188,6 +359,7 @@ def main(argv=None):
             pairs = [(encode(tokenizer, r["query"]), encode(tokenizer, r["positive"])) for r in progress]
         tasks, mix = embedding_stage(pairs, config, args.batch_size, args.seed)
 
+    validation, test = build_holdouts(holdout_config, args, config, tokenizer)
     peak_lr = args.lr or (3e-4 if args.stage == "base" else 5e-5)
     warmup = args.warmup if args.warmup is not None else max(1, args.steps // 50)
     tensorboard_dir = args.tensorboard_dir
@@ -199,13 +371,14 @@ def main(argv=None):
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None,
                              grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
                              compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa,
-                             save_every_minutes=args.save_every_minutes)
+                             save_every_minutes=args.save_every_minutes,
+                             valid_every=holdout_config["valid_every"] if holdout_config else 0)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)
     print(f"[{args.stage}] {'Restoring state and continuing' if args.resume else 'Starting'} training...", flush=True)
     try:
-        records = train(model, tasks, settings, resume_from=args.resume)
+        records = train(model, tasks, settings, resume_from=args.resume, validation=validation, test=test)
     except TrainingInterrupted as stop:
         print(f"[{args.stage}] stopped on request after step {stop.step}; "
               f"resume with --resume {stop.path}", flush=True)

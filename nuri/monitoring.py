@@ -137,6 +137,18 @@ class TrainingMonitor:
             "performance/steps_per_second": steps_per_second,
             "train/schedule_phase": {"warmup": 0, "stable": 1, "decay": 2}[schedule_phase],
         }
+        objectives = record.get("task_objectives") or {
+            task: {"kind": kind, "metrics": {"loss": record.get("objective_loss", record["loss"]),
+                   **{key: record[key] for key in ("denoise", "length", "fast", "reasoning", "cross_mode")
+                      if key in record}}}}
+        for name, observed in objectives.items():
+            label = name if name in {"mlm", "span", "instruction", "reasoning", "pairs"} else observed["kind"]
+            for key, value in observed["metrics"].items():
+                tag = "objective_loss" if key == "loss" else key
+                scalars[f"train/{label}/{tag}"] = value
+            for key in ("microbatches", "rows", "targets"):
+                if key in observed:
+                    scalars[f"train/{label}/observed_{key}"] = observed[key]
         depth = record["depth"] if kind != "mlm" else 0
         if isinstance(depth, (tuple, list)):
             # An accumulated update can sample several recurrent depths.
@@ -162,3 +174,30 @@ class TrainingMonitor:
         for layer, counts in enumerate(record.get("expert_counts", [])):
             for expert, count in enumerate(counts):
                 self.writer.add_scalar(f"moe/layer_{layer}/expert_{expert}_assignments", count, step)
+
+    def record_holdout(self, report: dict):
+        """Write objective-only holdout curves and numeric assessed coverage."""
+        split, step = report["split"], report["step"]
+        metrics = {f"{split}/{name}": f"{task['metrics']['loss']:.4f}" for name, task in report["tasks"].items()}
+        self.bar.set_postfix(metrics, refresh=False)
+        if self.writer is None:
+            return
+        for key in ("assessed_rows", "assessed_batches", "seconds", "seed", "depth"):
+            self.writer.add_scalar(f"{split}/{key}", report[key], step)
+        # Only fixed diagnostic labels and digests are text, never input text,
+        # source names, arguments or file paths.
+        self.writer.add_text(f"{split}/coverage", report["coverage"], step)
+        self.writer.add_text(f"{split}/policy_sha256", report["policy_sha256"], step)
+        for name, task_report in report["tasks"].items():
+            task = name if name in {"mlm", "span", "instruction", "reasoning", "pairs"} else task_report["kind"]
+            prefix = f"{split}/{task}"
+            for key, value in task_report["metrics"].items():
+                tag = "objective_loss" if key == "loss" else key
+                self.writer.add_scalar(f"{prefix}/{tag}", value, step)
+            for category in ("loss_numerators", "loss_denominators", "counts"):
+                for key, value in task_report[category].items():
+                    self.writer.add_scalar(f"{prefix}/{category}/{key}", value, step)
+            self.writer.add_scalar(f"{prefix}/assessed_batches", task_report["batches"], step)
+            for key in ("batch_sha256", "target_sha256"):
+                self.writer.add_text(f"{prefix}/{key}", task_report[key], step)
+        self.writer.flush()
