@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -25,7 +26,7 @@ from tqdm import tqdm
 
 BLOCK_BYTES = 1024 * 1024
 DEFAULT_BINS = [0.0, 0.25, 0.5, 0.75, 0.8, 0.9, 1.0]
-PLAN_KEYS = {"job", "tokenizer", "train", "eval", "max_input_len", "special_token_ids",
+PLAN_KEYS = {"job", "tokenizer", "train", "eval", "valid", "test", "max_input_len", "special_token_ids",
              "overlap_bins", "selection", "expected_sha256"}
 
 
@@ -98,6 +99,7 @@ def _validate(plan: dict, prepare: bool) -> None:
         raise PreparationError("The job must be a new opaque directory name.")
     if type(plan.get("max_input_len")) is not int or plan["max_input_len"] < 1:
         raise PreparationError("Set a positive max_input_len matching the evaluated model.")
+    _splits(plan)
     edges = plan.get("overlap_bins", DEFAULT_BINS)
     if (not isinstance(edges, list) or len(edges) < 2 or edges[0] != 0 or edges[-1] != 1
             or any(type(edge) not in (int, float) or not math.isfinite(edge) for edge in edges)
@@ -107,7 +109,7 @@ def _validate(plan: dict, prepare: bool) -> None:
     if not isinstance(special, list) or any(type(value) is not int or value < 0 for value in special):
         raise PreparationError("Extra special token IDs must be nonnegative integers.")
     expected = plan.get("expected_sha256", {})
-    if (not isinstance(expected, dict) or set(expected) - {"train", "eval", "tokenizer"}
+    if (not isinstance(expected, dict) or set(expected) - {*_splits(plan), "tokenizer"}
             or any(not isinstance(value, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", value)
                    for value in expected.values())):
         raise PreparationError("Expected input hashes must be SHA256 strings.")
@@ -125,6 +127,14 @@ def _validate(plan: dict, prepare: bool) -> None:
                 or type(policy["min_low_overlap_pairs"]) is not int or policy["min_low_overlap_pairs"] < 1
                 or type(policy["seed"]) is not int):
             raise PreparationError("The cap and seed must be integers; low-overlap support must be positive.")
+
+
+def _splits(plan: dict) -> tuple[str, ...]:
+    if "valid" in plan or "test" in plan:
+        if "eval" in plan or not plan.get("valid") or not plan.get("test"):
+            raise PreparationError("Three-way pair plans need distinct valid/test paths and no legacy eval path.")
+        return "train", "valid", "test"
+    return "train", "eval"
 
 
 def pair_overlap(query: list[int], positive: list[int], max_input_len: int, special_ids: set[int]) -> float | None:
@@ -179,11 +189,26 @@ def _audit(paths: dict, tokenizer, plan: dict, ledger: Path, prepare: bool, prog
     special.update(plan.get("special_token_ids", []))
     if any(index >= tokenizer.get_vocab_size(with_added_tokens=True) for index in special):
         raise PreparationError("A configured special token ID exceeds the tokenizer vocabulary.")
-    counts = {split: _counts(plan.get("overlap_bins", DEFAULT_BINS)) for split in ("train", "eval")}
+    splits = _splits(plan)
+    counts = {split: _counts(plan.get("overlap_bins", DEFAULT_BINS)) for split in splits}
     policy, heap = plan.get("selection"), []
+    # Three-way inputs must already be grouped and deduplicated by preparation.
+    # A disk-backed replay prevents a consumer from accepting a leaking plan.
+    db = sqlite3.connect(ledger.parent / "split-audit.sqlite") if "test" in splits else None
+    if db is not None:
+        db.execute("PRAGMA cache_size=-8192")
+        db.execute("CREATE TABLE seen(digest TEXT PRIMARY KEY,split TEXT)")
     with ledger.open("x", encoding="utf-8") as stream:
-        for split in ("train", "eval"):
+        for split in splits:
             for ordinal, line, row in _rows(paths[split], progress, f"Auditing {split} pairs"):
+                if db is not None:
+                    digest = hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    if db.execute("SELECT 1 FROM seen WHERE digest=?", (digest,)).fetchone():
+                        db.close()
+                        raise PreparationError("Three-way pair inputs contain duplicate or overlapping pairs.")
+                    db.execute("INSERT INTO seen VALUES (?,?)", (digest, split))
+                    if ordinal % 1000 == 0:
+                        db.commit()
                 query = tokenizer.encode(row["query"], add_special_tokens=False).ids
                 positive = tokenizer.encode(row["positive"], add_special_tokens=False).ids
                 score = pair_overlap(query, positive, plan["max_input_len"], special)
@@ -207,6 +232,8 @@ def _audit(paths: dict, tokenizer, plan: dict, ledger: Path, prepare: bool, prog
                         heapq.heappush(heap, candidate)
                     elif candidate > heap[0]:
                         heapq.heapreplace(heap, candidate)
+    if db is not None:
+        db.close()
     return counts, {-ordinal for _, ordinal in heap}, sorted(special)
 
 
@@ -216,11 +243,12 @@ def _selections(ledger: Path):
             yield json.loads(line)
 
 
-def _selection_ledger(audit: Path, output: Path, chosen: set[int], prepare: bool) -> dict:
-    retained = {"train": 0, "eval": 0}
+def _selection_ledger(audit: Path, output: Path, chosen: set[int], prepare: bool,
+                      splits: tuple[str, ...] = ("train", "eval")) -> dict:
+    retained = dict.fromkeys(splits, 0)
     with output.open("x", encoding="utf-8") as stream:
         for item in _selections(audit):
-            keep = item["split"] == "eval" or item["category"] != "high" or item["row"] in chosen
+            keep = item["split"] != "train" or item["category"] != "high" or item["row"] in chosen
             item["selected"] = keep if prepare else None
             if prepare and keep:
                 retained[item["split"]] += 1
@@ -294,13 +322,16 @@ def prepare_pairs(plan: dict, repo: str | Path = ".", *, prepare: bool = False,
     _ignored([private, output] + ([plan_path] if plan_path is not None else []), repo)
     if private.exists() or output.exists():
         raise PreparationError("The immutable job already exists; choose a new job name.")
-    paths = {key: _local_path(plan.get(key), repo) for key in ("train", "eval", "tokenizer")}
+    splits = _splits(plan)
+    paths = {key: _local_path(plan.get(key), repo) for key in (*splits, "tokenizer")}
     if paths["tokenizer"].is_dir():
         paths["tokenizer"] = _local_path(paths["tokenizer"] / "tokenizer.json", repo)
     if any(not path.is_file() for path in paths.values()):
         raise PreparationError("A configured pair input or tokenizer is unavailable.")
-    if paths["train"] == paths["eval"] or os.path.samefile(paths["train"], paths["eval"]):
-        raise PreparationError("Training and evaluation inputs must be distinct files.")
+    for index, left in enumerate(splits):
+        if any(paths[left] == paths[right] or os.path.samefile(paths[left], paths[right])
+               for right in splits[index + 1:]):
+            raise PreparationError("Training and held-out inputs must be distinct files.")
     private.mkdir(parents=True)
     try:
         if prepare:
@@ -320,7 +351,7 @@ def prepare_pairs(plan: dict, repo: str | Path = ".", *, prepare: bool = False,
             if counts["train"]["low_overlap_pairs"] < policy["min_low_overlap_pairs"]:
                 raise PreparationError("Too few low-overlap training pairs meet the configured support requirement.")
         selection = private / "selection.jsonl"
-        retained = _selection_ledger(audit, selection, chosen, prepare)
+        retained = _selection_ledger(audit, selection, chosen, prepare, splits)
         outputs = {}
         if prepare:
             ineligible = counts["train"]["pairs"] - counts["train"]["retrieval_eligible_pairs"]
@@ -329,11 +360,13 @@ def prepare_pairs(plan: dict, repo: str | Path = ".", *, prepare: bool = False,
             actual = _training_view(paths["train"], output / "train.jsonl", selection, progress)
             if actual != retained["train"] or _verify_train(paths["train"], output / "train.jsonl", selection) != actual:
                 raise PreparationError("The derived training row count failed verification.")
-            with paths["eval"].open("rb") as source, (output / "eval.jsonl").open("xb") as destination:
-                shutil.copyfileobj(source, destination, BLOCK_BYTES)
-            outputs = {split: _snapshot(output / f"{split}.jsonl") for split in ("train", "eval")}
-            if outputs["eval"]["sha256"] != snapshots["eval"]["sha256"] or retained["eval"] != counts["eval"]["pairs"]:
-                raise PreparationError("Canonical evaluation preservation failed verification.")
+            for split in splits[1:]:
+                with paths[split].open("rb") as source, (output / f"{split}.jsonl").open("xb") as destination:
+                    shutil.copyfileobj(source, destination, BLOCK_BYTES)
+            outputs = {split: _snapshot(output / f"{split}.jsonl") for split in splits}
+            for split in splits[1:]:
+                if outputs[split]["sha256"] != snapshots[split]["sha256"] or retained[split] != counts[split]["pairs"]:
+                    raise PreparationError("Canonical held-out preservation failed verification.")
         for evidence in snapshots.values():
             if _snapshot(Path(evidence["path"])) != evidence:
                 raise PreparationError("A configured input changed during the job.")
@@ -347,7 +380,9 @@ def prepare_pairs(plan: dict, repo: str | Path = ".", *, prepare: bool = False,
                   "audit_rows_sha256": _hash(audit), "selection_ledger_sha256": _hash(selection),
                   "verification": {"inputs_unchanged": True, "splits_preserved": True,
                                    "train_content_and_order": "passed" if prepare else "not_prepared",
-                                   "eval_byte_identical": True if prepare else "not_prepared"}}
+                                   "eval_byte_identical": True if prepare and "eval" in splits else "not_prepared",
+                                   "heldout_byte_identical": True if prepare else "not_prepared",
+                                   "three_way_duplicates_absent": True if "test" in splits else "not_checked"}}
         _write_json(private / "report.json", report)
         if prepare:
             _write_json(output / "COMPLETE.json", {"schema_version": 1, "status": "complete"})
@@ -386,6 +421,9 @@ def main(argv=None) -> int:
                     "eval": os.environ.get("NURI_EVAL_PAIRS"), "tokenizer": os.environ.get("NURI_TOKENIZER"),
                     "max_input_len": int(os.environ["NURI_PAIR_MAX_INPUT_LEN"])
                     if os.environ.get("NURI_PAIR_MAX_INPUT_LEN") else None}
+            if os.environ.get("NURI_VALID_PAIRS") or os.environ.get("NURI_TEST_PAIRS"):
+                plan.pop("eval")
+                plan.update(valid=os.environ.get("NURI_VALID_PAIRS"), test=os.environ.get("NURI_TEST_PAIRS"))
         if args.job is not None:
             plan["job"] = args.job
         if args.max_input_len is not None:

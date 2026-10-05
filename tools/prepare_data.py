@@ -11,9 +11,11 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
@@ -25,6 +27,7 @@ SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 SAFE_LANG = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}\Z")
 SHA256 = re.compile(r"[a-fA-F0-9]{64}\Z")
 CHUNK_BYTES = 1024 * 1024
+THREE_SPLITS = ("train", "valid", "test")
 
 
 class PreparationError(Exception):
@@ -55,6 +58,17 @@ def _destination(path: Path, root: Path) -> Path:
     return resolved
 
 
+def _ignored_private_outputs(paths: list[Path], repo: Path) -> None:
+    relative = [path.relative_to(repo).as_posix() for path in paths]
+    ignored = subprocess.run(["git", "check-ignore", "--no-index", "-z", "--stdin"], cwd=repo,
+                             input="\0".join(relative) + "\0", text=True, capture_output=True)
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", *relative], cwd=repo,
+                             text=True, capture_output=True)
+    if (ignored.returncode != 0 or set(filter(None, ignored.stdout.split("\0"))) != set(relative)
+            or tracked.returncode != 0 or tracked.stdout):
+        raise PreparationError("Three-way plans and outputs must be ignored and untracked by Git.")
+
+
 def _load_plan(plan_path: Path, repo: Path) -> tuple[dict, Path]:
     private = repo / ".private"
     data = repo / "data"
@@ -70,6 +84,9 @@ def _load_plan(plan_path: Path, repo: Path) -> tuple[dict, Path]:
     if (plan.get("max_chars", 12000) < 1 or plan.get("min_chars", 1) < 1
             or not 0 <= plan.get("eval_fraction", 0.01) <= 1):
         raise PreparationError("Invalid document length or evaluation fraction.")
+    policy = plan.get("split_policy")
+    if policy is not None:
+        _validate_split_policy(policy, repo)
     roots = plan.get("allowed_source_roots")
     inputs = plan.get("inputs")
     if not isinstance(roots, list) or not roots or not isinstance(inputs, list) or not inputs:
@@ -87,7 +104,8 @@ def _load_plan(plan_path: Path, repo: Path) -> tuple[dict, Path]:
         if not isinstance(lang, str) or not SAFE_LANG.fullmatch(lang):
             raise PreparationError("Languages must be safe names.")
         seen.add(identifier)
-        if item.get("kind") not in {"text", "instruction", "pairs"} or item.get("split", "train") not in {"train", "eval"}:
+        allowed_splits = {"train", "eval", "valid", "test"} if policy else {"train", "eval"}
+        if item.get("kind") not in {"text", "instruction", "pairs"} or item.get("split", "train") not in allowed_splits:
             raise PreparationError("Invalid input task or split.")
         source = Path(item["path"])
         source = (source if source.is_absolute() else repo / source).resolve()
@@ -109,8 +127,44 @@ def _load_plan(plan_path: Path, repo: Path) -> tuple[dict, Path]:
             raise PreparationError("Positive pair labels must be a list.")
         if "sha256" in item and (not isinstance(item["sha256"], str) or not SHA256.fullmatch(item["sha256"])):
             raise PreparationError("Invalid expected checksum.")
-        _destination(data / "raw" / f"{identifier}.{item['format']}", data)
+        imported = _destination(data / "raw" / f"{identifier}.{item['format']}", data)
+        if "reuse_raw" in item and type(item["reuse_raw"]) is not bool:
+            raise PreparationError("The immutable raw reuse flag must be boolean.")
+        if item.get("reuse_raw") and (source != imported or "sha256" not in item):
+            raise PreparationError("Raw reuse requires the exact imported path and its expected SHA256.")
     return plan, plan_path
+
+
+def _validate_split_policy(policy: dict, repo: Path) -> None:
+    keys = {"mode", "valid_fraction", "test_fraction", "valid_share", "exposed_eval_rows",
+            "legacy_hashes", "exposure_note"}
+    if not isinstance(policy, dict) or set(policy) - keys:
+        raise PreparationError("Invalid private three-way split policy.")
+    mode = policy.get("mode")
+    required = ("valid_share",) if mode == "preserve_legacy_train" else ("valid_fraction", "test_fraction")
+    if mode not in {"preserve_legacy_train", "three_way"}:
+        raise PreparationError("Choose an explicit three-way split mode.")
+    for key in required:
+        value = policy.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 1:
+            raise PreparationError("Explicit split fractions must be finite and between zero and one.")
+    if mode == "three_way" and policy["valid_fraction"] + policy["test_fraction"] >= 1:
+        raise PreparationError("Validation and test fractions must leave a training population.")
+    if "exposed_eval_rows" in policy:
+        path = _inside(repo / policy["exposed_eval_rows"], repo / ".private")
+        if not path.is_file():
+            raise PreparationError("The private held-out exposure record is unavailable.")
+        policy["exposed_eval_rows"] = str(path)
+    hashes = policy.get("legacy_hashes", {})
+    if not isinstance(hashes, dict):
+        raise PreparationError("Legacy replay hashes must be a private mapping.")
+    for name, value in hashes.items():
+        path = Path(name)
+        if (path.is_absolute() or ".." in path.parts or path.suffix != ".jsonl"
+                or path.stem not in {"train", "eval"} or not isinstance(value, str) or not SHA256.fullmatch(value)):
+            raise PreparationError("Invalid legacy replay hash binding.")
+    if "exposure_note" in policy and not isinstance(policy["exposure_note"], str):
+        raise PreparationError("The exposure caveat must be a private text note.")
 
 
 def _hash_file(path: Path, progress: bool) -> str:
@@ -123,17 +177,19 @@ def _hash_file(path: Path, progress: bool) -> str:
     return digest.hexdigest()
 
 
-def _import(source: Path, destination: Path, expected: str | None, progress: bool) -> dict:
+def _import(source: Path, destination: Path, expected: str | None, progress: bool,
+            reuse_raw: bool = False) -> dict:
     before = source.stat()
     part = destination.with_name(destination.name + ".part")
     created = False
     try:
         if destination.exists():
             stat = destination.stat()
-            if stat.st_nlink > 1 or (stat.st_dev, stat.st_ino) == (before.st_dev, before.st_ino):
+            same = (stat.st_dev, stat.st_ino) == (before.st_dev, before.st_ino)
+            if stat.st_nlink > 1 or same and not reuse_raw:
                 raise PreparationError("Imported files must be independent copies.")
             digest = _hash_file(source, progress)
-            if digest != _hash_file(destination, progress):
+            if not reuse_raw and digest != _hash_file(destination, progress):
                 raise PreparationError("An immutable raw input already exists with different content.")
         else:
             digest_state = hashlib.sha256()
@@ -244,7 +300,7 @@ def _group(row: dict, record: dict, item: dict, seed: int, fraction: float) -> t
     identity = _json([item["namespace"], value])
     key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     sample = hashlib.sha256(_json([seed, identity]).encode("utf-8")).digest()
-    held_out = item.get("split", "train") == "eval" or int.from_bytes(sample[:8], "big") < int(fraction * 2**64)
+    held_out = item.get("split", "train") in {"eval", "valid", "test"} or int.from_bytes(sample[:8], "big") < int(fraction * 2**64)
     return key, held_out
 
 
@@ -267,7 +323,7 @@ def _write_json(path: Path, value: dict) -> None:
     os.replace(part, path)
 
 
-def _write_outputs(db, folder: Path, progress: bool) -> dict:
+def _resolve_holdout(db, progress: bool) -> None:
     # Duplicate content connects groups. Propagate evaluation membership until
     # every connected group agrees, keeping all chunks of a document together.
     with tqdm(desc="Resolving holdout groups", unit="group", disable=not progress) as bar:
@@ -284,13 +340,17 @@ def _write_outputs(db, folder: Path, progress: bool) -> dict:
     db.execute("CREATE INDEX IF NOT EXISTS held_out_group_keys ON groups(key) WHERE held_out=1")
     db.execute("PRAGMA temp.cache_size=-8192")  # Bound the TEMP page cache to about 8 MiB.
     db.execute("CREATE TEMP TABLE output_held_out(digest TEXT PRIMARY KEY) WITHOUT ROWID")
+    db.execute("""INSERT OR IGNORE INTO temp.output_held_out
+        SELECT m.digest FROM groups g INDEXED BY held_out_group_keys
+        CROSS JOIN membership m INDEXED BY member_group ON m.group_key=g.key
+        WHERE g.held_out=1""")
+
+
+def _write_outputs(db, folder: Path, progress: bool) -> dict:
+    _resolve_holdout(db, progress)
     counts, streams = {}, {}
     rows = None
     try:
-        db.execute("""INSERT OR IGNORE INTO temp.output_held_out
-            SELECT m.digest FROM groups g INDEXED BY held_out_group_keys
-            CROSS JOIN membership m INDEXED BY member_group ON m.group_key=g.key
-            WHERE g.held_out=1""")
         rows = db.execute("""SELECT r.kind,r.lang,r.payload,h.digest IS NOT NULL
             FROM records r LEFT JOIN temp.output_held_out h ON h.digest=r.digest
             ORDER BY r.rowid""")
@@ -318,6 +378,160 @@ def _write_outputs(db, folder: Path, progress: bool) -> dict:
     return counts
 
 
+def _components(db, progress: bool) -> None:
+    """Find duplicate-connected held-out groups without keeping a graph in RAM."""
+    db.execute("CREATE TEMP TABLE components(key TEXT PRIMARY KEY, component TEXT) WITHOUT ROWID")
+    db.execute("INSERT INTO components SELECT key,key FROM groups WHERE held_out=1")
+    with tqdm(desc="Connecting held-out documents", unit="group", disable=not progress) as bar:
+        while True:
+            db.execute("""CREATE TEMP TABLE next_components AS
+                SELECT a.group_key AS key,min(c.component) AS component
+                FROM components own CROSS JOIN membership a INDEXED BY member_group ON a.group_key=own.key
+                JOIN membership b ON b.digest=a.digest JOIN components c ON c.key=b.group_key
+                GROUP BY a.group_key""")
+            db.execute("CREATE UNIQUE INDEX next_component_key ON next_components(key)")
+            changed = db.execute("""UPDATE components SET component=(SELECT component FROM next_components n
+                WHERE n.key=components.key) WHERE component<>(SELECT component FROM next_components n
+                WHERE n.key=components.key)""").rowcount
+            db.execute("DROP TABLE next_components")
+            bar.update(changed)
+            if not changed:
+                break
+
+
+def _exposed_groups(db, policy: dict) -> None:
+    db.execute("CREATE TEMP TABLE exposed_components(component TEXT PRIMARY KEY) WITHOUT ROWID")
+    if "exposed_eval_rows" not in policy:
+        return
+    exposure = json.loads(Path(policy["exposed_eval_rows"]).read_text(encoding="utf-8-sig"))
+    if not isinstance(exposure, list):
+        raise PreparationError("Held-out exposure entries must be a private list.")
+    wanted = {}
+    for entry in exposure:
+        if (not isinstance(entry, dict) or set(entry) != {"kind", "lang", "ordinal", "digest"}
+                or entry["kind"] not in {"text", "instruction", "pairs"}
+                or not isinstance(entry["lang"], str) or not SAFE_LANG.fullmatch(entry["lang"])
+                or type(entry["ordinal"]) is not int or entry["ordinal"] < 0
+                or not isinstance(entry["digest"], str) or not SHA256.fullmatch(entry["digest"])):
+            raise PreparationError("Invalid hash-bound held-out exposure entry.")
+        key = (entry["kind"], entry["lang"], entry["ordinal"])
+        if key in wanted:
+            raise PreparationError("Duplicate held-out exposure entry.")
+        wanted[key] = entry["digest"].lower()
+    positions = {}
+    rows = db.execute("""SELECT r.digest,r.kind,r.lang FROM records r
+        JOIN output_held_out h ON h.digest=r.digest ORDER BY r.rowid""")
+    for digest, kind, lang in rows:
+        stream_key = (kind, lang)
+        ordinal = positions.get(stream_key, 0)
+        positions[stream_key] = ordinal + 1
+        expected = wanted.pop((kind, lang, ordinal), None)
+        if expected is not None:
+            if expected != digest:
+                raise PreparationError("A held-out exposure ordinal does not match its bound content.")
+            db.execute("""INSERT OR IGNORE INTO exposed_components SELECT c.component
+                FROM membership m JOIN components c ON c.key=m.group_key WHERE m.digest=?""", (digest,))
+    if wanted:
+        raise PreparationError("A held-out exposure ordinal is outside the reconstructed population.")
+
+
+def _split_components(db, plan: dict) -> None:
+    policy = plan["split_policy"]
+    _exposed_groups(db, policy)
+    db.execute("CREATE TEMP TABLE component_splits(component TEXT PRIMARY KEY,split TEXT) WITHOUT ROWID")
+    conflict = db.execute("""SELECT c.component FROM fixed_splits f JOIN components c ON c.key=f.group_key
+        GROUP BY c.component HAVING count(DISTINCT f.split)>1 LIMIT 1""").fetchone()
+    if conflict:
+        raise PreparationError("Duplicate-connected groups have conflicting explicit held-out splits.")
+    fixed = dict(db.execute("""SELECT c.component,min(f.split) FROM fixed_splits f
+        JOIN components c ON c.key=f.group_key GROUP BY c.component"""))
+    share = (policy["valid_share"] if policy["mode"] == "preserve_legacy_train" else
+             policy["valid_fraction"] / (policy["valid_fraction"] + policy["test_fraction"]))
+    rows = db.execute("SELECT DISTINCT component FROM components ORDER BY component")
+    for (component,) in rows:
+        exposed = db.execute("SELECT 1 FROM exposed_components WHERE component=?", (component,)).fetchone()
+        if exposed and fixed.get(component) == "test":
+            raise PreparationError("An already-consulted group cannot be fixed to test.")
+        sample = hashlib.sha256(_json(["three-way-v1", plan.get("seed", 0), component]).encode()).digest()
+        split = "valid" if int.from_bytes(sample[:8], "big") < int(share * 2**64) else "test"
+        db.execute("INSERT INTO component_splits VALUES (?,?)",
+                   (component, "valid" if exposed else fixed.get(component, split)))
+    db.execute("CREATE TEMP TABLE output_splits(digest TEXT PRIMARY KEY,component TEXT,split TEXT) WITHOUT ROWID")
+    db.execute("""INSERT INTO output_splits SELECT m.digest,min(c.component),min(s.split)
+        FROM components c CROSS JOIN membership m INDEXED BY member_group ON m.group_key=c.key
+        JOIN component_splits s ON s.component=c.component GROUP BY m.digest""")
+
+
+def _relative_output(kind: str, lang: str, split: str) -> Path:
+    return (Path("text", lang, f"{split}.jsonl") if kind == "text" else
+            Path("instructions" if kind == "instruction" else "pairs", f"{split}.jsonl"))
+
+
+def _write_three_outputs(db, folder: Path, private: Path, plan: dict, progress: bool) -> tuple[dict, dict]:
+    _resolve_holdout(db, progress)
+    _components(db, progress)
+    _split_components(db, plan)
+    counts, streams, hashes, file_rows, legacy_hashes = {}, {}, {}, {}, {}
+    populations = list(db.execute("SELECT DISTINCT kind,lang FROM records"))
+    for kind, lang in populations:
+        counts.setdefault(kind, {})[lang] = dict.fromkeys(THREE_SPLITS, 0)
+        for split in THREE_SPLITS:
+            relative = _relative_output(kind, lang, split)
+            if relative not in streams:
+                path = folder / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                streams[relative] = path.with_suffix(".jsonl.part").open("xb")
+                hashes[relative], file_rows[relative] = hashlib.sha256(), 0
+    ledger = private / f"preparation-rows-{plan['job']}.jsonl"
+    groups = private / f"preparation-groups-{plan['job']}.jsonl"
+    try:
+        with ledger.open("x", encoding="utf-8") as evidence:
+            rows = db.execute("""SELECT r.digest,r.kind,r.lang,r.payload,s.component,coalesce(s.split,'train')
+                FROM records r LEFT JOIN output_splits s ON s.digest=r.digest ORDER BY r.rowid""")
+            for digest, kind, lang, payload, component, split in tqdm(
+                    rows, desc="Writing three partitions", unit="record", disable=not progress):
+                relative = _relative_output(kind, lang, split)
+                # Replay the legacy writer's platform line ending when preserving
+                # its byte-bound training corpus; fresh three-way jobs use LF.
+                ending = os.linesep if plan["split_policy"]["mode"] == "preserve_legacy_train" else "\n"
+                raw = (payload + ending).encode("utf-8")
+                streams[relative].write(raw)
+                hashes[relative].update(raw)
+                counts[kind][lang][split] += 1
+                evidence.write(_json({"digest": digest, "kind": kind, "lang": lang, "split": split,
+                                      "ordinal": file_rows[relative], "component": component}) + "\n")
+                file_rows[relative] += 1
+                old_relative = _relative_output(kind, lang, "eval" if component else "train")
+                legacy_hashes.setdefault(old_relative.as_posix(), hashlib.sha256()).update(raw)
+        with groups.open("x", encoding="utf-8") as evidence:
+            for key, component, split in db.execute("""SELECT g.key,c.component,coalesce(s.split,'train')
+                FROM groups g LEFT JOIN components c ON c.key=g.key
+                LEFT JOIN component_splits s ON s.component=c.component ORDER BY g.key"""):
+                evidence.write(_json({"group": key, "component": component, "split": split}) + "\n")
+    finally:
+        for stream in streams.values():
+            stream.close()
+    replay = {name: digest.hexdigest() for name, digest in legacy_hashes.items()}
+    for name, expected in plan["split_policy"].get("legacy_hashes", {}).items():
+        if replay.get(name) != expected.lower():
+            raise PreparationError("Reconstructed legacy partition bytes do not match the private binding.")
+    manifest = {"format_version": 1, "status": "complete", "split_policy": plan["split_policy"],
+                "splits": {split: {} for split in THREE_SPLITS}, "legacy_replay_sha256": replay,
+                "row_assignments": str(ledger), "group_assignments": str(groups), "files": []}
+    for relative in streams:
+        path = folder / relative
+        os.replace(path.with_suffix(".jsonl.part"), path)
+        entry = {"path": str(path), "bytes": path.stat().st_size, "sha256": hashes[relative].hexdigest(),
+                 "rows": file_rows[relative]}
+        manifest["files"].append({key: entry[key] for key in ("path", "bytes", "sha256")})
+        split = relative.stem
+        if relative.parts[0] == "text":
+            manifest["splits"][split].setdefault("text", {})[relative.parts[1]] = entry
+        else:
+            manifest["splits"][split][relative.parts[0]] = entry
+    return counts, manifest
+
+
 def prepare(plan_path: str | Path, repo: str | Path = ".", progress: bool = True) -> dict:
     """Prepare one immutable job; returns only public task/language counters."""
     repo = Path(repo).resolve()
@@ -328,7 +542,14 @@ def prepare(plan_path: str | Path, repo: str | Path = ".", progress: bool = True
         data = repo / "data"
         folder = _destination(data / "prepared" / plan["job"], data)
         report_path = _destination(repo / ".private" / f"preparation-report-{plan['job']}.json", repo / ".private")
-        if folder.exists() or report_path.exists():
+        consumption_path = repo / ".private" / f"preparation-consumption-{plan['job']}.json"
+        evidence_paths = [consumption_path, *(repo / ".private" / f"preparation-{name}-{plan['job']}.jsonl"
+                                              for name in ("rows", "groups"))]
+        if "split_policy" in plan:
+            exposure = plan["split_policy"].get("exposed_eval_rows")
+            _ignored_private_outputs([resolved_plan, folder, report_path, *evidence_paths]
+                                     + ([Path(exposure)] if exposure else []), repo)
+        if folder.exists() or report_path.exists() or any(path.exists() for path in evidence_paths):
             raise PreparationError("An existing preparation job cannot be overwritten.")
         raw = _destination(data / "raw", data)
         raw.mkdir(parents=True, exist_ok=True)
@@ -341,14 +562,16 @@ def prepare(plan_path: str | Path, repo: str | Path = ".", progress: bool = True
                 CREATE TABLE groups(key TEXT PRIMARY KEY, held_out INTEGER);
                 CREATE TABLE membership(digest TEXT, group_key TEXT, PRIMARY KEY(digest,group_key));
                 CREATE INDEX member_group ON membership(group_key);""")
+            db.execute("CREATE TABLE fixed_splits(group_key TEXT,split TEXT,PRIMARY KEY(group_key,split))")
             try:
-                ordered = sorted(plan["inputs"], key=lambda item: item.get("split", "train") != "eval")
+                ordered = sorted(plan["inputs"], key=lambda item: item.get("split", "train") == "train")
                 for item in ordered:
                     stats = {"id": item["id"], "path": item["path"], "rows": 0, "accepted": 0,
                              "dropped": 0, "malformed": 0, "duplicates": 0, "chunks": 0}
                     report["inputs"].append(stats)
                     imported = raw / f"{item['id']}.{item['format']}"
-                    stats.update(_import(Path(item["path"]), imported, item.get("sha256"), progress))
+                    stats.update(_import(Path(item["path"]), imported, item.get("sha256"), progress,
+                                         item.get("reuse_raw", False)))
                     for row in tqdm(_rows(imported, item["format"]), desc="Normalizing local input", unit="record",
                                     disable=not progress):
                         stats["rows"] += 1
@@ -364,12 +587,16 @@ def prepare(plan_path: str | Path, repo: str | Path = ".", progress: bool = True
                                 raise InvalidRecord
                             if item["kind"] == "text" and len(record["text"]) < plan.get("min_chars", 1):
                                 raise InvalidRecord
-                            group, held_out = _group(row, record, item, plan.get("seed", 0),
-                                                     plan.get("eval_fraction", 0.01))
+                            policy = plan.get("split_policy", {})
+                            fraction = (policy["valid_fraction"] + policy["test_fraction"]
+                                        if policy.get("mode") == "three_way" else plan.get("eval_fraction", 0.01))
+                            group, held_out = _group(row, record, item, plan.get("seed", 0), fraction)
                         except (InvalidRecord, TypeError):
                             stats["dropped"] += 1
                             continue
                         stats["accepted"] += 1
+                        if item.get("split") in {"valid", "test"}:
+                            db.execute("INSERT OR IGNORE INTO fixed_splits VALUES (?,?)", (group, item["split"]))
                         if item["kind"] == "text":
                             text = record["text"]
                             records = ({"text": text[start:start + plan.get("max_chars", 12000)], "lang": item["lang"]}
@@ -381,22 +608,30 @@ def prepare(plan_path: str | Path, repo: str | Path = ".", progress: bool = True
                             if not _stage(db, normalized, item, group, held_out):
                                 stats["duplicates"] += 1
                     db.commit()
-                counts = _write_outputs(db, folder, progress)
+                if "split_policy" in plan:
+                    counts, consumption = _write_three_outputs(db, folder, repo / ".private", plan, progress)
+                    _write_json(consumption_path, consumption)
+                    report["consumption_manifest"] = str(consumption_path)
+                else:
+                    counts = _write_outputs(db, folder, progress)
                 db.commit()
                 report.update(status="prepared", counts=counts)
                 _write_json(report_path, report)
-            except Exception:
+                _write_json(folder / "COMPLETE.json", {"status": "complete", "counts": counts})
+            except (Exception, KeyboardInterrupt):
+                (folder / "COMPLETE.json").unlink(missing_ok=True)
+                consumption_path.unlink(missing_ok=True)
                 report["status"] = "failed"
-                if not report_path.exists():
-                    _write_json(report_path, report)
+                _write_json(report_path, report)
                 raise
         database.unlink()
-        _write_json(folder / "COMPLETE.json", {"status": "complete", "counts": counts})
         return counts
     except PreparationError:
         raise
     except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, csv.Error):
         raise PreparationError("Private preparation failed; inspect the local plan and report.") from None
+    except KeyboardInterrupt:
+        raise PreparationError("Private preparation was cancelled; partial evidence was preserved.") from None
 
 
 def main(argv: list[str] | None = None) -> int:

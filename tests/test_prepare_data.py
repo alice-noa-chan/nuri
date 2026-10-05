@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ SPEC.loader.exec_module(prepare_data)
 def workspace(tmp_path):
     repo, source = tmp_path / "repo", tmp_path / "originals"
     (repo / ".private").mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+    (repo / ".gitignore").write_text("/data/\n/.private/\n", encoding="utf-8")
     source.mkdir()
     return repo, source
 
@@ -354,3 +357,122 @@ def test_cli_outputs_only_counts_and_generic_errors(workspace, capsys):
     assert "private-synthetic-name" not in failure.out + failure.err
     assert "input01" not in output.out + failure.err
     assert "Private synthetic content" not in output.out + failure.err
+
+
+def test_three_splits_preserve_training_and_keep_document_chunks_together(workspace):
+    repo, source = workspace
+    original = source / "documents.jsonl"
+    jsonl(original, [{"text": f"{index:03d}abcdef{index:03d}ghijkl{index:03d}mnopqr", "group": f"g{index}"}
+                     for index in range(80)])
+    inputs = [item(original, group_field="group")]
+    legacy = plan_file(workspace, inputs, eval_fraction=0.35, max_chars=9)
+    prepare(workspace, legacy)
+    old = repo / "data/prepared/job01/text/en"
+    hashes = {f"text/en/{split}.jsonl": hashlib.sha256((old / f"{split}.jsonl").read_bytes()).hexdigest()
+              for split in ("train", "eval")}
+    path = plan_file(workspace, inputs, job="three01", eval_fraction=0.35, max_chars=9,
+                     split_policy={"mode": "preserve_legacy_train", "valid_share": 0.5, "legacy_hashes": hashes})
+    counts = prepare(workspace, path)
+    new = repo / "data/prepared/three01/text/en"
+    assert (new / "train.jsonl").read_bytes() == (old / "train.jsonl").read_bytes()
+    assert counts["text"]["en"]["valid"] > 0 and counts["text"]["en"]["test"] > 0
+    heldout = records(new / "valid.jsonl") + records(new / "test.jsonl")
+    assert sorted(map(str, heldout)) == sorted(map(str, records(old / "eval.jsonl")))
+    ledger = records(repo / ".private/preparation-groups-three01.jsonl")
+    assert len({row["group"] for row in ledger}) == 80
+    path = plan_file(workspace, inputs, job="three02", eval_fraction=0.35, max_chars=9,
+                     split_policy={"mode": "preserve_legacy_train", "valid_share": 0.5})
+    prepare(workspace, path)
+    for split in ("train", "valid", "test"):
+        assert (new / f"{split}.jsonl").read_bytes() == (repo / f"data/prepared/three02/text/en/{split}.jsonl").read_bytes()
+    manifest = json.loads((repo / ".private/preparation-consumption-three01.json").read_text())
+    assert set(manifest["splits"]) == {"train", "valid", "test"}
+    assert len(manifest["files"]) == 3
+
+
+def test_consulted_chunk_forces_whole_duplicate_component_into_validation(workspace):
+    repo, source = workspace
+    original = source / "documents.jsonl"
+    # A shared chunk connects two original groups; both must stay together.
+    jsonl(original, [{"text": "sameAAAA", "group": "a"}, {"text": "sameBBBB", "group": "b"},
+                     {"text": "otherCCC", "group": "c"}])
+    exposure = repo / ".private/exposed.json"
+    digest = hashlib.sha256(prepare_data._json(["text", {"text": "same"}]).encode()).hexdigest()
+    exposure.write_text(json.dumps([{"kind": "text", "lang": "en", "ordinal": 0, "digest": digest}]))
+    path = plan_file(workspace, [item(original, split="eval", group_field="group")], max_chars=4,
+                     split_policy={"mode": "preserve_legacy_train", "valid_share": 0.5,
+                                   "exposed_eval_rows": str(exposure)})
+    prepare(workspace, path)
+    valid = records(repo / "data/prepared/job01/text/en/valid.jsonl")
+    assert {"same", "AAAA", "BBBB"}.issubset({row["text"] for row in valid})
+    assert not ({"same", "AAAA", "BBBB"} & {row["text"] for row in records(repo / "data/prepared/job01/text/en/test.jsonl")})
+
+
+@pytest.mark.parametrize("failure", ["conflict", "wrong_exposure", "legacy_hash"])
+def test_three_way_rejects_conflicts_and_invalid_replay(workspace, failure):
+    repo, source = workspace
+    left, right = source / "left.jsonl", source / "right.jsonl"
+    jsonl(left, [{"text": "same content"}])
+    jsonl(right, [{"text": "same content"}])
+    inputs = [item(left, split="valid"), item(right, "input02", split="test")]
+    policy = {"mode": "preserve_legacy_train", "valid_share": 0.5}
+    if failure != "conflict":
+        inputs = [item(left, split="eval")]
+    if failure == "wrong_exposure":
+        path = repo / ".private/exposed.json"
+        path.write_text(json.dumps([{"kind": "text", "lang": "en", "ordinal": 0, "digest": "0" * 64}]))
+        policy["exposed_eval_rows"] = str(path)
+    if failure == "legacy_hash":
+        policy["legacy_hashes"] = {"text/en/eval.jsonl": "0" * 64}
+    with pytest.raises(prepare_data.PreparationError):
+        prepare(workspace, plan_file(workspace, inputs, split_policy=policy))
+    assert not (repo / "data/prepared/job01/COMPLETE.json").exists()
+    assert not (repo / ".private/preparation-consumption-job01.json").exists()
+
+
+def test_fresh_three_way_policy_and_interrupted_completion(workspace, monkeypatch):
+    repo, source = workspace
+    original = source / "documents.jsonl"
+    jsonl(original, [{"text": f"Unique document {index}"} for index in range(60)])
+    path = plan_file(workspace, [item(original)], split_policy={"mode": "three_way", "valid_fraction": 0.2,
+                                                              "test_fraction": 0.2})
+    write = prepare_data._write_json
+
+    def interrupted(path, value):
+        write(path, value)
+        if path.name == "COMPLETE.json":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(prepare_data, "_write_json", interrupted)
+    with pytest.raises(prepare_data.PreparationError, match="cancelled"):
+        prepare(workspace, path)
+    assert not (repo / "data/prepared/job01/COMPLETE.json").exists()
+    assert not (repo / ".private/preparation-consumption-job01.json").exists()
+    assert json.loads((repo / ".private/preparation-report-job01.json").read_text())["status"] == "failed"
+
+
+def test_explicit_immutable_raw_reuse_does_not_copy_or_mutate(workspace):
+    repo, source = workspace
+    original = source / "input.jsonl"
+    jsonl(original, [{"text": "A complete original document"}])
+    prepare(workspace, plan_file(workspace, [item(original)]))
+    raw = repo / "data/raw/input01.jsonl"
+    before = raw.read_bytes(), raw.stat().st_mtime_ns
+    path = plan_file(workspace, [item(raw, reuse_raw=True, sha256=hashlib.sha256(before[0]).hexdigest())],
+                     job="reused", allowed_source_roots=[str(repo / "data/raw")])
+    prepare(workspace, path)
+    assert (raw.read_bytes(), raw.stat().st_mtime_ns) == before
+    assert (repo / "data/prepared/reused/text/en/train.jsonl").read_bytes() == (
+        repo / "data/prepared/job01/text/en/train.jsonl").read_bytes()
+
+
+def test_three_way_private_plan_must_be_ignored_and_untracked(workspace):
+    repo, source = workspace
+    original = source / "input.jsonl"
+    jsonl(original, [{"text": "A complete original document"}])
+    path = plan_file(workspace, [item(original)], split_policy={"mode": "three_way", "valid_fraction": 0.1,
+                                                              "test_fraction": 0.1})
+    subprocess.run(["git", "add", "-f", str(path)], cwd=repo, check=True)
+    with pytest.raises(prepare_data.PreparationError, match="ignored and untracked"):
+        prepare(workspace, path)
+    assert not (repo / "data").exists()

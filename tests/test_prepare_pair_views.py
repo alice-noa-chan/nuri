@@ -74,6 +74,50 @@ def selected_rows(workspace, job):
             if item["split"] == "train" and item["selected"]]
 
 
+def test_three_way_cap_keeps_validation_and_test_byte_identical(workspace):
+    repo, inputs = workspace
+    write_rows(inputs / "valid.jsonl", [pair("w4", "w4")])
+    write_rows(inputs / "test.jsonl", [pair("w5", "w5")])
+    value = plan(workspace, valid=str(inputs / "valid.jsonl"), test=str(inputs / "test.jsonl"), selection=policy())
+    del value["eval"]
+    report = tool.prepare_pairs(value, repo, prepare=True, progress=False)
+    assert set(report["counts"]) == {"train", "valid", "test"}
+    for split in ("valid", "test"):
+        assert (output_files(workspace) / f"{split}.jsonl").read_bytes() == (inputs / f"{split}.jsonl").read_bytes()
+        assert report["retained_pairs"][split] == 1
+    assert report["verification"]["three_way_duplicates_absent"] is True
+
+
+@pytest.mark.parametrize("duplicate_split", ["train", "valid", "test"])
+def test_three_way_pair_audit_rejects_duplicate_content(workspace, duplicate_split):
+    repo, inputs = workspace
+    write_rows(inputs / "valid.jsonl", [pair("w4", "w4")])
+    write_rows(inputs / "test.jsonl", [pair("w5", "w5")])
+    value = plan(workspace, valid=str(inputs / "valid.jsonl"), test=str(inputs / "test.jsonl"))
+    del value["eval"]
+    path = inputs / f"{duplicate_split}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(pair("w0", "w1")) + "\n")
+    with pytest.raises(tool.PreparationError, match="duplicate or overlapping"):
+        tool.prepare_pairs(value, repo, progress=False)
+    assert not (private_files(workspace) / "COMPLETE.json").exists()
+
+
+def test_three_way_pair_environment_paths_are_explicit(workspace, monkeypatch, capsys):
+    repo, inputs = workspace
+    write_rows(inputs / "valid.jsonl", [pair("w4", "w4")])
+    write_rows(inputs / "test.jsonl", [pair("w5", "w5")])
+    for name, value in {"NURI_PAIR_VIEW_JOB": "env01", "NURI_PAIR_DATA": str(inputs / "train.jsonl"),
+                        "NURI_VALID_PAIRS": str(inputs / "valid.jsonl"), "NURI_TEST_PAIRS": str(inputs / "test.jsonl"),
+                        "NURI_TOKENIZER": str(inputs / "tokenizer.json"), "NURI_PAIR_MAX_INPUT_LEN": "2"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NURI_PAIR_VIEW_PLAN", raising=False)
+    assert tool.main(["--repo", str(repo), "--no-progress"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "complete", "mode": "audit"}
+    report = json.loads((private_files(workspace, "env01") / "report.json").read_text())
+    assert set(report["counts"]) == {"train", "valid", "test"}
+
+
 def test_audit_only_is_default_and_binds_private_evidence(workspace):
     repo, inputs = workspace
     before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in inputs.iterdir()}
