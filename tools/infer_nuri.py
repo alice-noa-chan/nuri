@@ -77,6 +77,7 @@ def infer(
     rounds: int | None = None,
     canvas_len: int | None = None,
     max_len: int | None = None,
+    block_size: int | None = None,
     mode: str = "fast",
     dim: int | None = None,
 ) -> dict:
@@ -84,9 +85,12 @@ def infer(
         raise ValueError("task must be generate or embed")
     if chat and task != "generate":
         raise ValueError("Chat formatting applies only to generation")
+    if block_size is not None and task != "generate":
+        raise ValueError("block_size applies only to generation")
     if steps is not None and steps < 0:
         raise ValueError("Reasoning steps must be nonnegative")
-    for name, value in (("rounds", rounds), ("canvas_len", canvas_len), ("max_len", max_len)):
+    for name, value in (("rounds", rounds), ("canvas_len", canvas_len), ("max_len", max_len),
+                        ("block_size", block_size)):
         if value is not None and value < 1:
             raise ValueError(f"{name} must be positive")
     if dim is not None and not 1 <= dim <= model.config.embed_dim:
@@ -98,7 +102,8 @@ def infer(
         vectors = model.embed(ids, valid, mode=mode, steps=steps, dim=dim)
         result.update(mode=mode, dimension=vectors.shape[1], embeddings=vectors.float().cpu().tolist())
     else:
-        generated = generate(model, ids, valid, steps=steps, rounds=rounds, canvas_len=canvas_len, max_len=max_len)
+        generated = generate(model, ids, valid, steps=steps, rounds=rounds, canvas_len=canvas_len,
+                             max_len=max_len, block_size=block_size)
         result.update(
             answers=tokenizer.decode_batch(generated.tokens, skip_special_tokens=True),
             token_ids=generated.tokens,
@@ -106,6 +111,8 @@ def infer(
             ended_with_eos=generated.ended_with_eos,
             reasoning_steps=model.config.default_depth if steps is None else steps,
             refinement_rounds=model.config.refine_rounds if rounds is None else rounds,
+            block_size=block_size,
+            readout_calls=generated.readout_calls,
         )
     return result
 
@@ -119,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chat", action="store_true", help="Format each text as a user turn for an IT checkpoint")
     parser.add_argument("--truncate", action="store_true", help="Keep the last input tokens for chat, first tokens otherwise")
     parser.add_argument("--steps", type=int, help="Reasoning depth T")
-    parser.add_argument("--rounds", type=int, help="Refinement rounds S")
+    parser.add_argument("--rounds", type=int, help="Refinement rounds S per block (whole canvas by default)")
+    parser.add_argument("--block-size", type=int, help="Opt-in left-to-right block width; earlier blocks stay fixed")
     parser.add_argument("--canvas-len", type=int, help="Explicit canvas length; required for a base checkpoint")
     parser.add_argument("--max-len", type=int, help="Upper bound for output length")
     parser.add_argument("--mode", choices=["fast", "reasoning"], default="fast")
@@ -136,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     result = infer(
         model, tokenizer, args.text, task=args.task, chat=args.chat, truncate=args.truncate,
         steps=args.steps, rounds=args.rounds, canvas_len=args.canvas_len, max_len=args.max_len,
+        block_size=args.block_size,
         mode=args.mode, dim=args.dim,
     )
     output = json.dumps(result, ensure_ascii=False, indent=2) + "\n"

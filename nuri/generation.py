@@ -3,7 +3,8 @@
 By default X and R are computed once per request. Each round fills every MASK position
 in parallel, then re-masks the least confident positions. After the last
 round the answer is cut at the first EOS. Optional draft feedback recomputes
-R from the current corrupted canvas before each round.
+R from the current corrupted canvas before each round. Opt-in blockwise
+refinement freezes completed blocks and leaves future blocks masked.
 """
 
 from __future__ import annotations
@@ -23,8 +24,9 @@ class GenerationResult:
     canvas: torch.Tensor             # final canvas [B, L] (padding = pad_id)
     lengths: torch.Tensor            # canvas length used for each sample
     ended_with_eos: list[bool]       # False means the model never wrote EOS
-    history: list[torch.Tensor] = field(default_factory=list)  # canvas after each round
+    history: list[torch.Tensor] = field(default_factory=list)  # canvas after each round, in block order
     reasoning_steps: torch.Tensor | None = None  # total core steps per sample, including feedback calls
+    readout_calls: int = 0           # actual batched readout forwards, including all blocks
 
 
 @torch.no_grad()
@@ -33,11 +35,12 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
              max_len: int | None = None, keep_history: bool = False,
              transform_r: Callable[[torch.Tensor], torch.Tensor] | None = None,
              temperature: float = 0.0, top_k: int | None = None,
-             generator: torch.Generator | None = None, halt_tol: float | None = None) -> GenerationResult:
+             generator: torch.Generator | None = None, halt_tol: float | None = None,
+             block_size: int | None = None) -> GenerationResult:
     """Greedy refinement generation.
 
     steps: reasoning depth T (config default if None).
-    rounds: refinement rounds S (config default if None).
+    rounds: refinement rounds S per block (config default if None).
     canvas_len: an int or a [B] tensor of output lengths including EOS. Base
         models must pass it; instruction-tuned models may omit it and use the
         length head.
@@ -55,6 +58,11 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
         RecurrentReasoningCore); `steps` becomes an upper bound and
         result.reasoning_steps sums what each sample used across all core
         calls, including the initial draft-free call and any feedback rounds.
+    block_size: optional positive number of canvas positions per block.
+        None refines the entire canvas together. Smaller blocks run left to
+        right, freeze completed blocks and leave future blocks MASK. The
+        readout still attends to the full valid canvas on every call. X/R
+        and their memory cache stay fixed; draft_feedback is incompatible.
     """
     config = model.config
     steps = config.default_depth if steps is None else steps
@@ -62,6 +70,10 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     max_len = config.max_response_len if max_len is None else max_len
     _check_positive_int(rounds, "rounds")
     _check_positive_int(max_len, "max_len")
+    if block_size is not None:
+        _check_positive_int(block_size, "block_size")
+        if config.draft_feedback:
+            raise ValueError("block_size cannot be combined with draft_feedback; blockwise generation uses fixed X/R")
     if temperature < 0:
         raise ValueError("temperature must be >= 0")
     if top_k is not None:
@@ -88,41 +100,48 @@ def generate(model: NuriModel, input_ids: torch.Tensor, attention_mask: torch.Te
     canvas[~canvas_valid] = config.pad_id
     confidence = torch.zeros(batch, width, device=input_ids.device)
     history = []
+    readout_calls = 0
 
-    for round_index in range(1, rounds + 1):
-        masked = (canvas == config.mask_id) & canvas_valid
-        if draft_feedback:  # experimental: R re-reads the current draft every round
-            reason_kwargs = {"draft": (canvas, canvas_valid)}
-            if halt_tol is not None:
-                reason_kwargs["halt_tol"] = halt_tol
-            r = model.reason(x, valid, steps, **reason_kwargs)
-            used = model.core.last_steps_used
-            reasoning_steps = reasoning_steps + used if reasoning_steps is not None and used is not None else None
-            if transform_r is not None:
-                r = transform_r(r)
-            cache = model.generation_memory(x, valid, r)
-        hidden = model.readout_hidden(canvas, canvas_valid, cache)
-        logits = model.vocab_logits(hidden[masked]).float()
-        # MASK and PAD are not words; never write them into the answer.
-        logits[:, [config.mask_id, config.pad_id]] = float("-inf")
-        probs = logits.softmax(dim=-1)
-        best_token = _pick_tokens(logits, temperature, top_k, generator)
-        best_prob = probs.gather(1, best_token[:, None]).squeeze(1)
-        canvas[masked] = best_token
-        # A token keeps the confidence it had when it was predicted from MASK;
-        # we never re-score a visible token that can see itself.
-        confidence[masked] = best_prob
-        if round_index < rounds:
-            _remask_least_confident(canvas, confidence, canvas_valid, lengths, round_index, rounds, config.mask_id)
-        if keep_history:
-            history.append(canvas.clone())
+    block_width = width if block_size is None else min(block_size, width)
+    for start in range(0, width, block_width):
+        active_valid = canvas_valid & (positions >= start) & (positions < start + block_width)
+        active_lengths = active_valid.sum(dim=1)
+        for round_index in range(1, rounds + 1):
+            masked = (canvas == config.mask_id) & active_valid
+            if draft_feedback:  # experimental: R re-reads the current draft every round
+                reason_kwargs = {"draft": (canvas, canvas_valid)}
+                if halt_tol is not None:
+                    reason_kwargs["halt_tol"] = halt_tol
+                r = model.reason(x, valid, steps, **reason_kwargs)
+                used = model.core.last_steps_used
+                reasoning_steps = reasoning_steps + used if reasoning_steps is not None and used is not None else None
+                if transform_r is not None:
+                    r = transform_r(r)
+                cache = model.generation_memory(x, valid, r)
+            hidden = model.readout_hidden(canvas, canvas_valid, cache)
+            readout_calls += 1
+            logits = model.vocab_logits(hidden[masked]).float()
+            # MASK and PAD are not words; never write them into the answer.
+            logits[:, [config.mask_id, config.pad_id]] = float("-inf")
+            probs = logits.softmax(dim=-1)
+            best_token = _pick_tokens(logits, temperature, top_k, generator)
+            best_prob = probs.gather(1, best_token[:, None]).squeeze(1)
+            canvas[masked] = best_token
+            # A token keeps the confidence it had when it was predicted from MASK;
+            # we never re-score a visible token that can see itself.
+            confidence[masked] = best_prob
+            if round_index < rounds:
+                _remask_least_confident(canvas, confidence, active_valid, active_lengths,
+                                       round_index, rounds, config.mask_id)
+            if keep_history:
+                history.append(canvas.clone())
 
     tokens, ended = [], []
     for row in range(batch):
         answer = canvas[row, :int(lengths[row])].tolist()
         ended.append(config.eos_id in answer)
         tokens.append(answer[:answer.index(config.eos_id)] if config.eos_id in answer else answer)
-    return GenerationResult(tokens, canvas, lengths, ended, history, reasoning_steps)
+    return GenerationResult(tokens, canvas, lengths, ended, history, reasoning_steps, readout_calls)
 
 
 def _pick_tokens(logits: torch.Tensor, temperature: float, top_k: int | None, generator) -> torch.Tensor:
