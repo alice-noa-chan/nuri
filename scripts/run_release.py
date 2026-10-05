@@ -45,7 +45,7 @@ PYTHON = sys.executable
 # Plan keys passed straight through to scripts/train.py as --flags.
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
                "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes",
-               "holdout_config", "valid_every")
+               "holdout_config", "valid_every", "stop_after_completed_steps")
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
@@ -65,8 +65,8 @@ def validate_holdout_settings(plan: dict) -> None:
     Here we reject malformed plan values before any subprocess or output is
     created. Zero is a valid completion-only validation interval.
     """
-    if any(key in plan.get("train", {}) for key in ("holdout_config", "valid_every")):
-        raise ValueError("holdout_config and valid_every must be set per stage")
+    if any(key in plan.get("train", {}) for key in ("holdout_config", "valid_every", "stop_after_completed_steps")):
+        raise ValueError("holdout_config, valid_every and stop_after_completed_steps must be set per stage")
     for name, spec in plan["stages"].items():
         if "holdout_config" in spec:
             config = spec["holdout_config"]
@@ -78,6 +78,10 @@ def validate_holdout_settings(plan: dict) -> None:
                 raise ValueError(f"{name}: valid_every must be an integer >= 0")
             if not spec.get("holdout_config"):
                 raise ValueError(f"{name}: valid_every requires an explicit holdout_config")
+        if "stop_after_completed_steps" in spec:
+            boundary, steps = spec["stop_after_completed_steps"], spec.get("steps")
+            if type(boundary) is not int or type(steps) is not int or not 0 < boundary < steps:
+                raise ValueError(f"{name}: stop_after_completed_steps must be an integer between 1 and steps - 1")
 
 
 def newest_state(stage_dir: Path) -> Path | None:

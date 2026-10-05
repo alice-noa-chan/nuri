@@ -149,6 +149,89 @@ def test_holdout_plan_requires_stage_values_instead_of_ignored_defaults(tmp_path
         load_script().main([str(plan_path), "--dry-run"])
 
 
+def test_stage_boundary_reaches_train_command_without_shortening_schedule(tmp_path, capsys):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["stages"]["base"]["stop_after_completed_steps"] = 1
+    plan_path.write_text(json.dumps(plan))
+    load_script().main([str(plan_path), "--dry-run"])
+    line = next(line for line in capsys.readouterr().out.splitlines() if "train.py --stage base" in line)
+    assert "--steps 4" in line and "--stop-after-completed-steps 1" in line
+    assert "stop_after_completed_steps" not in plan["stages"]["it"]
+
+
+@pytest.mark.parametrize("boundary", [None, 0, -1, True, 1.5, "1", 4, 5])
+def test_invalid_stage_boundary_fails_before_launch(tmp_path, monkeypatch, boundary):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["stages"]["base"]["stop_after_completed_steps"] = boundary
+    plan_path.write_text(json.dumps(plan))
+    runner = load_script()
+    monkeypatch.setattr(runner, "run", lambda *_: pytest.fail("invalid boundary must fail before launching"))
+    with pytest.raises(ValueError, match="stop_after_completed_steps"):
+        runner.main([str(plan_path)])
+    assert not (tmp_path / "runs").exists()
+
+
+def test_stage_boundary_requires_explicit_steps_and_per_stage_value(tmp_path):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["train"] = {"stop_after_completed_steps": 1}
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="per stage"):
+        load_script().main([str(plan_path), "--dry-run"])
+    plan.pop("train")
+    plan["stages"]["base"].pop("steps")
+    plan["stages"]["base"]["stop_after_completed_steps"] = 1
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="stop_after_completed_steps"):
+        load_script().main([str(plan_path), "--dry-run"])
+
+
+def test_actual_stage_boundary_stops_before_holdouts_and_resumes_full_stage(tmp_path, monkeypatch):
+    import torch
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.setenv("MKL_NUM_THREADS", "2")
+    plan_path = make_plan(tmp_path)
+    write_corpus(tmp_path / "valid-corpus", [[20 + (i + j) % 20 for j in range(20)] for i in range(8)])
+    write_corpus(tmp_path / "test-corpus", [[50 + (i + j) % 20 for j in range(20)] for i in range(8)])
+    holdout = {"schema_version": 1, "batch_size": 2,
+               "valid": {"corpus": ["valid-corpus"], "batches_per_task": 1, "seed": 4, "depth": 2},
+               "test": {"corpus": ["test-corpus"], "batches_per_task": 1, "seed": 5, "depth": 2}}
+    holdout_path = tmp_path / "base-holdout.json"
+    holdout_path.write_text(json.dumps(holdout))
+    plan = json.loads(plan_path.read_text())
+    plan["stages"] = {"base": plan["stages"]["base"]}
+    plan["stages"]["base"].update(steps=4, warmup=1, stop_after_completed_steps=1,
+                                  holdout_config=str(holdout_path), valid_every=1)
+    plan_path.write_text(json.dumps(plan))
+    runner = load_script()
+    with pytest.raises(SystemExit) as stopped:
+        runner.main([str(plan_path)])
+    assert stopped.value.code == 75
+    stage_dir = tmp_path / "runs" / "base"
+    state = torch.load(stage_dir / "training_state" / "latest.pt", map_location="cpu", weights_only=False)
+    assert state["step"] == 1 and state["extra"]["settings"]["total_steps"] == 4
+    assert state["extra"]["settings"]["warmup_steps"] == 1
+    assert not (stage_dir / "final").exists() and not (stage_dir / "holdout_log.jsonl").exists()
+    assert not (tmp_path / "runs" / "eval" / "base.json").exists()
+    assert not (tmp_path / "runs" / "release" / "tiny-base").exists()
+    first = (stage_dir / "train_log.jsonl").read_bytes()
+    with pytest.raises(SystemExit) as stopped_again:
+        runner.main([str(plan_path)])
+    assert stopped_again.value.code == 75 and (stage_dir / "train_log.jsonl").read_bytes() == first
+    plan["stages"]["base"].pop("stop_after_completed_steps")
+    plan_path.write_text(json.dumps(plan))
+    runner.main([str(plan_path)])
+    final = torch.load(stage_dir / "training_state" / "final.pt", map_location="cpu", weights_only=False)
+    assert final["step"] == 4
+    reports = [json.loads(line) for line in (stage_dir / "holdout_log.jsonl").read_text().splitlines()]
+    assert [(r["split"], r["step"]) for r in reports] == [("valid", 2), ("valid", 3), ("valid", 4), ("test", 4)]
+    assert (tmp_path / "runs" / "eval" / "base.json").is_file()
+    assert (tmp_path / "runs" / "release" / "tiny-base" / "model.safetensors").is_file()
+
+
 def test_actual_release_stage_records_periodic_valid_and_end_only_test(tmp_path, monkeypatch):
     monkeypatch.setenv("OMP_NUM_THREADS", "2")
     monkeypatch.setenv("MKL_NUM_THREADS", "2")

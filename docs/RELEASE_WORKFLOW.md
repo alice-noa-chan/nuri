@@ -48,6 +48,27 @@ curves. Their legacy `data.eval_corpus`, `data.eval_instructions` and
 for repair or setting comparisons; do not point iterative comparisons at final
 test resources.
 
+## Stopping at a completed-update boundary
+
+A stage may set `stop_after_completed_steps` to a positive integer below its
+original `steps`. The runner forwards `--stop-after-completed-steps` and rejects
+malformed or final-stage boundaries before launch. This setting belongs inside
+the stage; it does not reduce total steps, warmup or the optimizer schedule.
+
+At that boundary the training CLI saves a full resumable state and returns 75
+before any due validation/test or final public checkpoint. The runner stops
+the plan before post-stage evaluation and export. A resumed invocation with
+the same already-reached boundary stops again without another update or
+holdout. Remove only this interruption setting to continue the same full
+schedule and optimizer/RNG state. A separate process supervisor still provides
+the wall deadline and bounded shutdown.
+
+For the corrected retry, the first gate is part of the actual Dense production
+repair, with its complete schedule frozen after calibration. Assess the saved
+boundary with the agreed validation-only span, MLM and conditioning protocol;
+continue after review. Completing a shorter disposable stage would consult
+completion-only test too early and reset the intended schedule.
+
 ## Reusing a completed post-stage evaluation
 
 The runner stores a successful evaluation receipt in the ignored output
