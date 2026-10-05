@@ -396,6 +396,34 @@ rather than assigning its mean to one individual task. The bar also shows the
 current microbatch index/count and its task/depth; it advances only after the
 optimizer update.
 
+Clipping diagnostics count **all successful optimizer updates**, including
+updates between sampled logs. JSON `optimizer_clipping` and TensorBoard
+`optimizer/clip_count`, `/clip_observed_updates` and `/clip_fraction` report
+the number and fraction whose gradient clipping coefficient was below one,
+including the clipping routine's epsilon. `/clip_applied` describes only the
+sampled update. Counters are saved with the full training state and continue
+on resume. Older states without these counters start a new observation window:
+`start_completed_step` / `optimizer/clip_window_start_step` identifies its
+starting completed-step boundary. Earlier clipping history is unknown.
+
+On logged updates only, `pre_clip_grad_norms` and
+`optimizer/pre_clip_grad_norm/{encoder,core,readout,tied_embedding,other}`
+measure disjoint parameter groups in bounded FP32 chunks **after all accumulated
+backwards and before clipping**. Tied input/output weights count once; a group
+without gradients reports zero. The position table belongs to the readout
+group. `canvas_position_row_norms` and
+`parameters/canvas_position_row_norm/{min,mean,median,max,rows}` summarize all
+learned canvas-position weight rows at that same pre-optimizer boundary.
+Legacy models without the table omit these measurements. No parameter snapshot
+or raw token values are logged. Sampled diagnostics add work included in
+reported throughput; their GPU overhead has not been measured.
+
+These norms and clipping counts describe the **combined optimizer update**,
+including every sampled task, depth and active auxiliary objective. They cannot
+attribute a mixed update's gradient to one task. Clipping rescales gradients
+before AdamW; its fraction or coefficient is not a proportional effective
+learning-rate or parameter-update measurement.
+
 To continue one graph after interruption, keep the original event directory
 and add the usual `--resume` flag. Events after the restored checkpoint are
 hidden and replaced by resumed measurements; older points remain. A new event

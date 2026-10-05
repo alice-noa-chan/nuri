@@ -496,6 +496,68 @@ def make_optimizer(model: NuriModel, settings: TrainSettings) -> torch.optim.Ada
     return torch.optim.AdamW(groups, lr=settings.peak_lr, betas=settings.betas)
 
 
+def _clipping_counts(totals: dict, start_step: int) -> dict:
+    """Retain observation history, or start an honest window for legacy states."""
+    return totals.setdefault("optimizer_clipping", {
+        "start_completed_step": start_step, "completed_updates": 0, "clipped_updates": 0,
+    })
+
+
+def _gradient_parameter_groups(model: NuriModel) -> dict:
+    """Disjoint parameter references; the tied vocabulary weight is counted once."""
+    groups = {name: [] for name in ("encoder", "core", "readout", "tied_embedding", "other")}
+    seen = set()
+    for name, parameter in model.named_parameters():
+        if id(parameter) in seen:
+            continue
+        seen.add(id(parameter))
+        prefix = name.split(".", 1)[0]
+        group = "tied_embedding" if prefix == "embedding" else prefix if prefix in groups else "other"
+        groups[group].append(parameter)
+    return groups
+
+
+def _tensor_chunks(tensor: torch.Tensor, max_elements: int):
+    """Yield bounded views, including non-contiguous gradients, without flattening copies."""
+    if tensor.numel() <= max_elements:
+        yield tensor
+        return
+    dimension = next(index for index, size in enumerate(tensor.shape) if size > 1)
+    elements_per_slice = tensor.numel() // tensor.shape[dimension]
+    width = max(1, max_elements // elements_per_slice)
+    for start in range(0, tensor.shape[dimension], width):
+        part = tensor.narrow(dimension, start, min(width, tensor.shape[dimension] - start))
+        yield from _tensor_chunks(part, max_elements)
+
+
+@torch.no_grad()
+def _sample_optimizer_diagnostics(model: NuriModel, groups: dict,
+                                  chunk_elements: int = 262144) -> dict:
+    """Observe combined gradients and current positions before clipping/optimizer.step."""
+    device = next(model.parameters()).device
+    squared = []
+    for parameters in groups.values():
+        total = torch.zeros((), dtype=torch.float32, device=device)
+        for parameter in parameters:
+            if parameter.grad is not None:
+                for part in _tensor_chunks(parameter.grad.detach(), chunk_elements):
+                    total += part.float().square().sum()
+        squared.append(total)
+    norms = torch.stack(squared).sqrt().tolist()
+    result = {"pre_clip_grad_norms": dict(zip(groups, norms))}
+    positions = model.readout.position_embedding
+    if positions is not None:
+        weight = positions.weight.detach()
+        # Nuri's table has one short D-dimensional row per output position.
+        # Only row norms are retained; no vocabulary or parameter snapshot is made.
+        rows_per_chunk = max(1, chunk_elements // weight.shape[1])
+        rows = torch.cat([part.float().norm(dim=1) for part in weight.split(rows_per_chunk)])
+        values = torch.stack((rows.min(), rows.mean(), rows.quantile(0.5), rows.max())).tolist()
+        result["canvas_position_row_norms"] = dict(zip(("min", "mean", "median", "max"), values))
+        result["canvas_position_row_norms"]["rows"] = weight.shape[0]
+    return result
+
+
 def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, device=None,
           resume_from: str | Path | None = None, validation: HoldoutSet | None = None,
           test: HoldoutSet | None = None) -> list[dict]:
@@ -542,6 +604,7 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     start_step = 0
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
+        _clipping_counts(totals, start_step)
         if boundary is not None and start_step >= boundary:
             # Repeating a gated invocation must not complete due checkpoints or
             # consult holdouts. Omitting the boundary resumes the full schedule.
@@ -561,6 +624,8 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
         # would have contained.
         if start_step > 0 and not (start_step == settings.total_steps and (validation or test)):
             _complete_checkpoints(model, optimizer, schedule, settings, start_step - 1, totals, out, rng, tasks)
+    clipping = _clipping_counts(totals, start_step)
+    gradient_groups = _gradient_parameter_groups(model)
     records, started = [], time.time()
     last_timed_save = time.monotonic()
     _reset_cuda_peaks(device)
@@ -659,20 +724,33 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             name, depth, result, aux, loss = _merge_micro_batches(micro_batches, tasks, sampled_record)
 
             monitor.phase("optimizer")
+            diagnostics = _sample_optimizer_diagnostics(model, gradient_groups) if sampled_record else {}
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), settings.grad_clip)
-            # One host sync per update: a NaN/inf loss (including the MoE aux
+            # One guard/count host sync per update: a NaN/inf loss (including the MoE aux
             # terms) gives a non-finite gradient norm, and either one stops the
             # run before optimizer.step, so neither the weights nor any saved
             # state (latest.pt, step-*, final) can contain it. Recovery resumes
             # from the previous complete state.
             losses = torch.stack([micro[4].float() for micro in micro_batches])
-            if not bool(torch.isfinite(grad_norm) & torch.isfinite(losses).all()):
+            finite = torch.isfinite(grad_norm) & torch.isfinite(losses).all()
+            # Match clip_grad_norm_'s coefficient, including its epsilon. This
+            # measures gradient shrinkage, not an effective Adam learning rate.
+            clip_applied = settings.grad_clip / (grad_norm + 1e-6) < 1.0
+            is_finite, was_clipped = torch.stack((finite, clip_applied)).tolist()
+            if not is_finite:
                 raise NonFiniteTraining(step, name)
             optimizer.step()
+            clipping["completed_updates"] += 1
+            clipping["clipped_updates"] += int(was_clipped)
             monitor.advance()
 
             if sampled_record:
                 record = _log_record(step, name, depth, result, aux, loss, grad_norm, schedule, totals, started)
+                record.update(diagnostics)
+                record["optimizer_clipping"] = {
+                    **clipping, "fraction": clipping["clipped_updates"] / clipping["completed_updates"],
+                    "threshold": settings.grad_clip, "clip_applied": was_clipped,
+                }
                 record.update(_cuda_peaks(device))
                 records.append(record)
                 log.write(json.dumps(record) + "\n")

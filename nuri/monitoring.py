@@ -115,6 +115,9 @@ class TrainingMonitor:
         for key in ("denoise", "length", "fast", "reasoning", "cross_mode", "moe_balance", "moe_z"):
             if key in record:
                 metrics[key] = f"{record[key]:.4f}"
+        clipping = record.get("optimizer_clipping", {})
+        if clipping:
+            metrics["clip"] = f"{clipping['fraction']:.0%}"
         summary = record.get("batch_summary", {})
         if summary:
             metrics.update(rows=summary["rows"],
@@ -137,6 +140,19 @@ class TrainingMonitor:
             "performance/steps_per_second": steps_per_second,
             "train/schedule_phase": {"warmup": 0, "stable": 1, "decay": 2}[schedule_phase],
         }
+        if clipping:
+            for tag, key in {
+                "clip_count": "clipped_updates", "clip_observed_updates": "completed_updates",
+                "clip_fraction": "fraction", "clip_window_start_step": "start_completed_step",
+                "clip_threshold": "threshold", "clip_applied": "clip_applied",
+            }.items():
+                scalars[f"optimizer/{tag}"] = clipping[key]
+        for group in ("encoder", "core", "readout", "tied_embedding", "other"):
+            if group in record.get("pre_clip_grad_norms", {}):
+                scalars[f"optimizer/pre_clip_grad_norm/{group}"] = record["pre_clip_grad_norms"][group]
+        for statistic in ("min", "mean", "median", "max", "rows"):
+            if statistic in record.get("canvas_position_row_norms", {}):
+                scalars[f"parameters/canvas_position_row_norm/{statistic}"] = record["canvas_position_row_norms"][statistic]
         objectives = record.get("task_objectives") or {
             task: {"kind": kind, "metrics": {"loss": record.get("objective_loss", record["loss"]),
                    **{key: record[key] for key in ("denoise", "length", "fast", "reasoning", "cross_mode")
