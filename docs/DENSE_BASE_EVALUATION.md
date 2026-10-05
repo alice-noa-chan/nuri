@@ -6,7 +6,7 @@ before instruction tuning and embedding training.
 The encoder has learned masked-token patterns. Its current generation path does
 not produce reliable, coherent text in these direct probes. A structural
 symmetry in the initial masked output canvas explains the repeated first-fill
-tokens and requires architecture review. Treat this checkpoint as an experimental
+tokens and led to the D-019 position correction. Treat this checkpoint as an experimental
 base for further work; these results do not establish general chat quality.
 
 ## Checkpoint and execution
@@ -151,7 +151,7 @@ this original-boundary check.
 
 ## Initial canvas symmetry
 
-The current readout receives identical token embeddings at every position of
+The evaluated legacy readout receives identical token embeddings at every position of
 an all-MASK canvas. Its self-attention applies RoPE to Q and K, but not to V or
 the residual stream. Different attention weights still sum identical value
 vectors. The memory cross-attention then receives identical queries with no
@@ -159,7 +159,7 @@ output-position feature. Pointwise norms and feed-forward layers preserve the
 same hidden vector at each position.
 
 This argument holds layer by layer, independently of the learned weights in
-the current deterministic topology. It explains why the first greedy fill
+the evaluated deterministic topology. It explains why the first greedy fill
 cannot assign different tokens to different positions. Later remasking can
 introduce visible-token anchors and break the symmetry, but those anchors
 start from the repeated first fill.
@@ -172,10 +172,12 @@ tokens. That anchor is only a diagnostic intervention; useful generation from
 it has not been demonstrated. An independent tiny-model reproduction reaches
 the same structural conclusion.
 
-IT with unchanged topology retains this first-fill symmetry. A trained
-output-position feature in the canvas residual/value path needs review,
-checkpoint compatibility rules, a position-variation regression, and renewed
-generation checks. The existing stochastic sampler can introduce token
+IT with unchanged topology retains this first-fill symmetry. D-019 now adds
+learned positions to the canvas residual/value path, with strict legacy
+compatibility and a separate warm-start initializer. The correction passes
+position, cache, padding and conditioned symbolic sequence-learning checks.
+Renewed natural-language generation checks after repair training are still
+required. The existing stochastic sampler can introduce token
 variation, but it does not make the identical first-pass conditional
 distributions position-specific, and its quality benefit is unmeasured.
 
@@ -184,9 +186,38 @@ distributions position-specific, and its quality benefit is unmeasured.
 Keep the learned encoder checkpoint for further experiments. Masked-token
 learning is supported; broad understanding, reliable semantic retrieval and
 coherent generation are not established by this evaluation. Address the
-readout symmetry before accepting generation quality. Review the proposal in
-DISCUSSION before changing the declared architecture or a live training run.
+readout symmetry before accepting generation quality. The agreed minimal
+correction is documented in ARCHITECTURE.md and DISCUSSION.
 
-The existing run and its spending cutoff remain active. This assessment changes
-no production source, checkpoint weights, optimizer state, stage allocation or
-deadline. Final IT and embedding evaluations remain pending.
+The user subsequently stopped the run. The provider instance is absent and
+temporary access has been removed. The last stopped-state transport is
+incomplete; a previously verified complete transport restored Dense Base and
+an earlier MoE intermediate state. The original checkpoints and this report's
+measured results remain unchanged. A corrected warm start preserves all old
+Dense weights and initializes only the output positions, with a fresh optimizer
+required. The original aggregate spending ceiling still applies. Final IT and
+embedding training and evaluations remain pending.
+
+## Follow-up latent-state controls
+
+The same eight original-boundary spans were reassessed in two batches of four.
+Normal, zero-R and cyclically shuffled-R memory use identical targets and mask
+draws. Partial masks use three fixed corruptions, giving 24 row presentations
+per setting; full masks use one, giving eight. CE averages each row's masked
+position mean; accuracy pools supervised tokens. These are already consulted
+diagnostic validation samples, not an untouched final test.
+
+| Mask | Targets | Normal CE / accuracy | Zero-R CE / accuracy | Shuffled-R CE / accuracy |
+|---|---:|---:|---:|---:|
+| 15% | 120 | 3.1546 / 39.17% | 6.6419 / 7.50% | 3.1607 / 40.83% |
+| 50% | 384 | 4.3896 / 29.43% | 7.3793 / 9.11% | 4.4059 / 29.43% |
+| 100% | 256 | 7.4996 / 6.64% | 8.3837 / 1.56% | 7.4995 / 7.03% |
+
+Zero-R replaces latent states with zeros before both memory K/V projections,
+while retaining their attendable slots. This is a distribution shift and
+substantially degrades the trained readout. Shuffled-R swaps all four samples
+without fixed rows and has little average effect here. Neither result proves
+useful input-specific reasoning or an unused core. No row is exactly recovered
+under any intervention. The initial normal-mask replay reproduces the earlier
+correct-token counts exactly; batched CE differs by at most 1.8e-7. The bounded
+two-thread CPU check took 7.42 seconds and preserved the checkpoint hash.
