@@ -45,6 +45,9 @@ class NuriConfig:
     max_input_len: int = 512
     # Response limit including EOS; also the number of length classes.
     max_response_len: int = 64
+    # Legacy configs omit this field and retain "none". New presets use
+    # "learned" so identical MASK tokens can represent different positions.
+    canvas_position_encoding: str = "none"
     embed_dim: int = 256
     rope_theta: float = 10000.0
     norm_eps: float = 1e-6
@@ -108,6 +111,8 @@ class NuriConfig:
             raise ValueError("reasoning depths must be >= 0 and train_depths must not be empty")
         if self.refine_rounds <= 0:
             raise ValueError("refine_rounds must be positive")
+        if self.canvas_position_encoding not in ("none", "learned"):
+            raise ValueError('canvas_position_encoding must be "none" or "learned"')
         if not 0.0 < self.gate_init < 1.0:
             raise ValueError("gate_init is a sigmoid output and must be in (0, 1)")
         if self.norm_eps <= 0 or self.rope_theta <= 0 or self.initializer_range <= 0:
@@ -154,6 +159,7 @@ class NuriConfig:
 
 def reference_config(**overrides) -> NuriConfig:
     """49.3M structure-validation model (§3 table)."""
+    overrides.setdefault("canvas_position_encoding", "learned")
     return NuriConfig(**overrides)
 
 
@@ -169,6 +175,7 @@ def release_dense_config(**overrides) -> NuriConfig:
         latent_slots=32,
         max_input_len=1024,
         max_response_len=256,
+        canvas_position_encoding="learned",
         qk_norm=True,
         train_depths=(2, 4, 8),
     )
@@ -194,6 +201,7 @@ def tiny_config(**overrides) -> NuriConfig:
         latent_slots=4,
         max_input_len=32,
         max_response_len=16,
+        canvas_position_encoding="learned",
         embed_dim=32,
         qk_norm=True,
         train_depths=(1, 2, 3),

@@ -1,6 +1,6 @@
 # Nuri v0 Architecture
 
-Status: design spec with an executable implementation. CPU tests and small correctness runs pass; fixed-shape A100/H100 training throughput is measured in [GPU_COMPARISON.md](GPU_COMPARISON.md). Release training and language quality remain unmeasured.
+Status: design spec with an executable implementation. Fixed-shape A100/H100 throughput is measured in [GPU_COMPARISON.md](GPU_COMPARISON.md). The first Dense Base completed training, but direct evaluation found inadequate generation and an all-MASK canvas symmetry defect; see [DENSE_BASE_EVALUATION.md](DENSE_BASE_EVALUATION.md). D-019 corrects the position path. Corrected language quality remains unmeasured.
 
 > **User decisions in §14 take priority.** If the body and §14 disagree, follow §14 and record the conflict in §17 (open questions).
 
@@ -177,6 +177,10 @@ C → RMSNorm → Bidirectional Self-Attention + output RoPE → residual
 
 The two readout layers have different weights and are shared across refinement rounds. Block weights are not shared between the input encoder, the reasoning core and the readout. The token embedding and the output vocabulary weight are shared.
 
+**Canvas input positions (D-019).** At each fresh readout entry, set `C_s[i] = token_embedding(canvas_s[i]) + position_embedding[i]` for valid output positions. The independently learned table has shape `[M,D]`, uses the existing normal initialization scale, and is added once before the first block. Padding gets no position vector. Q/K-only self-attention RoPE cannot break an all-MASK value symmetry: identical value vectors still give identical attention outputs. Residual positions distinguish the values and memory queries from the first fill. They do not expose answer content or change X/R caching.
+
+New reference, release and tiny presets use `canvas_position_encoding="learned"`. A legacy configuration without this field means `"none"` and keeps its old topology and strict weight loading. An explicit repair initializer adds only this table and preserves every existing tensor. It starts a fresh optimizer, schedule and run counter; it is not exact resume. Legacy full states may resume a legacy model, but cannot resume a corrected model. Input-length-offset memory RoPE and a deeper readout remain separate experiments.
+
 Memory cross-attention uses no RoPE by default. Canvas positions are positions inside the output and are not treated as the same coordinates as input positions. The memory K/V of X and R are projected separately per readout layer and reused for the S rounds of one generation request. Canvas hidden states and self-attention K/V are recomputed every round.
 
 ### Information access contract
@@ -253,6 +257,8 @@ The mixed batches of A are split into release stages. Each stage produces its ow
 | IT | base | instruction denoising 70% + structured reasoning tasks 15% + text span denoising 15% (prevents forgetting) | everything + length head | `nuri-base-it`, `nuri-base-moe-it` |
 | Embed | dense base | contrastive pairs (+ Matryoshka 64/128/256) | encoder, core, P, W_r | `nuri-base-embed` |
 
+Further Base training can explicitly use `--init` with a compatible checkpoint. The loaded geometry and tokenizer take precedence over the scratch preset, and optimizer/schedule counters start fresh. `--resume` instead restores a compatible full interrupted state and takes priority over `--init`. The D-019 repair reuses learned weights through this warm-start path.
+
 **Text span denoising** is the base-stage objective that trains the readout and core from raw text alone. For a tokenized document `d`, first choose the cut `c` and the raw span length `m`, then split into `x=d[max(0,c-N):c]` and `y_raw=d[c:c+m]`. `m` is between 16 and `M` and never exceeds what is left in the document. **EOS is appended only when the span reaches the end of the document** (`y_raw + EOS`). A span that ends in the middle uses only `y_raw` as the target, without EOS. If a span that reaches the end already has M tokens, the cut `c` moves one token forward so the span still ends at the document end and EOS fits. Canvas corruption follows §7. Only the separated x is encoded. Encoding the whole document bidirectionally and then cutting the prefix of X, or reusing the X cache of an MLM batch, would leak the target. Spans and packed attention never cross sample/document boundaries.
 
 Without this path the base model's readout would never be trained. The base generation API requires an explicit `canvas_len`; the automatic length head is enabled after IT. An infill form, with a sentinel in the middle of the input and the missing span to fill, is a later experiment.
@@ -316,8 +322,9 @@ Below are the linear matrix and embedding counts for V=32768, D=512, F=1408. Sma
 | shared reasoning block | 8D²+3DF | 4,259,840 |
 | learned latent slots | KD | 8,192 |
 | readout, 2 layers | 2(8D²+3DF) | 8,519,680 |
+| learned canvas position table (D-019) | MD | 32,768 |
 | embedding P + reasoning W_r | 256D+D² | 393,216 |
-| total, small heads excluded | | 49,225,728 |
+| total, small heads excluded | | 49,258,496 |
 
 The length head `2D→64` adds 65,536 weights. With RMSNorm and task heads the total is about 49.3M. Raising T and S does not add shared weights, but it does increase activations, compute and latency. (`tests/test_model.py` checks these counts and the release counts below exactly.)
 
@@ -336,7 +343,7 @@ Training processes one corruption, so the inference S=4 formula is not simply mu
 
 ### Release cost
 
-Main weights excluding norms, gates, length and classification heads are **150,233,088** for dense and **242,319,360** for MoE. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
+Main weights excluding norms, gates, length and classification heads are **150,429,696** for dense and **242,515,968** for MoE. These include D-019's 196,608 canvas position weights; the legacy counts were 150,233,088 and 242,319,360. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
 
 Release inference at N1024/M256/K32/T4/S4, all-global input, 1 MAC = 2, with the same exclusions:
 
@@ -382,6 +389,8 @@ Finish the five training stages and exports before bounded expensive evaluation.
 ## 12. Success criteria and ablations
 
 The core questions are whether latent recurrence helps task performance and whether both uses survive on one backbone.
+
+The corrected generator must pass an all-MASK position-variation check with a legacy negative control, nonzero position-table gradients, exact old-tensor preservation, padding invariance and cache equivalence. A fixed-seed symbolic CPU comparison recovered distinct four-token sequences from full MASK at S=1 and S=4 on held-out combinations, with input swaps changing the output. This is structural evidence, not natural-language quality. A paid repair must additionally improve matched real full/partial-span validation and input conditioning, and include human-read generation. Test data must not select the repair gate. Low encoder MLM loss alone never accepts the generator.
 
 | Comparison | What it checks |
 |---|---|
@@ -447,6 +456,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-016 | 2026-10-04 | Tokenizer vocabulary 65,536 (64k) | held-out compression: ~9-10% fewer Korean/Japanese tokens than 32k for ~4% more compute per byte (estimate) | user |
 | D-017 | 2026-10-04 | Keep the dense release size and give the dense base 9 hours and the MoE base 7 hours; if the first real-data hour projects the dense base below 3B processed positions, move more time from the MoE base instead of shrinking | A100 microbatch-64 calibration: 8 h dense = 3.02B, only 0.8% above the D-009 rule (docs/GPU_CAPACITY.md) | user |
 | D-018 | 2026-10-04 | Current Vast run: strictly below USD 50 total, one compatible A100 80 GB, at most 44 rented hours and shorter when the live quote requires; preserve all five stages, prioritize the Dense family with starting ratio 27:5:3:1:0.75, and calibrate steps on real inputs | User selected Vast, funded credit, required careful preparation and asked for a balance of performance and experiments; agreed Dense priority, rental margin and independent teardown guards (§11) | user authorization; Codex/Claude allocation review |
+| D-019 | 2026-10-05 | Add independently initialized learned canvas positions to the residual/value path in new presets; retain explicit legacy `none` loading and exact legacy resume, with a separate new-optimizer warm-start migration | Trained all-MASK symmetry, Claude/Codex agreement and conditioned symbolic learning; keep bidirectionality and fixed X/R memory | Codex/Claude correction review under the user's analysis and retraining request |
 
 ## 15. Release plan
 
@@ -475,6 +485,8 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 - Full resume state (with optimizer, private) and public weights are saved separately.
 - Right after saving, public weights are loaded back and checked with MLM accuracy and one generation. If that fails, they are not uploaded.
 
+**Explicit D-019 repair initialization.** Run `tools/initialize_canvas_positions.py --source <legacy checkpoint> --out <fresh initializer folder> --receipt <ignored .private receipt> --seed 0`. The tool verifies every old tensor and dtype, strict-loads the corrected output, records source/output hashes and the seed, and refuses existing output paths. The source remains immutable; the output contains no optimizer. Start repair training with `scripts/train.py --stage base --init <fresh initializer folder>`, plus explicit private training inputs. Do not pass the legacy optimizer state as `--resume`.
+
 ## 16. Data policy (D-008)
 
 - Tracked files (docs, configs, code, model cards, commit messages) **never contain dataset names, links or sources.** Data notes live only in the gitignored `.private/`.
@@ -493,3 +505,4 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | ~~Q-13~~ | ~~QK-norm, random depth~~ → D-013 | |
 | ~~Q-14~~ | ~~T pilot~~ → D-014 | |
 | Q-16 | add `nuri-base-moe-embed`? | only if time remains |
+| Q-17 | After the minimal position correction, do stronger span supervision, deeper readout, memory position linkage or slower/block decoding improve real conditioned generation? | Open controlled experiments; observed plateaus, gradient norms and target counts do not alone establish these causes |

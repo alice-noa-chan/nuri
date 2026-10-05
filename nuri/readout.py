@@ -48,6 +48,9 @@ class BidirectionalReadout(nn.Module):
     def __init__(self, config: NuriConfig):
         super().__init__()
         self.rope = RopeTables(config.head_dim, config.rope_theta)
+        self.max_response_len = config.max_response_len
+        self.position_embedding = (nn.Embedding(config.max_response_len, config.hidden_size)
+                                   if config.canvas_position_encoding == "learned" else None)
         self.gradient_checkpointing = False  # set by NuriModel.set_gradient_checkpointing
         self.blocks = nn.ModuleList(ReadoutBlock(config, i + 1) for i in range(config.readout_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
@@ -62,6 +65,16 @@ class BidirectionalReadout(nn.Module):
         """canvas: embedded canvas tokens [B, L, D]. Returns normalized hidden states."""
         if len(cache.kv) != len(self.blocks):
             raise ValueError(f"memory cache has {len(cache.kv)} layers, the readout has {len(self.blocks)}")
+        length = canvas.shape[1]
+        if not 1 <= length <= self.max_response_len:
+            raise ValueError(f"canvas length must be in 1..{self.max_response_len}")
+        if self.position_embedding is not None:
+            # Q/K-only RoPE cannot distinguish an all-MASK canvas whose V
+            # vectors are identical. Put position information in the residual
+            # and value path once per fresh readout, including the first fill.
+            positions = torch.arange(length, device=canvas.device)
+            position_values = self.position_embedding(positions).to(canvas.dtype)
+            canvas = canvas + position_values * canvas_valid.unsqueeze(-1)
         rope = self.rope(canvas.shape[1], canvas.device)
         for block, kv in zip(self.blocks, cache.kv):
             if self.gradient_checkpointing and torch.is_grad_enabled():

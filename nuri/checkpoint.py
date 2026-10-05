@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+from torch import nn
 from safetensors.torch import load_file, save_file
 
 from .config import NuriConfig
@@ -108,7 +109,10 @@ def load_training_state(path: str | Path, model, optimizer) -> dict:
     loads cleanly but silently changes what the model computes.
     """
     state = torch.load(path, map_location="cpu", weights_only=False)
-    saved, current = state["config"], model.config.to_dict()
+    saved, current = dict(state["config"]), model.config.to_dict()
+    # This field did not exist in the original topology. Its only legitimate
+    # resume default is the unchanged legacy behavior, never learned positions.
+    saved.setdefault("canvas_position_encoding", "none")
     if saved != current:
         changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
         raise ValueError(f"training state config differs from the model config in: {changed}")
@@ -117,3 +121,23 @@ def load_training_state(path: str | Path, model, optimizer) -> dict:
     torch.set_rng_state(state["torch_rng"])
     random.setstate(state["python_rng"])
     return state
+
+
+def add_canvas_positions(model: NuriModel, seed: int = 0) -> NuriModel:
+    """Explicitly initialize a legacy model for repair training, in place.
+
+    Every existing weight stays unchanged; only the new position table is
+    created. This is a warm start requiring a fresh optimizer and schedule.
+    An old training state cannot resume this changed configuration.
+    """
+    if model.config.canvas_position_encoding != "none" or model.readout.position_embedding is not None:
+        raise ValueError("Position repair requires a legacy model without canvas positions.")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("The position initialization seed must be an integer.")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    weights = torch.randn(model.config.max_response_len, model.config.hidden_size, generator=generator)
+    weights = weights * model.config.initializer_range
+    weights = weights.to(device=model.embedding.weight.device, dtype=model.embedding.weight.dtype)
+    model.readout.position_embedding = nn.Embedding.from_pretrained(weights, freeze=False)
+    model.config.canvas_position_encoding = "learned"
+    return model

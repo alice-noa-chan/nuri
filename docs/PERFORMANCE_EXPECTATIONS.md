@@ -1,9 +1,15 @@
 # Performance expectations
 
-Date: October 4, 2026. Release training has not started. The completed GPU
+Original forecast: October 4, 2026, before release training. The completed GPU
 comparison and batch-capacity follow-up measure synthetic training computation,
 not model quality or response latency. See [GPU_COMPARISON.md](GPU_COMPARISON.md)
 and [GPU_CAPACITY.md](GPU_CAPACITY.md) for measurements.
+
+Update, October 5: the first Dense Base has been trained and directly assessed
+in [DENSE_BASE_EVALUATION.md](DENSE_BASE_EVALUATION.md). It learned MLM patterns,
+but coherent generation failed. D-019 adds canvas positions to correct the
+confirmed all-MASK symmetry. The repaired model's language quality is unmeasured.
+Keep the forecasts below separate from those actual legacy-checkpoint results.
 
 ## What to expect first
 
@@ -12,7 +18,7 @@ training and a bounded masked generator. Task-specific retrieval, useful
 features for a labeled classifier, and short structured answers are plausible
 first uses to test. Broad conversation, extensive factual knowledge, long
 coherent answers and reliable multi-step reasoning are uncertain goals.
-There is no measured accuracy, F1, retrieval score or answer-quality percentage.
+These were first-use hypotheses, not measured accuracy or quality predictions.
 
 | Use | Reasonable first goal | What must be checked |
 |---|---|---|
@@ -26,8 +32,9 @@ An EOS-terminated answer therefore has at most 255 content tokens. Token
 counts are not word or character counts. A base checkpoint requires a supplied
 canvas length; automatic length is trained in the instruction stage.
 
-The release presets contain 150,652,931 dense parameters and 242,739,203 total
-MoE parameters. Some weights serve the recurrent core and generator, so these
+The original measured geometry contained 150,652,931 dense parameters and
+242,739,203 total MoE parameters. Corrected D-019 presets add 196,608 position
+weights, giving totals of 150,849,539 and 242,935,811. Some weights serve the recurrent core and generator, so these
 totals are not equivalent to a pretrained encoder of the same headline size.
 Matching active FFN projection work also does not match router/dispatch cost.
 More MoE weights do not establish better quality than dense.

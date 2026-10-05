@@ -84,6 +84,19 @@
   },
   "generation": {
     "readout_layers": 2,
+    "canvas_position_correction": {
+      "decision": "D-019",
+      "model_field": "canvas_position_encoding",
+      "new_presets": "learned",
+      "legacy_missing_field": "none",
+      "table_shape": "max_response_tokens_including_eos_x_hidden_size",
+      "initialization": "independent_normal_with_existing_initializer_range",
+      "application": "add_once_to_valid_canvas_embeddings_before_first_readout_block",
+      "strict_legacy_load": true,
+      "warm_start": "preserve_every_old_tensor_initialize_only_table_start_fresh_optimizer_schedule_and_counter",
+      "old_optimizer_resume_into_corrected_geometry": false,
+      "corrected_language_quality": "unmeasured"
+    },
     "share_readout_across_refinement_rounds": true,
     "share_with_input_encoder_or_reasoning_core": false,
     "memory": [
@@ -368,6 +381,7 @@
     "stages": {
       "base": {
         "init": "scratch",
+        "explicit_further_training": "init_checkpoint_weights_with_fresh_optimizer_resume_full_state_takes_priority",
         "mix": {
           "text_mlm": 0.5,
           "text_span_denoising": 0.5

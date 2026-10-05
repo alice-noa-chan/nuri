@@ -16,8 +16,11 @@ Languages: Korean and English first, some Japanese. License: MIT.
 > Status: the model code, training loop and tests are implemented. A100/H100
 > training calibration is available in [GPU comparison](docs/GPU_COMPARISON.md)
 > and [A100 batch capacity](docs/GPU_CAPACITY.md).
-> No release model has been trained or evaluated for quality yet. Design numbers
-> remain estimates unless they are explicitly identified as measured.
+> The first Dense Base completed training. Its [measured evaluation](docs/DENSE_BASE_EVALUATION.md)
+> found learned masked-token patterns, inadequate text generation and an all-MASK
+> position defect. New presets correct that position path; corrected language
+> quality still requires repair training and evaluation. Design numbers remain
+> estimates unless explicitly identified as measured.
 
 See [performance expectations](docs/PERFORMANCE_EXPECTATIONS.md) for the
 first uses to test, current limits and the proposed quality evaluation.
@@ -43,7 +46,8 @@ answer canvas [MASK MASK ...] ──► Readout (2 layers, reads [X; R]) ──�
    reused for every step.
 3. **Readout.** The answer starts as all `[MASK]`. Each round predicts every
    masked word at once, keeps the confident ones and re-masks the rest
-   (Mask-Predict). By default `X` and `R` are computed once per request.
+   (Mask-Predict). Learned output-position vectors distinguish even the first
+   all-MASK fill. By default `X` and `R` are computed once per request.
 4. **Heads.** MLM on `X`, sentence embeddings (`fast` = from `X`,
    `reasoning` = from `X` and `R`), an answer length head, and an optional
    classification head.
@@ -63,9 +67,10 @@ The full design, with every decision and its reason, is in
 | `nuri-base-it` / `nuri-base-moe-it` | instruction-tuned versions |
 | `nuri-base-embed` | sentence embedding model built from `nuri-base` |
 
-The plan is to train all of them on one A100 80GB or H100 in about one GPU-day
-in total, and to publish intermediate checkpoints as revisions. None of them
-has been trained yet.
+The historical plan used about one GPU-day for all stages. The current spending
+limit and Dense-priority allocation are recorded in the architecture decision
+log. Dense Base is retained; the interrupted MoE Base has an intermediate state.
+IT and embedding stages remain pending, along with corrected generation quality.
 
 ## Install
 
