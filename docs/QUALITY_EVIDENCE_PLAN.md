@@ -1,11 +1,13 @@
 # Practical quality evidence before full training
 
-Status: proposal in response to the user's confidence requirement. No rental,
-training, new allocation or additional spending cap is approved by this document.
+Status: the user authorized the retained-encoder comparison; execution is in
+progress. No rental, production training, new allocation or additional spending
+cap is approved by this document.
 The completed upload remains immutable. The user requires general encoder
 quality comparable to BERT, ModernBERT, RoBERTa, DeBERTa and ELECTRA. Exact
-checkpoint versions, language coverage, adaptation budgets and acceptance
-margins still need to be frozen. The named families are a comparison panel,
+checkpoint versions, language coverage, input hashes and preliminary adaptation
+budgets are declared privately before scoring. No general parity acceptance
+margin or automatic continuation is defined. The named families are a comparison panel,
 not one interchangeable score or permission to accept only the weakest model.
 
 Nuri's corrected generator has not been trained and assessed on natural language.
@@ -41,8 +43,10 @@ references, and majority, lexical and random-initialization controls. Nuri's
 untrained embedding projections are not the encoder-quality representation.
 This is an inexpensive diagnostic, not a substitute for matched fine-tuning;
 a weak probe alone does not establish that adapted performance must be weak.
-The current evaluator has no supervised probe/fine-tuning runner, so this is a
-proposed benchmark unit rather than an implemented command.
+The separate feature extractor and supervised probe now implement this bounded
+diagnostic. See [the commands and result limits](ENCODER_BENCHMARK.md). Matched
+encoder fine-tuning remains a separate work unit. The training runtime and
+completed upload remain unchanged.
 
 The stronger comparison uses same-language Base checkpoints from the requested
 families, identical raw examples and split policy, comparable task heads,
