@@ -102,3 +102,78 @@ def test_plan_switches_reach_the_train_command(tmp_path, capsys):
     assert "--grad-accum 2" in base and "--compile" in base and "--gradient-checkpointing" in base
     assert "--tensorboard" in it and "--gradient-checkpointing" not in it
     assert "--gradient-checkpointing" in embed
+
+
+def test_stage_holdout_flags_reach_dry_run_without_implicit_sharing(tmp_path, capsys):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    for index, (name, stage) in enumerate(plan["stages"].items()):
+        stage["holdout_config"] = str(tmp_path / f"{name}-holdout.json")
+        stage["valid_every"] = index
+    plan_path.write_text(json.dumps(plan))
+    load_script().main([str(plan_path), "--dry-run"])
+    lines = [line for line in capsys.readouterr().out.splitlines() if "train.py" in line]
+    for index, (name, line) in enumerate(zip(plan["stages"], lines)):
+        assert f"--holdout-config {tmp_path / f'{name}-holdout.json'}" in line
+        assert f"--valid-every {index}" in line
+    assert not (tmp_path / "runs" / "base").exists()
+
+
+@pytest.mark.parametrize("changes", [
+    {"valid_every": 1},
+    {"holdout_config": ""},
+    {"holdout_config": None},
+    {"holdout_config": ["private.json"]},
+    {"holdout_config": "private.json", "valid_every": -1},
+    {"holdout_config": "private.json", "valid_every": True},
+    {"holdout_config": "private.json", "valid_every": 0.5},
+])
+def test_invalid_holdout_plan_fails_before_any_stage_or_output(tmp_path, monkeypatch, changes):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["stages"]["base"].update(changes)
+    plan_path.write_text(json.dumps(plan))
+    runner = load_script()
+    monkeypatch.setattr(runner, "run", lambda *_: pytest.fail("must validate before launching"))
+    with pytest.raises(ValueError, match="holdout_config|valid_every"):
+        runner.main([str(plan_path)])
+    assert not (tmp_path / "runs").exists()
+
+
+def test_holdout_plan_requires_stage_values_instead_of_ignored_defaults(tmp_path):
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    plan["train"] = {"holdout_config": "private.json", "valid_every": 1}
+    plan_path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="per stage"):
+        load_script().main([str(plan_path), "--dry-run"])
+
+
+def test_actual_release_stage_records_periodic_valid_and_end_only_test(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.setenv("MKL_NUM_THREADS", "2")
+    plan_path = make_plan(tmp_path)
+    write_corpus(tmp_path / "valid-corpus", [[20 + (i + j) % 20 for j in range(20)] for i in range(8)])
+    write_corpus(tmp_path / "test-corpus", [[50 + (i + j) % 20 for j in range(20)] for i in range(8)])
+    holdout = {
+        "schema_version": 1, "valid_every": 0, "batch_size": 2,
+        "valid": {"corpus": ["valid-corpus"], "batches_per_task": 1, "seed": 4, "depth": 2},
+        "test": {"corpus": ["test-corpus"], "batches_per_task": 1, "seed": 5, "depth": 2},
+    }
+    holdout_path = tmp_path / "base-holdout.json"
+    holdout_path.write_text(json.dumps(holdout))
+    plan = json.loads(plan_path.read_text())
+    plan["stages"] = {"base": plan["stages"]["base"]}
+    plan["stages"]["base"].update(steps=2, holdout_config=str(holdout_path), valid_every=1)
+    plan["stages"]["base"].pop("evaluate")
+    plan["stages"]["base"].pop("release_name")
+    plan_path.write_text(json.dumps(plan))
+    runner = load_script()
+    runner.main([str(plan_path)])
+    path = tmp_path / "runs" / "base" / "holdout_log.jsonl"
+    reports = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(r["split"], r["step"]) for r in reports] == [("valid", 1), ("valid", 2), ("test", 2)]
+    assert (tmp_path / "runs" / "base" / "final" / "model.safetensors").exists()
+    first_bytes = path.read_bytes()
+    runner.main([str(plan_path)])
+    assert path.read_bytes() == first_bytes

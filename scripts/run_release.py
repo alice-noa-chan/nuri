@@ -39,7 +39,8 @@ PYTHON = sys.executable
 
 # Plan keys passed straight through to scripts/train.py as --flags.
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
-               "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes")
+               "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes",
+               "holdout_config", "valid_every")
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
@@ -50,6 +51,28 @@ DATA_FLAGS = {"base": ("corpus", "tokenizer"), "it": ("corpus", "tokenizer", "in
 
 def flag(name: str) -> str:
     return "--" + name.replace("_", "-")
+
+
+def validate_holdout_settings(plan: dict) -> None:
+    """Keep the optional holdout policy explicit for each model stage.
+
+    The training CLI validates the private schema and input-manifest binding.
+    Here we reject malformed plan values before any subprocess or output is
+    created. Zero is a valid completion-only validation interval.
+    """
+    if any(key in plan.get("train", {}) for key in ("holdout_config", "valid_every")):
+        raise ValueError("holdout_config and valid_every must be set per stage")
+    for name, spec in plan["stages"].items():
+        if "holdout_config" in spec:
+            config = spec["holdout_config"]
+            if not isinstance(config, str) or not config.strip():
+                raise ValueError(f"{name}: holdout_config must be a nonempty path string")
+        if "valid_every" in spec:
+            interval = spec["valid_every"]
+            if type(interval) is not int or interval < 0:
+                raise ValueError(f"{name}: valid_every must be an integer >= 0")
+            if not spec.get("holdout_config"):
+                raise ValueError(f"{name}: valid_every requires an explicit holdout_config")
 
 
 def newest_state(stage_dir: Path) -> Path | None:
@@ -200,6 +223,7 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    validate_holdout_settings(plan)
     out = Path(plan["out"])
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "run_summary.json"
