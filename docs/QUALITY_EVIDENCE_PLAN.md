@@ -1,8 +1,13 @@
 # Practical quality evidence before full training
 
-Status: the user authorized the retained-encoder comparison; execution is in
-progress. No rental, production training, new allocation or additional spending
-cap is approved by this document.
+Status: the authorized retained-encoder comparison is complete. See
+[the measured validation scores and limits](ENCODER_BENCHMARK_RESULTS.md).
+The retained encoder has useful Korean topic features, but its English sentiment
+accuracy trails every requested Base reference by 13.28 to 23.05 percentage
+points under this frozen-head protocol. Sentence-pair differences remain
+inconclusive under conditional row intervals. General BERT-family quality is
+not established. Full production training remains on hold for the user's
+review; no rental, new allocation or additional spending cap is approved here.
 The completed upload remains immutable. The user requires general encoder
 quality comparable to BERT, ModernBERT, RoBERTa, DeBERTa and ELECTRA. Exact
 checkpoint versions, language coverage, input hashes and preliminary adaptation

@@ -5,9 +5,10 @@ representations before more production training. It fits a small supervised
 head on frozen features. It does not update an encoder, evaluate the generator,
 or establish performance after full task-specific fine-tuning.
 
-The feature extractor and ridge-probe runner are implemented. The first
-comparison is running on CPU. Exact inputs, model revisions, protocol receipts
-and detailed results stay in ignored private storage.
+The feature extractor and ridge-probe runner are implemented. The first CPU
+comparison is complete; see [the measured scores](ENCODER_BENCHMARK_RESULTS.md).
+Exact inputs, model revisions, protocol receipts and detailed results stay in
+ignored private storage.
 Never put data names, sources or example text into this document or Git.
 
 ## What is compared
