@@ -177,3 +177,168 @@ def test_actual_release_stage_records_periodic_valid_and_end_only_test(tmp_path,
     first_bytes = path.read_bytes()
     runner.main([str(plan_path)])
     assert path.read_bytes() == first_bytes
+
+
+def finished_evaluation_plan(tmp_path, monkeypatch):
+    """Exercise runner receipts without repeating model training in each binding test."""
+    plan_path = make_plan(tmp_path)
+    plan = json.loads(plan_path.read_text())
+    stage = plan["stages"]["base"]
+    stage.pop("release_name")
+    plan["stages"] = {"base": stage}
+    plan_path.write_text(json.dumps(plan))
+    stage_dir = tmp_path / "runs" / "base"
+    (stage_dir / "final").mkdir(parents=True)
+    (stage_dir / "training_state").mkdir()
+    (stage_dir / "final" / "model.safetensors").write_bytes(b"retained-weight-bytes")
+    (stage_dir / "final" / "config.json").write_text("{}")
+    (stage_dir / "final" / "tokenizer.json").write_bytes((tmp_path / "tok" / "tokenizer.json").read_bytes())
+    (stage_dir / "training_state" / "final.pt").write_bytes(b"finished-state")
+    runner = load_script()
+    calls = []
+
+    def evaluate(command, dry_run):
+        assert not dry_run and "evaluate.py" in command[1]
+        calls.append(command)
+        output = Path(command[command.index("--output") + 1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"assessment": len(calls)}))
+        return 0
+
+    monkeypatch.setattr(runner, "run", evaluate)
+    return runner, plan_path, plan, stage_dir, calls
+
+
+def test_completed_evaluation_reuses_only_verified_receipt(tmp_path, monkeypatch, capsys):
+    runner, plan_path, _, _, calls = finished_evaluation_plan(tmp_path, monkeypatch)
+    runner.main([str(plan_path)])
+    summary_path = tmp_path / "runs" / "run_summary.json"
+    summary_bytes = summary_path.read_bytes()
+    runner.main([str(plan_path)])
+    assert len(calls) == 1
+    assert "evaluation already verified" in capsys.readouterr().out
+    assert summary_path.read_bytes() == summary_bytes
+    receipt = json.loads(summary_bytes)["base"]["evaluation_receipt"]
+    assert receipt["returncode"] == 0
+    assert set(receipt["binding"]["input_sha256"]) == {"corpus"}
+    assert set(receipt["binding"]["environment"]) == {
+        "NURI_EVAL_CORPUS", "NURI_EVAL_PAIRS", "NURI_EVAL_INSTRUCTIONS", "CUDA_VISIBLE_DEVICES"}
+
+
+@pytest.mark.parametrize("changed", ["weights", "config", "tokenizer", "options", "source", "runtime", "input", "manifest"])
+def test_changed_evaluation_binding_reruns_and_preserves_prior_evidence(tmp_path, monkeypatch, changed):
+    runner, plan_path, plan, stage_dir, calls = finished_evaluation_plan(tmp_path, monkeypatch)
+    manifest = tmp_path / "inputs.json"
+    manifest.write_text('{"files": []}')
+    plan["data"]["eval_input_manifest"] = str(manifest)
+    plan_path.write_text(json.dumps(plan))
+    runner.main([str(plan_path)])
+    result_path = tmp_path / "runs" / "eval" / "base.json"
+    previous = result_path.read_bytes()
+    if changed in ("weights", "config", "tokenizer"):
+        name = {"weights": "model.safetensors", "config": "config.json", "tokenizer": "tokenizer.json"}[changed]
+        path = stage_dir / "final" / name
+        path.write_bytes(path.read_bytes() + b" ")
+    elif changed == "options":
+        plan["stages"]["base"]["evaluate"] = ["denoise"]
+        plan_path.write_text(json.dumps(plan))
+    elif changed == "source":
+        monkeypatch.setattr(runner, "evaluation_source_sha256", lambda: "changed-runtime-source")
+    elif changed == "runtime":
+        monkeypatch.setattr(runner.platform, "platform", lambda: "changed-platform")
+    elif changed == "input":
+        path = tmp_path / "corpus" / "tokens.bin"
+        path.write_bytes(path.read_bytes() + b"\x08\x00\x00\x00")
+    elif changed == "manifest":
+        manifest.write_text('{"files": [], "revision": 2}')
+    runner.main([str(plan_path)])
+    assert len(calls) == 2
+    history = tmp_path / "runs" / "eval" / "history" / "base"
+    copies = list(history.glob("*/base.json"))
+    assert len(copies) == 1 and copies[0].read_bytes() == previous
+    assert len(list(history.glob("*/receipt.json"))) == 1
+    assert result_path.read_bytes() != previous
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "missing", "no_receipt"])
+def test_output_alone_or_damaged_result_never_skips_evaluation(tmp_path, monkeypatch, damage):
+    runner, plan_path, _, _, calls = finished_evaluation_plan(tmp_path, monkeypatch)
+    runner.main([str(plan_path)])
+    output = tmp_path / "runs" / "eval" / "base.json"
+    summary_path = tmp_path / "runs" / "run_summary.json"
+    if damage == "corrupt":
+        output.write_text("not JSON")
+    elif damage == "missing":
+        output.unlink()
+    else:
+        summary = json.loads(summary_path.read_text())
+        summary["base"].pop("evaluation_receipt")
+        summary_path.write_text(json.dumps(summary))
+    runner.main([str(plan_path)])
+    assert len(calls) == 2
+    assert json.loads(output.read_text()) == {"assessment": 2}
+
+
+def test_success_without_a_fresh_result_cannot_certify_old_output(tmp_path, monkeypatch):
+    runner, plan_path, _, _, _ = finished_evaluation_plan(tmp_path, monkeypatch)
+    runner.main([str(plan_path)])
+    summary_path = tmp_path / "runs" / "run_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["base"].pop("evaluation_receipt")
+    summary_path.write_text(json.dumps(summary))
+    monkeypatch.setattr(runner, "run", lambda *_: 0)
+    with pytest.raises(ValueError, match="valid JSON object"):
+        runner.main([str(plan_path)])
+    assert "evaluation_receipt" not in json.loads(summary_path.read_text())["base"]
+    assert len(list((tmp_path / "runs" / "eval" / "history" / "base").glob("*/base.json"))) == 1
+
+
+def test_interrupted_evaluation_leaves_no_success_receipt(tmp_path, monkeypatch):
+    runner, plan_path, _, _, calls = finished_evaluation_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "run", lambda *_: runner.INTERRUPTED_EXIT_CODE)
+    with pytest.raises(SystemExit) as stopped:
+        runner.main([str(plan_path)])
+    assert stopped.value.code == 75 and not calls
+    summary = json.loads((tmp_path / "runs" / "run_summary.json").read_text())
+    assert "evaluation_receipt" not in summary["base"]
+
+
+def test_input_changes_during_evaluation_cannot_receive_receipt(tmp_path, monkeypatch):
+    runner, plan_path, _, _, _ = finished_evaluation_plan(tmp_path, monkeypatch)
+    normal_run = runner.run
+
+    def mutate_input(command, dry_run):
+        code = normal_run(command, dry_run)
+        path = tmp_path / "corpus" / "tokens.bin"
+        path.write_bytes(path.read_bytes() + b"\x09\x00\x00\x00")
+        return code
+
+    monkeypatch.setattr(runner, "run", mutate_input)
+    with pytest.raises(ValueError, match="binding changed"):
+        runner.main([str(plan_path)])
+    summary = json.loads((tmp_path / "runs" / "run_summary.json").read_text())
+    assert "evaluation_receipt" not in summary["base"]
+
+
+@pytest.mark.parametrize("suite,input_key,filename", [
+    ("retrieval", "pairs", "pairs.jsonl"),
+    ("instructions", "instructions", "it.jsonl"),
+])
+def test_jsonl_input_bytes_are_bound_only_when_selected(tmp_path, monkeypatch, suite, input_key, filename):
+    runner, plan_path, plan, _, calls = finished_evaluation_plan(tmp_path, monkeypatch)
+    plan["stages"]["base"]["evaluate"] = [suite]
+    plan["data"]["eval_instructions"] = str(tmp_path / "it.jsonl")
+    plan_path.write_text(json.dumps(plan))
+    runner.main([str(plan_path)])
+    summary_path = tmp_path / "runs" / "run_summary.json"
+    binding = json.loads(summary_path.read_text())["base"]["evaluation_receipt"]["binding"]
+    assert set(binding["input_sha256"]) == {input_key}
+    # No corpus suite consumes these bytes, even though the legacy command
+    # includes the corpus argument. Unused corpus changes must not reread test.
+    (tmp_path / "corpus" / "tokens.bin").write_bytes(b"unused corpus changed")
+    runner.main([str(plan_path)])
+    assert len(calls) == 1
+    path = tmp_path / filename
+    path.write_bytes(path.read_bytes() + b"\n")
+    runner.main([str(plan_path)])
+    assert len(calls) == 2

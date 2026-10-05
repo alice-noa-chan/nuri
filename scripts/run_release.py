@@ -13,7 +13,8 @@ configs/release_plan.example.json). For each stage, in order, the runner:
    Plan-wide switches in "train" (for example {"tensorboard": true,
    "gradient_checkpointing": true}) apply to every stage unless the stage
    sets its own value.
-2. evaluates the final checkpoint (scripts/evaluate.py) when the plan asks;
+2. evaluates the final checkpoint (scripts/evaluate.py) when the plan asks,
+   reusing only a matching successful receipt and intact result;
 3. exports a release folder (scripts/export_release.py) with the measured
    GPU-hours of that stage.
 
@@ -25,8 +26,12 @@ nothing here names a dataset.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
 import os
+import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -115,6 +120,147 @@ def evaluate_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
     if data.get("eval_instructions"):
         command += ["--instructions", str(data["eval_instructions"])]
     return command
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def evaluation_source_sha256() -> str:
+    """Bind the evaluator and model runtime sources, including relative names."""
+    paths = [ROOT / "scripts" / "evaluate.py", *sorted((ROOT / "nuri").rglob("*.py"))]
+    sources = [(str(path.relative_to(ROOT)), file_sha256(path)) for path in paths]
+    return hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+
+
+def evaluation_input_hashes(command: list[str]) -> dict:
+    """Stream only the resource bytes consumed by the requested suites."""
+    start = command.index("--suites") + 1
+    end = next((i for i in range(start, len(command)) if command[i].startswith("--")), len(command))
+    suites = set(command[start:end])
+    inputs = {}
+    for option, environment, selected in (
+            ("corpus", "NURI_EVAL_CORPUS", bool(suites & {"mlm", "denoise", "diagnostics"})),
+            ("pairs", "NURI_EVAL_PAIRS", "retrieval" in suites),
+            ("instructions", "NURI_EVAL_INSTRUCTIONS", "instructions" in suites)):
+        if not selected:
+            continue
+        value = command[command.index(flag(option)) + 1] if flag(option) in command else os.environ.get(environment)
+        if not value:
+            raise ValueError(f"selected evaluation needs explicit {option} input")
+        path = Path(value).resolve()
+        paths = [path / "tokens.bin", path / "offsets.npy"] if option == "corpus" else [path]
+        inputs[option] = [{"path": str(item), "sha256": file_sha256(item)} for item in paths]
+    return inputs
+
+
+def evaluation_manifest_hashes(plan: dict, spec: dict) -> dict:
+    """Bind explicitly supplied private manifests without hashing training data."""
+    manifests = {}
+    for location, block in (("plan", plan), ("data", plan.get("data", {})), ("stage", spec)):
+        for key in ("input_manifest", "eval_input_manifest"):
+            if block.get(key):
+                path = Path(block[key]).resolve()
+                manifests[f"{location}.{key}"] = {"path": str(path), "sha256": file_sha256(path)}
+    # A stage holdout configuration may also identify the reviewed split/input
+    # manifest. Its paths follow the training CLI's config-relative convention.
+    if spec.get("holdout_config"):
+        config_path = Path(spec["holdout_config"]).resolve()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if config.get("input_manifest"):
+            path = Path(config["input_manifest"])
+            if not path.is_absolute():
+                path = config_path.parent / path
+            manifests["holdout.input_manifest"] = {"path": str(path.resolve()), "sha256": file_sha256(path)}
+    return manifests
+
+
+def evaluation_binding(command: list[str], stage_dir: Path, plan: dict, spec: dict) -> dict:
+    """Describe the actual final checkpoint and evaluator runtime for reuse."""
+    versions = {}
+    for package in ("torch", "numpy", "tokenizers", "safetensors", "transformers", "scikit-learn"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    return {
+        "checkpoint_sha256": file_sha256(stage_dir / "final" / "model.safetensors"),
+        "config_sha256": file_sha256(stage_dir / "final" / "config.json"),
+        "tokenizer_sha256": {name: file_sha256(stage_dir / "final" / name)
+                             for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
+                             if (stage_dir / "final" / name).is_file()},
+        "input_sha256": evaluation_input_hashes(command),
+        "manifest_sha256": evaluation_manifest_hashes(plan, spec),
+        "command": command,
+        "runtime_source_sha256": evaluation_source_sha256(),
+        "runtime": {"python": sys.version, "platform": platform.platform(), "packages": versions},
+        "environment": {name: os.environ.get(name) for name in
+                        ("NURI_EVAL_CORPUS", "NURI_EVAL_PAIRS", "NURI_EVAL_INSTRUCTIONS", "CUDA_VISIBLE_DEVICES")},
+    }
+
+
+def _valid_evaluation_result(path: Path) -> bool:
+    try:
+        return isinstance(json.loads(path.read_text(encoding="utf-8")), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _evaluation_matches(receipt: dict | None, binding: dict, output: Path) -> bool:
+    return bool(isinstance(receipt, dict) and receipt.get("schema_version") == 1 and receipt.get("returncode") == 0
+                and receipt.get("binding") == binding and output.is_file()
+                and receipt.get("output_sha256") == file_sha256(output)
+                and _valid_evaluation_result(output))
+
+
+def _preserve_evaluation(output: Path, receipt: dict | None) -> None:
+    """Copy prior evidence before replacement, including damaged untrusted output."""
+    if not output.exists() and receipt is None:
+        return
+    history = output.parent / "history" / output.stem / str(time.time_ns())
+    history.mkdir(parents=True)
+    if output.is_file():
+        shutil.copy2(output, history / output.name)
+    if receipt is not None:
+        (history / "receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+
+def evaluate_stage(name: str, spec: dict, plan: dict, out: Path, record: dict,
+                   summary: dict, summary_path: Path, dry_run: bool) -> int:
+    """Run or reuse a verified evaluation without discarding previous evidence."""
+    command = evaluate_command(name, spec, plan, out)
+    if dry_run:
+        return run(command, True)
+    output = out / "eval" / f"{name}.json"
+    binding = evaluation_binding(command, out / name, plan, spec)
+    receipt = record.get("evaluation_receipt")
+    if _evaluation_matches(receipt, binding, output):
+        print(f"[{name}] evaluation already verified, reusing result", flush=True)
+        return 0
+    _preserve_evaluation(output, receipt)
+    if output.is_file():
+        output.unlink()  # The preserved copy is evidence; a success must produce a fresh result.
+    record.pop("evaluation_receipt", None)
+    write_summary(summary_path, summary)
+    code = run(command, False)
+    if code != 0:
+        return code
+    if not _valid_evaluation_result(output):
+        raise ValueError(f"{name}: evaluator did not produce a valid JSON object")
+    # Reject source/checkpoint changes during assessment rather than issuing a
+    # receipt for a result whose actual computation cannot be identified.
+    if evaluation_binding(command, out / name, plan, spec) != binding:
+        raise ValueError(f"{name}: evaluation binding changed while the evaluator ran")
+    record["evaluation_receipt"] = {
+        "schema_version": 1, "returncode": 0, "binding": binding,
+        "output_sha256": file_sha256(output),
+    }
+    write_summary(summary_path, summary)
+    return 0
 
 
 def export_command(name: str, spec: dict, plan: dict, out: Path, hours: float) -> list[str]:
@@ -249,11 +395,14 @@ def main(argv=None):
                 # this stage from its newest training state.
                 print(f"[{name}] training was stopped and saved; rerun this plan to resume", flush=True)
                 sys.exit(INTERRUPTED_EXIT_CODE)
-        for command in ([evaluate_command(name, spec, plan, out)] if spec.get("evaluate") else []) + (
-                [export_command(name, spec, plan, out, record["train_seconds"] / 3600)]
-                if spec.get("release_name") else []):
+        if spec.get("evaluate"):
+            if evaluate_stage(name, spec, plan, out, record, summary, summary_path, args.dry_run) == INTERRUPTED_EXIT_CODE:
+                print(f"[{name}] stopped during evaluation; rerun this plan to continue", flush=True)
+                sys.exit(INTERRUPTED_EXIT_CODE)
+        if spec.get("release_name"):
+            command = export_command(name, spec, plan, out, record["train_seconds"] / 3600)
             if run(command, args.dry_run) == INTERRUPTED_EXIT_CODE:
-                print(f"[{name}] stopped during evaluation/export; rerun this plan to continue", flush=True)
+                print(f"[{name}] stopped during export; rerun this plan to continue", flush=True)
                 sys.exit(INTERRUPTED_EXIT_CODE)
 
     if not args.dry_run:
