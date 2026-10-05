@@ -214,6 +214,19 @@
     "diffusion_objective_and_sampler": false
   },
   "implemented_experiment_contracts": {
+    "blockwise_refinement": {
+      "api_argument": "block_size",
+      "default": null,
+      "policy": "left_to_right_blocks_mask_predict_within_active_block",
+      "completed_blocks": "frozen",
+      "future_blocks": "mask",
+      "attention": "full_bidirectional_canvas",
+      "source_memory": "fixed_X_R_and_cached_memory_kv",
+      "rounds": "per_block_report_actual_readout_calls_and_latency",
+      "incompatible_with": ["draft_feedback"],
+      "quality": "unmeasured_supplementary_validation_comparison",
+      "frozen_repair_gate_sampler": "unchanged_full_canvas"
+    },
     "gqa": {
       "model_field": "num_kv_heads",
       "default": null,
@@ -397,6 +410,16 @@
       "base": {
         "init": "scratch",
         "explicit_further_training": "init_checkpoint_weights_with_fresh_optimizer_resume_full_state_takes_priority",
+        "repair_warm_start_policy": {
+          "decision": "D-021",
+          "fully_decayed_dense_peak_lr": 0.0001,
+          "scratch_base_peak_lr": 0.0003,
+          "earlier_interrupted_moe_peak_lr": "explicit_separate_stage_choice",
+          "warmup_and_wsd_shape": "unchanged_full_schedule",
+          "mlm_span_mix": "keep_50_50",
+          "input_free_frequency_baseline": "train_fitted_supplementary_validation_report_not_gate_criterion",
+          "failed_numeric_gate": "no_waiver_for_lr_state"
+        },
         "mix": {
           "text_mlm": 0.5,
           "text_span_denoising": 0.5

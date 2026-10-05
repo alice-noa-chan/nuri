@@ -227,6 +227,8 @@ A softmax that a visible token produced while seeing its own embedding is never 
 
 This method is not the same algorithm as absorbing masked diffusion. A diffusion variant following [LLaDA](https://arxiv.org/abs/2502.09992) must define the forward corruption process, timestep weighting and reverse transition together. A mix of some diffusion loss and ad-hoc remasking is not treated as the same model without verification.
 
+**Supplementary block comparison.** An optional `block_size` applies Mask-Predict to left-to-right output blocks. Earlier blocks stay fixed, future blocks stay MASK, and only the active block is filled and re-masked. Attention remains bidirectional over the full canvas and default X/R stays cached; this option rejects draft feedback. Rounds are per block, so report actual readout calls and latency. Full-canvas inference remains the default and the frozen repair gate keeps its original sampler. See [BLOCKWISE_GENERATION.md](BLOCKWISE_GENERATION.md) and the transfer limits in [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md).
+
 ## 8. Training paths
 
 ### A. Scratch pilot of the new structure — v0 reference
@@ -393,6 +395,8 @@ Finish the five training stages and exports before bounded expensive evaluation.
 The core questions are whether latent recurrence helps task performance and whether both uses survive on one backbone.
 
 The corrected generator must pass an all-MASK position-variation check with a legacy negative control, nonzero position-table gradients, exact old-tensor preservation, padding invariance and cache equivalence. A fixed-seed symbolic CPU comparison recovered distinct four-token sequences from full MASK at S=1 and S=4 on held-out combinations, with input swaps changing the output. This is structural evidence, not natural-language quality. A paid repair must additionally improve matched real full/partial-span validation and input conditioning, and include human-read generation. Test data must not select the repair gate. Low encoder MLM loss alone never accepts the generator.
+
+Under D-021, report a training-fitted input-free token/position-frequency baseline beside the full-mask validation gate. Freeze its sampling and smoothing before scoring, state actual training presentations and target counts, and keep it supplementary rather than changing acceptance criteria. A particular frequency baseline failing the gate does not rule out every input-free strategy. Source swaps and human-read assessment remain necessary. Clipping diagnostics refer to combined accumulated optimizer updates; sampled module gradients and position-table norms are observations, not effective Adam learning rates or proof of reasoning.
 
 | Comparison | What it checks |
 |---|---|
