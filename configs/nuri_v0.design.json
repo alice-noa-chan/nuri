@@ -288,6 +288,21 @@
     "prepared_fields": "task_content_only_no_provenance",
     "local_git_guard": "tools/check_private_files.py"
   },
+  "split_and_monitoring_policy": {
+    "decision": "D-020",
+    "splits": ["train", "valid", "test"],
+    "assignment": "raw_document_or_family_before_chunking_with_duplicate_connected_groups",
+    "retained_checkpoint_exposure": "former_training_stays_train_known_consulted_groups_go_valid",
+    "validation": "optional_periodic_and_completion_selection_uses_valid_only",
+    "test": "completion_only_frozen_stage_protocol_with_bound_receipt_reuse",
+    "tensorboard_objective_tags": ["train/<task>/objective_loss", "valid/<task>/objective_loss", "test/<task>/objective_loss"],
+    "comparable_objective": "exclude_moe_auxiliary_penalties_report_components_and_exact_denominators",
+    "coverage": "fixed_bounded_sample_with_actual_counts_not_exhaustive",
+    "assessment_state": "eval_no_grad_restore_modes_rng_and_moe_telemetry",
+    "publication": "final_weights_after_successful_assessment",
+    "evidence": "private_hash_lineage_group_and_exposure_audits",
+    "pristine_test_claim": "requires_overlap_and_prior_consultation_audit"
+  },
   "release_models": {
     "decision": "D-009 ~ D-014 (docs/ARCHITECTURE.md §14)",
     "languages": [
