@@ -128,6 +128,7 @@ class TrainSettings:
     native_gqa: bool = False          # let SDPA consume compact grouped K/V heads (runtime option)
     save_every_minutes: float = 0.0   # also save training_state/latest.pt this often (0 = off)
     valid_every: int = 0             # completed optimizer steps between bounded validations (0 = final only)
+    stop_after_completed_steps: int | None = None  # runtime gate; preserves the full optimizer schedule
 
 
 @dataclass
@@ -509,6 +510,9 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
         raise ValueError("log_every must be positive")
     if settings.grad_accum < 1:
         raise ValueError("grad_accum must be >= 1")
+    boundary = settings.stop_after_completed_steps
+    if boundary is not None and (type(boundary) is not int or not 0 < boundary < settings.total_steps):
+        raise ValueError("stop_after_completed_steps must be a positive integer below total_steps")
     if settings.valid_every < 0:
         raise ValueError("valid_every must be nonnegative")
     if settings.valid_every and validation is None:
@@ -538,6 +542,11 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
     start_step = 0
     if resume_from is not None:
         start_step, totals = _resume(resume_from, model, optimizer, rng, tasks, settings)
+        if boundary is not None and start_step >= boundary:
+            # Repeating a gated invocation must not complete due checkpoints or
+            # consult holdouts. Omitting the boundary resumes the full schedule.
+            path = _save_state(model, optimizer, settings, start_step - 1, totals, out, rng, tasks, LATEST_STATE)
+            raise TrainingInterrupted(start_step, path, reason="step_boundary")
         if (start_step == settings.total_steps and (validation or test)
                 and (out / "final" / "model.safetensors").exists()):
             try:
@@ -674,12 +683,15 @@ def train(model: NuriModel, tasks: dict[str, Task], settings: TrainSettings, dev
             # A requested stop is handled before any regular checkpoint, so the
             # shutdown writes exactly one full state (latest.pt) inside the
             # provider's grace period. Regular checkpoints due at this step are
-            # completed when the run resumes. The last step always finishes.
+            # completed when the run resumes. An explicit boundary also stops
+            # before any due held-out assessment; it never shortens the schedule.
             finished = step == settings.total_steps - 1
-            if _stop.requested and (not finished or validation is not None or test is not None):
+            boundary_reached = boundary is not None and step + 1 >= boundary
+            if boundary_reached or (_stop.requested and (not finished or validation is not None or test is not None)):
                 monitor.phase("saving latest state", force=True)
                 path = _save_state(model, optimizer, settings, step, totals, out, rng, tasks, LATEST_STATE)
-                raise TrainingInterrupted(step + 1, path)
+                reason = "step_boundary" if boundary_reached else "requested"
+                raise TrainingInterrupted(step + 1, path, reason=reason)
 
             if validation is not None and (finished or (settings.valid_every and (step + 1) % settings.valid_every == 0)):
                 assess(validation, "valid", step)
@@ -782,7 +794,7 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
 # do not change what is computed. Everything else must match exactly.
 RESUME_FREE_SETTINGS = ("out_dir", "log_every", "save_every", "tokenizer_dir",
                         "stage", "progress", "tensorboard_dir", "gradient_checkpointing", "compile",
-                        "save_every_minutes", "valid_every")
+                        "save_every_minutes", "valid_every", "stop_after_completed_steps")
 
 
 # Exit code of scripts/train.py after a requested stop (EX_TEMPFAIL: "try again").
@@ -806,9 +818,9 @@ class NonFiniteTraining(Exception):
 class TrainingInterrupted(Exception):
     """Training stopped early on request; the full state is in `path`."""
 
-    def __init__(self, step: int, path: Path):
+    def __init__(self, step: int, path: Path, reason: str = "requested"):
         super().__init__(f"training stopped after step {step}; resume from {path}")
-        self.step, self.path = step, path
+        self.step, self.path, self.reason = step, path, reason
 
 
 class _StopFlag:

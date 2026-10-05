@@ -89,6 +89,9 @@ def parse_args(argv=None):
     p.add_argument("--valid-every", type=nonnegative_int, default=None,
                    help="validation interval in completed updates (0 = completion only); requires --holdout-config")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
+    p.add_argument("--stop-after-completed-steps", type=positive_int,
+                   help="save full state and exit 75 at this update, before assessment; below --steps; "
+                        "omit on resume to continue the original full schedule")
     p.add_argument("--save-every-minutes", type=float, default=0.0,
                    help="also save the full training state to training_state/latest.pt this often (0 = off); "
                         "SIGTERM always saves it and exits with code 75 so the run can be resumed")
@@ -115,6 +118,8 @@ def parse_args(argv=None):
     p.add_argument("--reasoning-examples", type=int, default=20000,
                    help="synthetic reasoning examples for the it stage (0 = none)")
     args = p.parse_args(argv)
+    if args.stop_after_completed_steps is not None and args.stop_after_completed_steps >= args.steps:
+        p.error("--stop-after-completed-steps must be below --steps")
     if args.valid_every is not None and not args.holdout_config:
         p.error("--valid-every requires --holdout-config")
     return args
@@ -372,7 +377,8 @@ def main(argv=None):
                              grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
                              compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa,
                              save_every_minutes=args.save_every_minutes,
-                             valid_every=holdout_config["valid_every"] if holdout_config else 0)
+                             valid_every=holdout_config["valid_every"] if holdout_config else 0,
+                             stop_after_completed_steps=args.stop_after_completed_steps)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)
@@ -380,7 +386,8 @@ def main(argv=None):
     try:
         records = train(model, tasks, settings, resume_from=args.resume, validation=validation, test=test)
     except TrainingInterrupted as stop:
-        print(f"[{args.stage}] stopped on request after step {stop.step}; "
+        label = "at completed-step boundary" if stop.reason == "step_boundary" else "on request"
+        print(f"[{args.stage}] stopped {label} after step {stop.step}; "
               f"resume with --resume {stop.path}", flush=True)
         sys.exit(INTERRUPTED_EXIT_CODE)
     except NonFiniteTraining as error:
