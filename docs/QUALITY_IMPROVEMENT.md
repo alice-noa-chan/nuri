@@ -139,6 +139,38 @@ rate is a candidate, not an established correction. Accumulation increases
 optimizer batch size without enlarging a microbatch's contrastive candidate
 pool. Keep these mechanisms and measurements distinct.
 
+## Implemented failure-informed controls
+
+The corrected Dense initializer remains the starting point. The opt-in
+[training recipe](TRAINING_RECIPE.md) now exposes the existing canvas
+`full_mask_prob` for Base and IT. This allows a separately declared first-fill
+supervision comparison while preserving the default probability of 0.1 and
+the D-021 comparator. More fully masked targets can change vocabulary-head
+compute and subsequent RNG draws; a matching seed does not imply matching
+mask arrays after a policy change.
+
+Prepare three independent Base changes against that comparator: document
+language exposure, MLM/span microbatch probabilities, and full-mask frequency.
+Keep their initializer, schedule and declared budget matched, inspect actual
+positions/targets, and leave other causes fixed. Values and data bindings stay
+private. These are learning candidates, not proven beneficial replacements.
+
+The independent assessment corruption override keeps the aggregate and
+language validation distributions fixed when training corruption changes.
+The new [decoded source-conditioning suite](SOURCE_CONDITIONING.md) separately
+checks EOS-aware correctness under actual equal-length prompt substitutions,
+with private readable samples and language-specific numeric curves. Response
+changes, lower corruption loss and useful oracle answers remain distinct.
+
+Use a short stopped segment with preserved full optimizer/schedule state for
+a later measured decision. Before extending Base, check encoder tasks and
+decoded conditioning by language. IT and Embed each require before/after
+cross-capability retention; Base embedding projections are not yet trained
+retrieval heads. Source-bound preparation artifacts from earlier versions
+remain historical records and cannot silently authorize changed runtime code.
+No learned quality update, GPU execution or new release default is claimed
+by this implementation.
+
 ## Research basis and limits
 
 [RoBERTa](https://arxiv.org/abs/1907.11692) demonstrates the importance of the

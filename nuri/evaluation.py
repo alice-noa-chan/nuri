@@ -20,7 +20,10 @@ plain dicts that can be written as JSON. Every result reports its settings
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+import time
 import warnings
 from typing import Callable, Sequence
 
@@ -119,6 +122,140 @@ def generation_accuracy(model: NuriModel, examples: Sequence[Example], steps: in
               "rounds": rounds if rounds is not None else config.refine_rounds, "oracle_length": oracle_length}
     if oracle_length:
         report["length_only_accuracy"] = _length_only_accuracy([a for _, a in eligible])
+    return report
+
+
+@torch.no_grad()
+def source_conditioning(model: NuriModel, examples: Sequence[Example], *, max_examples: int = 128,
+                        seed: int = 0, steps: int = 4, rounds: int = 4,
+                        oracle_length: bool = True, batch_size: int = 32, sample_count: int = 0) -> dict:
+    """Compare real input replacements at equal reference lengths.
+
+    Each selected prompt receives a different visible prompt whose reference
+    has the same length and different content. Both generations start from
+    MASK; references are not appended as teacher memory. Partners may repeat and are counted.
+    Correctness with EOS matters separately from merely changing the output.
+    This bounded diagnostic is not an edited-context counterfactual dataset.
+    """
+    if type(max_examples) is not int or not 1 <= max_examples <= 1024:
+        raise ValueError("max_examples must be an integer in [1, 1024]")
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    if type(sample_count) is not int or not 0 <= sample_count <= 32:
+        raise ValueError("sample_count must be an integer in [0, 32]")
+    if type(seed) is not int or type(steps) is not int or steps < 0:
+        raise ValueError("seed must be an integer and steps a nonnegative integer")
+    if type(rounds) is not int or rounds < 1 or type(oracle_length) is not bool:
+        raise ValueError("rounds must be positive and oracle_length a boolean")
+    if not oracle_length and not model.config.length_head_trained:
+        raise ValueError("predicted-length conditioning requires a trained length head")
+
+    config = model.config
+    eligible, empty, over_cap, truncated = [], 0, 0, 0
+    for index, (prompt, answer) in enumerate(examples):
+        if not prompt:
+            empty += 1
+        elif len(answer) + 1 > config.max_response_len:
+            over_cap += 1
+        else:
+            truncated += len(prompt) > config.max_input_len
+            eligible.append((index, list(prompt[-config.max_input_len:]), list(answer)))
+    selected = random.Random(seed).sample(eligible, min(max_examples, len(eligible)))
+    selected.sort(key=lambda row: row[0])
+    pairs = []
+    for index, prompt, answer in selected:
+        partner = next((row for row in selected
+                        if row[1] != prompt and row[2] != answer and len(row[2]) == len(answer)), None)
+        if partner is not None:
+            pairs.append(((index, prompt, answer), partner))
+
+    selection = [(a, b) for a, b in pairs]
+    report = {"status": "assessed" if pairs else "unassessed_no_length_matched_pairs",
+              "input_examples": len(examples), "eligible_examples": len(eligible),
+              "excluded_empty_prompt": empty, "excluded_over_cap_answer": over_cap,
+              "eligible_truncated_prompts": truncated, "selected_examples": len(selected),
+              "unpaired_selected_examples": len(selected) - len(pairs), "paired_examples": len(pairs),
+              "unique_partner_examples": len({b[0] for _, b in pairs}),
+              "reused_partner_presentations": len(pairs) - len({b[0] for _, b in pairs}),
+              "evaluation_coverage": len(pairs) / max(len(examples), 1),
+              "max_examples": max_examples, "seed": seed, "steps": steps, "rounds": rounds,
+              "oracle_length": oracle_length, "temperature": 0.0,
+              "pair_policy": "different visible prompts and answers; equal reference token lengths",
+              "prompt_policy": "last max_input_len tokens, matching generation_accuracy",
+              "selection_sha256": hashlib.sha256(json.dumps(selection).encode()).hexdigest(),
+              "generated_rows": 0, "readout_calls": 0}
+    counts = {name: 0 for name in ("original_content_exact_match", "original_token_sequence_exact_match",
+                                  "swapped_original_target_token_sequence_exact_match",
+                                  "swapped_own_target_token_sequence_exact_match", "response_change_rate",
+                                  "both_targets_correct_rate", "original_missing_eos_rate",
+                                  "swapped_missing_eos_rate", "original_early_eos_rate",
+                                  "swapped_early_eos_rate", "original_canvas_length_mae",
+                                  "swapped_canvas_length_mae")}
+    samples = []
+    if not pairs:
+        return {**report, **{key: None for key in counts}, "conditioning_gap": None,
+                "length_only_token_sequence_exact_match": None, "seconds": 0.0,
+                **({"samples": samples} if sample_count else {})}
+
+    device = next(model.parameters()).device
+    modes = [(module, module.training) for module in model.modules()]
+    cuda_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+    start = time.perf_counter()
+    try:
+        model.eval()
+        # Keep optional development checks from changing subsequent training RNG.
+        with torch.random.fork_rng(devices=cuda_devices):
+            for chunk in _batches(pairs, batch_size):
+                results = []
+                for side in (0, 1):
+                    ids, valid = pad_batch([pair[side][1] for pair in chunk], config.pad_id)
+                    lengths = torch.tensor([len(pair[side][2]) + 1 for pair in chunk], device=device)
+                    result = generate(model, ids.to(device), valid.to(device), steps=steps, rounds=rounds,
+                                      canvas_len=lengths if oracle_length else None, temperature=0.0)
+                    results.append(result)
+                    report["generated_rows"] += len(chunk)
+                    report["readout_calls"] += result.readout_calls
+                original, swapped = results
+                for row, (before, after) in enumerate(chunk):
+                    answer, other_answer = before[2], after[2]
+                    first, second = original.tokens[row], swapped.tokens[row]
+                    ended, other_ended = original.ended_with_eos[row], swapped.ended_with_eos[row]
+                    first_ok = first == answer and ended
+                    second_ok = second == other_answer and other_ended
+                    counts["original_content_exact_match"] += first == answer
+                    counts["original_token_sequence_exact_match"] += first_ok
+                    counts["swapped_original_target_token_sequence_exact_match"] += second == answer and other_ended
+                    counts["swapped_own_target_token_sequence_exact_match"] += second_ok
+                    counts["response_change_rate"] += first != second
+                    counts["both_targets_correct_rate"] += first_ok and second_ok
+                    counts["original_missing_eos_rate"] += not ended
+                    counts["swapped_missing_eos_rate"] += not other_ended
+                    counts["original_early_eos_rate"] += ended and len(first) < len(answer)
+                    counts["swapped_early_eos_rate"] += other_ended and len(second) < len(other_answer)
+                    counts["original_canvas_length_mae"] += abs(int(original.lengths[row]) - len(answer) - 1)
+                    counts["swapped_canvas_length_mae"] += abs(int(swapped.lengths[row]) - len(other_answer) - 1)
+                    if len(samples) < sample_count:
+                        sample = {"original_index": before[0], "partner_index": after[0],
+                                  "original_prompt": before[1], "swapped_prompt": after[1],
+                                  "original_reference": answer, "swapped_reference": other_answer}
+                        for prefix, result in (("original", original), ("swapped", swapped)):
+                            length = int(result.lengths[row])
+                            sample.update({f"{prefix}_tokens": result.tokens[row],
+                                           f"{prefix}_ended_with_eos": result.ended_with_eos[row],
+                                           f"{prefix}_canvas_length": length,
+                                           f"{prefix}_canvas": result.canvas[row, :length].cpu().tolist()})
+                        samples.append(sample)
+    finally:
+        for module, training in modes:
+            module.training = training
+    report.update({key: value / len(pairs) for key, value in counts.items()})
+    report["conditioning_gap"] = (report["original_token_sequence_exact_match"]
+                                  - report["swapped_original_target_token_sequence_exact_match"])
+    report["length_only_token_sequence_exact_match"] = (
+        _length_only_accuracy([a[2] for a, _ in pairs]) if oracle_length else None)
+    report["seconds"] = time.perf_counter() - start
+    if sample_count:
+        report["samples"] = samples
     return report
 
 

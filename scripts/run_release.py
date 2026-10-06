@@ -45,7 +45,7 @@ PYTHON = sys.executable
 # Plan keys passed straight through to scripts/train.py as --flags.
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
                "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes",
-               "holdout_config", "valid_every", "stop_after_completed_steps", "recipe_config")
+               "holdout_config", "valid_every", "stop_after_completed_steps", "recipe_config", "assessment_recipe_config")
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
@@ -95,13 +95,17 @@ def validate_recipe_settings(plan: dict) -> None:
     Recipes describe one stage, so a plan-wide recipe would be ambiguous.
     The training CLI checks the actual private JSON and model geometry.
     """
-    if "recipe_config" in plan.get("train", {}):
-        raise ValueError("recipe_config must be set per stage")
+    if any(key in plan.get("train", {}) for key in ("recipe_config", "assessment_recipe_config")):
+        raise ValueError("recipe_config and assessment_recipe_config must be set per stage")
     for name, spec in plan["stages"].items():
-        if "recipe_config" in spec:
-            path = spec["recipe_config"]
+        for key in ("recipe_config", "assessment_recipe_config"):
+            if key not in spec:
+                continue
+            path = spec[key]
             if not isinstance(path, str) or not path.strip():
-                raise ValueError(f"{name}: recipe_config must be a nonempty path string")
+                raise ValueError(f"{name}: {key} must be a nonempty path string")
+            if key == "assessment_recipe_config" and not spec.get("holdout_config"):
+                raise ValueError(f"{name}: assessment_recipe_config requires holdout_config")
 
 
 def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
@@ -165,7 +169,7 @@ def evaluation_input_hashes(command: list[str]) -> dict:
     for option, environment, selected in (
             ("corpus", "NURI_EVAL_CORPUS", bool(suites & {"mlm", "denoise", "diagnostics"})),
             ("pairs", "NURI_EVAL_PAIRS", "retrieval" in suites),
-            ("instructions", "NURI_EVAL_INSTRUCTIONS", "instructions" in suites)):
+            ("instructions", "NURI_EVAL_INSTRUCTIONS", bool(suites & {"instructions", "conditioning"}))):
         if not selected:
             continue
         value = command[command.index(flag(option)) + 1] if flag(option) in command else os.environ.get(environment)

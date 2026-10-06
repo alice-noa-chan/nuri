@@ -26,6 +26,8 @@ Suites
   diagnostics    per-step core state statistics
   instructions   generation metrics and coverage on --instructions JSONL ("messages", "response");
                  oracle length, plus predicted length for a trained length head
+  conditioning   bounded length-matched prompt replacements on --instructions;
+                 correctness with EOS and input sensitivity, reported separately
 
 Base models have no trained length head, so their generation suites use the
 oracle length only, and the report says so.
@@ -34,6 +36,7 @@ oracle length only, and the report says so.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -53,7 +56,21 @@ from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer  # noqa: E402
 
 SUITES = ("reasoning", "curves", "interventions", "halting", "mlm", "denoise", "retrieval", "diagnostics",
-          "instructions")
+          "instructions", "conditioning")
+
+
+def conditioning_limit(value):
+    number = int(value)
+    if not 1 <= number <= 1024:
+        raise argparse.ArgumentTypeError("must be in [1, 1024]")
+    return number
+
+
+def nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return number
 
 
 def parse_args(argv=None):
@@ -67,6 +84,15 @@ def parse_args(argv=None):
                    help="held-out canonical instruction JSONL; evaluate the whole file")
     p.add_argument("--examples", type=int, default=300, help="synthetic examples per reasoning generation suite")
     p.add_argument("--documents", type=int, default=500, help="documents for mlm and diagnostics")
+    p.add_argument("--conditioning-examples", type=conditioning_limit, default=128,
+                   help="conditioning: deterministic maximum selected rows, before length-matched pairing")
+    p.add_argument("--conditioning-samples-output",
+                   help="optional fresh JSONL under .private for up to eight decoded source-swap pairs per mode")
+    p.add_argument("--conditioning-tensorboard-dir", help="optional fresh directory for numeric VALID conditioning curves")
+    p.add_argument("--conditioning-language", choices=("ko", "en", "ja"),
+                   help="declared language of the reviewed file; required for conditioning TensorBoard")
+    p.add_argument("--conditioning-step", type=nonnegative_int, default=0,
+                   help="completed optimizer updates of the assessed snapshot (default 0)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--output", help="write the report here as JSON")
@@ -118,15 +144,37 @@ def pair_examples(path: str | Path, encode) -> tuple[list, dict]:
 
 def main(argv=None) -> dict:
     args = parse_args(argv)
+    sample_path = None
+    tensorboard_path = None
+    if args.conditioning_tensorboard_dir:
+        if "conditioning" not in args.suites or not args.conditioning_language:
+            sys.exit("conditioning TensorBoard requires the suite and an explicit language")
+        tensorboard_path = Path(args.conditioning_tensorboard_dir)
+        if tensorboard_path.exists():
+            sys.exit("conditioning TensorBoard directory already exists; use a fresh path")
+    if args.conditioning_samples_output:
+        if "conditioning" not in args.suites:
+            sys.exit("--conditioning-samples-output requires the conditioning suite")
+        sample_path = Path(args.conditioning_samples_output).resolve()
+        if not sample_path.is_relative_to(Path(__file__).resolve().parent.parent / ".private"):
+            sys.exit("conditioning samples must stay under the project's .private directory")
+        if sample_path.exists():
+            sys.exit("conditioning samples output already exists; use a fresh path")
+    if "conditioning" in args.suites and args.output and Path(args.output).exists():
+        sys.exit("conditioning report already exists; use a fresh path")
+    if sample_path is not None and args.output and sample_path == Path(args.output).resolve():
+        sys.exit("conditioning samples and aggregate report need different output paths")
     if "instructions" in args.suites and not args.instructions:
         sys.exit("instructions needs --instructions (or NURI_EVAL_INSTRUCTIONS)")
+    if "conditioning" in args.suites and not args.instructions:
+        sys.exit("conditioning needs --instructions (or NURI_EVAL_INSTRUCTIONS)")
     if "retrieval" in args.suites and not args.pairs:
         sys.exit("retrieval needs --pairs (or NURI_EVAL_PAIRS)")
     model = load_pretrained(args.checkpoint, device=args.device).eval()
     tokenizer = load_tokenizer(args.tokenizer or args.checkpoint)
     check_tokenizer(tokenizer, model.config)
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False).ids  # noqa: E731
-    natural_examples = instruction_examples(args.instructions, encode) if "instructions" in args.suites else None
+    natural_examples = instruction_examples(args.instructions, encode) if {"instructions", "conditioning"} & set(args.suites) else None
     retrieval_pairs, retrieval_input = pair_examples(args.pairs, encode) if "retrieval" in args.suites else (None, None)
 
     report = {"checkpoint": str(args.checkpoint), "length_head_trained": model.config.length_head_trained}
@@ -164,6 +212,46 @@ def main(argv=None) -> dict:
             result["predicted_length"] = evaluation.generation_accuracy(model, natural_examples)
         report["instructions"] = result
 
+    if "conditioning" in args.suites:
+        controls = {"max_examples": args.conditioning_examples, "seed": args.seed,
+                    "sample_count": 8 if sample_path is not None else 0}
+        result = {"oracle_length_only": not model.config.length_head_trained,
+                  "oracle_length": evaluation.source_conditioning(model, natural_examples, **controls)}
+        if model.config.length_head_trained:
+            result["predicted_length"] = evaluation.source_conditioning(model, natural_examples,
+                                                                         oracle_length=False, **controls)
+        if sample_path is not None:
+            private_samples = []
+            for mode in ("oracle_length", "predicted_length"):
+                for sample in result.get(mode, {}).pop("samples", []):
+                    decoded = {"mode": mode, **sample}
+                    for key in ("original_prompt", "swapped_prompt", "original_reference",
+                                "swapped_reference", "original_tokens", "swapped_tokens"):
+                        decoded[key + "_text"] = tokenizer.decode(sample[key], skip_special_tokens=False)
+                    private_samples.append(decoded)
+            payload = "".join(json.dumps(sample, ensure_ascii=False) + "\n" for sample in private_samples)
+            sample_path.parent.mkdir(parents=True, exist_ok=True)
+            with sample_path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload)
+            result["private_samples"] = {"rows": len(private_samples),
+                                         "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+        if tensorboard_path is not None:
+            from torch.utils.tensorboard import SummaryWriter
+            with SummaryWriter(str(tensorboard_path)) as writer:
+                for mode in ("oracle_length", "predicted_length"):
+                    if mode not in result:
+                        continue
+                    prefix = f"valid/{args.conditioning_language}/conditioning/{mode}"
+                    for key, value in result[mode].items():
+                        if type(value) in (int, float):
+                            writer.add_scalar(f"{prefix}/{key}", value, args.conditioning_step)
+                    writer.add_scalar(f"{prefix}/unassessed", result[mode]["status"] != "assessed",
+                                      args.conditioning_step)
+            result["tensorboard_written"] = True
+        result["declared_language"] = args.conditioning_language
+        result["completed_updates"] = args.conditioning_step
+        report["conditioning"] = result
+
     if {"mlm", "denoise", "diagnostics"} & set(args.suites):
         if not args.corpus:
             sys.exit("mlm, denoise and diagnostics need --corpus (or NURI_EVAL_CORPUS)")
@@ -192,7 +280,11 @@ def main(argv=None) -> dict:
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.output).write_text(text, encoding="utf-8")
+        if "conditioning" in args.suites:
+            with Path(args.output).open("x", encoding="utf-8") as stream:
+                stream.write(text)
+        else:
+            Path(args.output).write_text(text, encoding="utf-8")
     print(text.encode("ascii", "backslashreplace").decode("ascii"))  # safe on any console encoding
     return report
 
