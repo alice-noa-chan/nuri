@@ -22,6 +22,18 @@ difference and product. They do not use joint attention between the sentences.
 The declared grid is `0.01, 0.1, 1, 10, 100`, selected by validation macro-F1,
 then accuracy, then grid order. Exact source and protocol bindings stay private.
 
+**Follow-up limitation (2026-10-06):** 19 of these 21 saved reports select
+the grid's upper value, 100; two select 10. The search therefore does not
+bracket every model's useful regularization range. These immutable results
+remain valid under the declared five-candidate protocol, but their score gaps
+are not estimates of each model's best frozen-probe performance. Claude
+reports gains in a wider-grid diagnostic; those measurements are a separate
+validation exploration, not new encoder learning or a reviewed replacement
+of this report. A versioned equal-budget grid and boundary flags are required
+before rescoring the same caches. Reusing the consulted validation rows adds
+selection optimism; completion TEST remains reserved. See
+[the broad improvement work plan](QUALITY_IMPROVEMENT.md).
+
 All models receive the same visible strings, IDs and labels within a task.
 Every field fits all applicable tokenizers within 128 encoded tokens; no input
 was clipped and extraction reports show zero truncated fields. Runs use CPU
