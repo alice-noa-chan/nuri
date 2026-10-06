@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 
 
 ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0)
+MAX_ALPHA_CANDIDATES = 64
 CHUNK_ROWS = 512
 FEATURE_KEYS = {"features", "labels", "row_ids", "metadata_json"}
 SHARED_METADATA = ("backend", "model_id", "model_revision", "model_sha256",
@@ -59,6 +60,50 @@ def private_path(path: str | Path) -> Path:
     if ".private" not in resolved.parts:
         raise ValueError("probe output and TensorBoard paths must be inside a .private directory")
     return resolved
+
+
+def frozen_ridge_search(protocol, protocol_path: Path) -> tuple[tuple, dict | None]:
+    """Read an opt-in search without rebinding or modifying cached features."""
+    if not isinstance(protocol, dict) or "ridge_probe" not in protocol:
+        return ALPHAS, None
+    search = protocol["ridge_probe"]
+    if (not isinstance(search, dict) or set(search) != {
+            "schema_version", "alpha_grid", "feature_assessment_protocol"}
+            or type(search["schema_version"]) is not int or search["schema_version"] != 2):
+        raise ValueError("ridge_probe needs schema_version 2 and exactly the declared search fields")
+    grid = search["alpha_grid"]
+    if not isinstance(grid, list) or not 2 <= len(grid) <= MAX_ALPHA_CANDIDATES:
+        raise ValueError("alpha_grid must contain between 2 and 64 candidates")
+    alphas = []
+    for value in grid:
+        if type(value) not in (int, float):
+            raise ValueError("alpha_grid candidates must be finite positive numbers")
+        try:
+            alpha = float(value)
+        except OverflowError as error:
+            raise ValueError("alpha_grid candidates must be finite positive numbers") from error
+        if not math.isfinite(alpha) or alpha <= 0:
+            raise ValueError("alpha_grid candidates must be finite positive numbers")
+        if alphas and alpha <= alphas[-1]:
+            raise ValueError("alpha_grid must be sorted in strictly increasing order with unique candidates")
+        alphas.append(alpha)
+    binding = search["feature_assessment_protocol"]
+    if (not isinstance(binding, dict) or set(binding) != {"path", "sha256"}
+            or not isinstance(binding["path"], str) or not binding["path"]):
+        raise ValueError("feature_assessment_protocol needs only a nonempty path and SHA256")
+    digest = binding["sha256"]
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("feature assessment protocol binding needs a lowercase SHA256")
+    original = private_path(protocol_path.parent / binding["path"])
+    if original == protocol_path:
+        raise ValueError("the new search must bind a separate feature assessment protocol")
+    if original.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("feature assessment protocol JSON exceeds the bounded input size")
+    if file_sha256(original) != digest:
+        raise ValueError("feature assessment protocol file hash mismatch")
+    json.loads(original.read_text(encoding="utf-8"))
+    return tuple(alphas), {"path": str(original), "sha256": digest}
 
 
 def inspect_npz(path: Path, max_bytes: int) -> int:
@@ -251,14 +296,17 @@ def paired_bootstrap(labels: np.ndarray, predictions: np.ndarray, classes: int, 
             "limitations": "Conditional on VALID-selected alpha; row independence assumed; no selection or training uncertainty."}
 
 
-def reference_predictions(path: Path, valid: FeatureSet) -> tuple[np.ndarray, dict]:
+def reference_predictions(path: Path, valid: FeatureSet, *,
+                          assessment_protocol_sha256: str | None = None) -> tuple[np.ndarray, dict]:
     if path.stat().st_size > 64 * 1024 * 1024:
         raise ValueError("reference report exceeds the bounded JSON size")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report_bytes = path.read_bytes()
+    report = json.loads(report_bytes.decode("utf-8"))
     if (report.get("schema_version") != 1 or report.get("status") != "completed"
             or report.get("kind") != "frozen_multiclass_ridge" or report.get("test_used") is not False):
         raise ValueError("reference must be a completed validation-only ridge probe")
-    if report.get("frozen_protocol_sha256") != valid.metadata["assessment_protocol_sha256"]:
+    expected_protocol = assessment_protocol_sha256 or valid.metadata["assessment_protocol_sha256"]
+    if report.get("frozen_protocol_sha256") != expected_protocol:
         raise ValueError("reference assessment protocol binding differs")
     metadata = report["inputs"]["valid"]["metadata"]
     for key in ("assessment_protocol_sha256", "raw_input_sha256", "row_ids_sha256", "label_count"):
@@ -271,7 +319,7 @@ def reference_predictions(path: Path, valid: FeatureSet) -> tuple[np.ndarray, di
     if predictions.dtype.kind not in "iu" or predictions.shape != valid.labels.shape:
         raise ValueError("reference predictions must be aligned integer class IDs")
     classification_metrics(valid.labels, predictions, valid.metadata["label_count"])
-    return predictions.astype(np.int64), {"sha256": file_sha256(path),
+    return predictions.astype(np.int64), {"sha256": hashlib.sha256(report_bytes).hexdigest(),
                                           "model_sha256": metadata["model_sha256"],
                                           "model_id": metadata["model_id"]}
 
@@ -311,8 +359,10 @@ def run_probe(train_path: str | Path, valid_path: str | Path, output: str | Path
     protocol_path = private_path(protocol_path)
     if protocol_path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError("protocol JSON exceeds the bounded input size")
-    json.loads(protocol_path.read_text(encoding="utf-8"))
-    protocol_digest = file_sha256(protocol_path)
+    protocol_bytes = protocol_path.read_bytes()
+    protocol = json.loads(protocol_bytes.decode("utf-8"))
+    protocol_digest = hashlib.sha256(protocol_bytes).hexdigest()
+    alphas, feature_assessment = frozen_ridge_search(protocol, protocol_path)
     train_path, valid_path = Path(train_path).resolve(), Path(valid_path).resolve()
     if train_path == valid_path or output in (train_path, valid_path):
         raise ValueError("feature splits and output need distinct paths")
@@ -322,15 +372,21 @@ def run_probe(train_path: str | Path, valid_path: str | Path, output: str | Path
     train = load_features(train_path, "train", max_bytes)
     valid = load_features(valid_path, "valid", max_bytes)
     validate_splits(train, valid)
-    if train.metadata.get("assessment_protocol_sha256") != protocol_digest:
+    feature_protocol_digest = feature_assessment["sha256"] if feature_assessment else protocol_digest
+    if train.metadata.get("assessment_protocol_sha256") != feature_protocol_digest:
         raise ValueError("feature assessment digest differs from the supplied frozen protocol")
     estimated_bytes = workspace_bytes(train, valid)
+    if feature_assessment:
+        estimated_bytes += max(0, len(alphas) - len(ALPHAS)) * len(valid.labels) * np.dtype(np.int64).itemsize
     if estimated_bytes > max_bytes:
         raise ValueError("ridge workspace exceeds the CPU memory budget; use fewer rows or a larger explicit budget")
-    references = [(reference_predictions(Path(path), valid)) for path in reference_reports]
+    references = [reference_predictions(Path(path), valid, assessment_protocol_sha256=protocol_digest)
+                  for path in reference_reports]
     writer = None
     if tensorboard_dir is not None:
         directory = private_path(tensorboard_dir)
+        if feature_assessment:
+            directory.mkdir(parents=True, exist_ok=False)
         try:
             from torch.utils.tensorboard import SummaryWriter
         except ImportError as error:
@@ -342,7 +398,7 @@ def run_probe(train_path: str | Path, valid_path: str | Path, output: str | Path
         classes = train.metadata["label_count"]
         gram, rhs, intercept, dual = ridge_system(standardized, train.labels, classes)
         candidates, selected_predictions = [], []
-        bar = tqdm(ALPHAS, desc="Frozen ridge: TRAIN fit / VALID selection", disable=not progress)
+        bar = tqdm(alphas, desc="Frozen ridge: TRAIN fit / VALID selection", disable=not progress)
         for step, alpha in enumerate(bar, start=1):
             weights = ridge_weights(standardized, gram, rhs, alpha, dual)
             train_prediction = predict(standardized, weights, intercept)
@@ -371,7 +427,7 @@ def run_probe(train_path: str | Path, valid_path: str | Path, output: str | Path
                        for split, data in (("train", train), ("valid", valid))},
             "runtime": {"python": platform.python_version(), "numpy": np.__version__,
                         "script_sha256": file_sha256(Path(__file__))},
-            "protocol": {"alpha_grid": list(ALPHAS), "selection": "VALID macro_f1, then accuracy, then grid order",
+            "protocol": {"alpha_grid": list(alphas), "selection": "VALID macro_f1, then accuracy, then grid order",
                          "standardization": "TRAIN mean/population standard deviation; zero variance scale one",
                          "intercept": "unpenalized TRAIN class-prior intercept",
                          "macro_f1": "all declared classes, including absent classes, zero denominator gives zero",
@@ -399,9 +455,23 @@ def run_probe(train_path: str | Path, valid_path: str | Path, output: str | Path
                             "Row bootstrap assumes independent rows and omits alpha-selection and training variance.",
                             "No lexical control is fitted here; assess it separately on the same rows."],
         }
+        if feature_assessment:
+            report["protocol"]["ridge_probe_schema_version"] = 2
+            report["feature_assessment_protocol"] = feature_assessment
+            report["selection_boundary"] = {"lower": selected == 0, "upper": selected == len(alphas) - 1,
+                                            "requires_grid_review": selected in (0, len(alphas) - 1)}
+            if writer is not None:
+                for flag, tag in (("lower", "selected_lower_boundary"), ("upper", "selected_upper_boundary"),
+                                  ("requires_grid_review", "requires_grid_review")):
+                    writer.add_scalar(f"probe/{tag}", int(report["selection_boundary"][flag]), len(alphas))
         if (file_sha256(train_path) != train.sha256 or file_sha256(valid_path) != valid.sha256
                 or file_sha256(protocol_path) != protocol_digest):
             raise ValueError("feature inputs changed during the probe")
+        if feature_assessment and file_sha256(Path(feature_assessment["path"])) != feature_protocol_digest:
+            raise ValueError("feature assessment protocol changed during the probe")
+        if feature_assessment and any(file_sha256(Path(path)) != identity["sha256"]
+                                      for path, (_, identity) in zip(reference_reports, references, strict=True)):
+            raise ValueError("reference report changed during the probe")
         write_immutable_json(output, report)
         return report
     finally:
@@ -434,6 +504,10 @@ def main(argv=None) -> dict:
     metrics = report["selected_metrics"]["valid"]
     print(f"Frozen probe complete: alpha={report['selected_alpha']:g}, VALID rows={metrics['rows']}, "
           f"accuracy={metrics['accuracy']:.4f}, macro_f1={metrics['macro_f1']:.4f}; TEST unused")
+    if "selection_boundary" in report:
+        boundary = report["selection_boundary"]
+        selected = "lower" if boundary["lower"] else "upper" if boundary["upper"] else "interior"
+        print(f"Frozen search: selected {selected} candidate; grid review required={boundary['requires_grid_review']}")
     return report
 
 

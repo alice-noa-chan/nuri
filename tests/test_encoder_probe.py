@@ -284,3 +284,189 @@ def test_cli_does_not_accept_test_feature_inputs(inputs):
         probe.main(["--train-features", str(train), "--valid-features", str(valid), "--test-features", str(valid),
                     "--protocol", str(protocol), "--output", str(directory / "refused.json")])
     assert error.value.code == 2
+
+
+def wider_protocol(inputs, grid=None, search_changes=None):
+    directory, original, _, _ = inputs
+    search = {"schema_version": 2, "alpha_grid": grid if grid is not None else [0.01, 1, 100, 10000, 1000000],
+              "feature_assessment_protocol": {"path": original.name, "sha256": probe.file_sha256(original)}}
+    search.update(search_changes or {})
+    path = directory / "wider-protocol.json"
+    path.write_text(json.dumps({"schema_version": 2, "ridge_probe": search}), encoding="utf-8")
+    return path
+
+
+def test_wider_search_preserves_cached_features_and_default_numerics(inputs):
+    directory, original, train, valid = inputs
+    before = {path: path.read_bytes() for path in (original, train, valid)}
+    legacy = run(inputs)
+    protocol = wider_protocol(inputs, list(probe.ALPHAS))
+    widened = probe.run_probe(train, valid, directory / "wider.json", protocol_path=protocol,
+                             bootstrap_samples=40, progress=False)
+    assert widened["frozen_protocol_sha256"] == probe.file_sha256(protocol)
+    assert widened["feature_assessment_protocol"]["sha256"] == probe.file_sha256(original)
+    assert widened["inputs"]["valid"]["metadata"]["assessment_protocol_sha256"] == probe.file_sha256(original)
+    assert widened["selection_boundary"] == {"lower": True, "upper": False, "requires_grid_review": True}
+    for field in ("candidates", "selected_alpha", "selected_metrics", "controls", "validation_predictions",
+                  "bootstrap", "standardizer_sha256", "geometry"):
+        assert widened[field] == legacy[field]
+    assert "selection_boundary" not in legacy and "feature_assessment_protocol" not in legacy
+    assert "ridge_probe_schema_version" not in legacy["protocol"]
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+    saved = (directory / "wider.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        probe.run_probe(train, valid, directory / "wider.json", protocol_path=protocol, progress=False)
+    assert (directory / "wider.json").read_bytes() == saved
+
+
+@pytest.mark.parametrize("grid", [None, [], [1], [float(i + 1) for i in range(65)],
+                                 [0, 1], [-1, 1], [1, float("inf")], [1, float("nan")],
+                                 [1, True], [1, "2"], [2, 1], [1, 1], [1, 1.0], [1, 10 ** 400]])
+def test_invalid_wider_grid_fails_before_loading_features(inputs, monkeypatch, grid):
+    directory, _, train, valid = inputs
+    protocol = wider_protocol(inputs, search_changes={"alpha_grid": grid})
+    monkeypatch.setattr(probe, "inspect_npz", lambda *a: pytest.fail("invalid grid reached feature arrays"))
+    with pytest.raises(ValueError, match="alpha_grid"):
+        probe.run_probe(train, valid, directory / "invalid-grid.json", protocol_path=protocol, progress=False)
+    assert not (directory / "invalid-grid.json").exists()
+
+
+@pytest.mark.parametrize("changes", [{"schema_version": True}, {"schema_version": 1}, {"unknown": 1},
+                                      {"feature_assessment_protocol": None},
+                                      {"feature_assessment_protocol": {"path": "protocol.json", "sha256": "0" * 64}},
+                                      {"feature_assessment_protocol": {"path": "protocol.json", "sha256": "A" * 64}},
+                                      {"feature_assessment_protocol": {"path": "protocol.json", "sha256": "a" * 64,
+                                                                       "extra": True}}])
+def test_invalid_search_schema_and_original_binding_are_rejected(inputs, changes):
+    directory, _, train, valid = inputs
+    protocol = wider_protocol(inputs, search_changes=changes)
+    with pytest.raises(ValueError):
+        probe.run_probe(train, valid, directory / "invalid-search.json", protocol_path=protocol, progress=False)
+    assert not (directory / "invalid-search.json").exists()
+
+
+def test_correctly_hashed_original_protocol_must_match_cached_assessment(inputs):
+    directory, _, train, valid = inputs
+    other = directory / "other-assessment.json"
+    other.write_text('{"different":true}', encoding="utf-8")
+    protocol = wider_protocol(inputs, search_changes={"feature_assessment_protocol": {
+        "path": other.name, "sha256": probe.file_sha256(other)}})
+    with pytest.raises(ValueError, match="feature assessment digest"):
+        probe.run_probe(train, valid, directory / "mismatch.json", protocol_path=protocol, progress=False)
+
+
+@pytest.mark.parametrize("grid, expected", [
+    ([100, 10000, 1000000], {"lower": True, "upper": False, "requires_grid_review": True}),
+    ([0.01, 1, 100], {"lower": False, "upper": True, "requires_grid_review": True}),
+    ([0.01, 1, 100, 10000, 1000000], {"lower": False, "upper": False, "requires_grid_review": False}),
+])
+def test_real_candidate_selection_reports_both_boundaries_and_interior(inputs, grid, expected):
+    directory, original, _, _ = inputs
+    rng = np.random.default_rng(1)
+    train_values = rng.normal(size=(12, 8))
+    train_labels = rng.integers(0, 2, size=12)
+    valid_values = rng.normal(size=(8, 8))
+    valid_labels = rng.integers(0, 2, size=8)
+    train = write_features(directory / "noisy-train.npz", "train", train_values, train_labels, protocol=original)
+    valid = write_features(directory / "noisy-valid.npz", "valid", valid_values, valid_labels, protocol=original)
+    protocol = wider_protocol(inputs, grid)
+    report = probe.run_probe(train, valid, directory / "boundaries.json", protocol_path=protocol,
+                             bootstrap_samples=20, progress=False)
+    assert report["selected_alpha"] == 100
+    assert report["selection_boundary"] == expected
+    assert [candidate["alpha"] for candidate in report["candidates"]] == grid
+
+
+def test_wider_references_require_same_active_search_not_just_same_cache(inputs):
+    directory, original, train, valid = inputs
+    run(inputs)
+    protocol = wider_protocol(inputs)
+    with pytest.raises(ValueError, match="assessment protocol binding differs"):
+        probe.run_probe(train, valid, directory / "mixed.json", protocol_path=protocol,
+                        reference_reports=(directory / "report.json",), progress=False)
+    assert not (directory / "mixed.json").exists()
+    first = probe.run_probe(train, valid, directory / "first-wider.json", protocol_path=protocol,
+                            bootstrap_samples=20, progress=False)
+    second = probe.run_probe(train, valid, directory / "second-wider.json", protocol_path=protocol,
+                             bootstrap_samples=20, progress=False, reference_reports=(directory / "first-wider.json",))
+    assert second["paired_references"][0]["delta"]["metrics"]["accuracy"]["estimate"] == 0
+    assert first["inputs"]["valid"]["metadata"]["assessment_protocol_sha256"] == probe.file_sha256(original)
+    with pytest.raises(ValueError, match="assessment protocol binding differs"):
+        probe.run_probe(train, valid, directory / "legacy-mixed.json", protocol_path=original,
+                        reference_reports=(directory / "first-wider.json",), progress=False)
+    protocol = wider_protocol(inputs, [0.01, 1, 100, 10000])
+    with pytest.raises(ValueError, match="assessment protocol binding differs"):
+        probe.run_probe(train, valid, directory / "different-grid.json", protocol_path=protocol,
+                        reference_reports=(directory / "first-wider.json",), progress=False)
+
+
+@pytest.mark.parametrize("artifact", ["original", "active", "reference"])
+def test_mutated_wider_search_dependencies_cannot_publish(inputs, monkeypatch, artifact):
+    directory, original, train, valid = inputs
+    protocol = wider_protocol(inputs)
+    reference = directory / "reference.json"
+    probe.run_probe(train, valid, reference, protocol_path=protocol, bootstrap_samples=20, progress=False)
+    target = {"original": original, "active": protocol, "reference": reference}[artifact]
+    old_solve = probe.ridge_weights
+    def mutate(*args, **kwargs):
+        result = old_solve(*args, **kwargs)
+        with target.open("ab") as stream:
+            stream.write(b" ")
+        return result
+    monkeypatch.setattr(probe, "ridge_weights", mutate)
+    with pytest.raises(ValueError, match="changed during"):
+        probe.run_probe(train, valid, directory / "mutated.json", protocol_path=protocol, progress=False,
+                        reference_reports=(reference,))
+    assert not (directory / "mutated.json").exists()
+
+
+def test_wider_prediction_retention_is_counted_in_memory_guard(inputs, monkeypatch):
+    directory, _, train, valid = inputs
+    protocol = wider_protocol(inputs, list(range(1, 65)))
+    monkeypatch.setattr(probe, "workspace_bytes", lambda *a: 1024 * 1024 - 1)
+    monkeypatch.setattr(probe, "ridge_weights", lambda *a: pytest.fail("oversized grid reached solver"))
+    with pytest.raises(ValueError, match="workspace exceeds"):
+        probe.run_probe(train, valid, directory / "memory.json", protocol_path=protocol,
+                        max_memory_mib=1, progress=False)
+
+
+def test_wider_tensorboard_directory_must_be_fresh(inputs):
+    directory, _, train, valid = inputs
+    protocol = wider_protocol(inputs)
+    events = directory / "events"
+    events.mkdir()
+    with pytest.raises(FileExistsError):
+        probe.run_probe(train, valid, directory / "existing-events.json", protocol_path=protocol,
+                        tensorboard_dir=events, progress=False)
+    assert not (directory / "existing-events.json").exists()
+
+
+def test_actual_wider_tensorboard_and_progress_remain_train_valid_only(inputs, capsys):
+    pytest.importorskip("tensorboard")
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    directory, _, train, valid = inputs
+    grid = [0.01, 1, 100, 10000, 1000000]
+    protocol = wider_protocol(inputs, grid)
+    result = probe.main(["--train-features", str(train), "--valid-features", str(valid),
+                         "--protocol", str(protocol), "--output", str(directory / "events-report.json"),
+                         "--bootstrap-samples", "20", "--tensorboard-dir", str(directory / "fresh-events")])
+    events = EventAccumulator(str(directory / "fresh-events"), size_guidance={"scalars": 0}).Reload()
+    assert set(events.Tags()["scalars"]) == {
+        "train/accuracy", "train/macro_f1", "valid/accuracy", "valid/macro_f1", "probe/alpha",
+        "probe/selected_lower_boundary", "probe/selected_upper_boundary", "probe/requires_grid_review"}
+    for split in ("train", "valid"):
+        for metric in ("accuracy", "macro_f1"):
+            points = events.Scalars(f"{split}/{metric}")
+            assert [point.step for point in points] == list(range(1, len(grid) + 1))
+            np.testing.assert_allclose([point.value for point in points],
+                                       [candidate[split][metric] for candidate in result["candidates"]], atol=1e-7)
+    np.testing.assert_allclose([point.value for point in events.Scalars("probe/alpha")], grid, rtol=1e-7)
+    for flag, tag in (("lower", "selected_lower_boundary"), ("upper", "selected_upper_boundary"),
+                      ("requires_grid_review", "requires_grid_review")):
+        points = events.Scalars(f"probe/{tag}")
+        assert [(point.step, point.value) for point in points] == [(len(grid), int(result["selection_boundary"][flag]))]
+    captured = capsys.readouterr()
+    assert "Frozen ridge: TRAIN fit / VALID selection" in captured.err
+    assert "selected lower candidate" in captured.out and "TEST unused" in captured.out
+    assert not events.Tags()["tensors"]

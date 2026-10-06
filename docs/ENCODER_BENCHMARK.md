@@ -52,7 +52,7 @@ rows, labels and representation recipe for a task.
 
 Standardization uses training features only. Fit centered ridge regression
 with an unpenalized intercept and one-hot class targets. Select from the fixed
-regularization grid `0.01, 0.1, 1, 10, 100` using validation macro-F1, then
+v1 regularization grid `0.01, 0.1, 1, 10, 100` using validation macro-F1, then
 accuracy, then the declared grid order. Report both accuracy and macro-F1,
 the class universe and assessed counts. A deterministic head has no optimizer
 seed; a random encoder control must declare its initialization seed.
@@ -125,6 +125,68 @@ The extractor writes compressed NPZ arrays, a detailed report and a bound
 completion receipt after successful extraction and source rechecks. Partial
 folders are not complete caches. The probe refuses TEST features. An extractor
 test opt-in alone does not authorize changing a completion protocol.
+
+## A separately frozen wider search
+
+The original five-candidate grid remains the default. Its completed reports
+and feature caches stay immutable. A selected endpoint can indicate that the
+search did not bracket the useful range; it does not prove where the optimum
+lies. Freeze a new equally applied grid before a follow-up diagnostic and
+record prior consultation of these validation rows. Rescoring frozen features
+does not train or improve an encoder, and repeated validation selection is not
+independent confirmation. Completion TEST remains reserved.
+
+Opt in through the assessment protocol passed to `--protocol`; there is no
+unbound command-line grid override. The private JSON adds this object:
+
+```json
+{
+  "ridge_probe": {
+    "schema_version": 2,
+    "alpha_grid": [0.01, 1, 100, 10000, 1000000],
+    "feature_assessment_protocol": {
+      "path": "assessment-v1.json",
+      "sha256": "<original assessment file SHA256>"
+    }
+  }
+}
+```
+
+This example declares the shape, not the chosen grid for a real comparison.
+Replace the placeholder with the exact lowercase SHA256 and freeze the complete
+private protocol. `ridge_probe` accepts exactly these three fields. Its grid
+must be a JSON list of 2 to 64 finite positive numbers in strictly increasing
+order; booleans, strings, duplicates and unsorted candidates are rejected.
+The referenced original assessment protocol resolves relative to the new
+protocol and must also remain under `.private/`.
+
+Cached NPZ metadata continues to bind the original assessment file. The new
+protocol verifies that file's hash and its agreement with both cached splits,
+then binds its own hash as the active search protocol. Do not rewrite cache
+metadata to pretend the new search was declared at extraction time. Paired
+references must use this same active protocol, original cache assessment,
+row order, labels and class universe; v1/v2 and different-grid references
+cannot be mixed. Inputs, both protocol files and paired reference reports are
+rechecked before publishing a new result.
+
+The report keeps `schema_version: 1` for compatible consumers, adds
+`protocol.ridge_probe_schema_version: 2`, and records
+`feature_assessment_protocol` separately from `frozen_protocol_sha256`.
+`selection_boundary.lower` and `.upper` identify selected endpoints;
+`.requires_grid_review` is true for either endpoint. This flag requests review
+of a future declared search; it does not automatically extend the grid.
+All per-candidate TRAIN/VALID metrics and selection tie rules are retained.
+
+Use fresh report and TensorBoard paths. V2 refuses an existing event directory
+so separate searches cannot merge curves. Progress covers every candidate.
+Alongside the existing TRAIN/VALID accuracy, macro-F1 and `probe/alpha` tags,
+v2 writes numeric `probe/selected_lower_boundary`,
+`probe/selected_upper_boundary` and `probe/requires_grid_review` at the final
+candidate step. The larger prediction workspace is included in the memory
+guard. Direct per-alpha solves are retained: default numerical behavior is
+unchanged, and no alternative solver is silently introduced. The default
+report fields and event tags also remain unchanged, apart from the normal
+source-code digest update.
 
 ## Reading results
 
