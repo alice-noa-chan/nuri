@@ -101,14 +101,43 @@ before constructing a model. An invalid recipe does not allocate model weights
 or create a training output. Data eligibility remains checked by the existing
 preparation and batch-building paths.
 
-Aggregate and optional language holdouts use the same recipe corruption and
-loss controls as training. Assessment visits every available holdout objective;
+By default, aggregate and optional language holdouts use the same recipe
+corruption and loss controls as training. Assessment visits every available holdout objective;
 it does not draw tasks from the training mix or require an identical holdout
 task set. Fixed corruption seeds, bounded coverage and completion-only TEST
 rules remain in effect. A changed mask rate or span-length policy changes the
 assessed target distribution: compare candidates additionally under an
 independent frozen policy. Changed-policy losses alone are not improvement
 evidence, and existing repair-gate policies must remain frozen.
+
+To keep corruption fixed while changing training, explicitly pass
+`--assessment-recipe-config <private JSON>` together with `--holdout-config`.
+`NURI_ASSESSMENT_RECIPE_CONFIG` supplies an optional environment default; an
+explicit CLI path takes precedence. The independent recipe uses the same
+schema and stage checks, but supports corruption only. Any `task_mix`
+declaration or nonempty `loss` section is rejected before allocating a model.
+An empty `loss` section is allowed. All available objectives are still assessed
+with the actual training loss settings; the override does not change task
+sampling, loss weights, temperature or embedding dimensions. IT assessment
+`min_span` requires a corpus in every aggregate and language holdout group.
+
+For a separately declared fixed Base comparison, use:
+
+```json
+{
+  "schema_version": 1,
+  "stage": "base",
+  "corruption": {"mlm_rate": 0.3, "min_span": 16, "full_mask_prob": 0.1}
+}
+```
+
+These controls apply to both the aggregate and per-language holdouts. Holdout
+metadata and policy hashes bind the actual independent recipe. Explicit
+assessment defaults create a new declared policy binding even when their
+numerical corruption matches a legacy no-recipe policy. Freeze the same
+assessment artifact for every new comparison arm; do not replace an immutable
+gate receipt. With no override, existing inherited-recipe behavior and metadata
+remain unchanged.
 
 Each recipe task records a normalized, path-free snapshot and its SHA256 in
 `Task.options`. Full training states persist those options; holdout receipts
@@ -123,6 +152,12 @@ existing complete settings and task-options checks. To change a recipe, use
 `--init` and a fresh output directory with a new optimizer/schedule, preserving
 the old state and evidence. Removing a recipe from a recipe-bound resume also
 fails the existing task-options check.
+
+An explicit assessment recipe is also recorded in every training task's options.
+An enabled resume requires its exact saved snapshot and digest before model
+allocation; adding or changing the policy requires a fresh run through `--init`.
+Removing a saved override fails the trainer's existing task-options check.
+Paths and JSON key order do not change the canonical binding.
 
 Programmatic callers use `load_recipe_config(path, stage)` or
 `TrainingRecipe.from_dict(data, stage)`, then pass `recipe=` to `base_stage`,

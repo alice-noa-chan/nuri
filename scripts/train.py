@@ -89,6 +89,8 @@ def parse_args(argv=None):
                    help="private JSON with explicit valid/test inputs; no training-input fallback")
     p.add_argument("--recipe-config", default=os.environ.get("NURI_RECIPE_CONFIG"),
                    help="optional private versioned JSON for existing task, loss and corruption controls")
+    p.add_argument("--assessment-recipe-config", default=os.environ.get("NURI_ASSESSMENT_RECIPE_CONFIG"),
+                   help="optional private corruption-only recipe for explicit holdouts; requires --holdout-config")
     p.add_argument("--valid-every", type=nonnegative_int, default=None,
                    help="validation interval in completed updates (0 = completion only); requires --holdout-config")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
@@ -128,6 +130,8 @@ def parse_args(argv=None):
         p.error("--stop-after-completed-steps must be below --steps")
     if args.valid_every is not None and not args.holdout_config:
         p.error("--valid-every requires --holdout-config")
+    if args.assessment_recipe_config and not args.holdout_config:
+        p.error("--assessment-recipe-config requires --holdout-config")
     return args
 
 
@@ -316,25 +320,47 @@ def _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed
     return tasks
 
 
-def build_holdouts(data, args, config, tokenizer, recipe=None) -> tuple[HoldoutSet | None, HoldoutSet | None]:
+def build_holdouts(data, args, config, tokenizer, recipe=None,
+                   assessment_recipe=None) -> tuple[HoldoutSet | None, HoldoutSet | None]:
+    if assessment_recipe is not None and (assessment_recipe.task_mix is not None or assessment_recipe.loss):
+        raise ValueError("assessment recipe supports corruption only; omit task_mix and nonempty loss")
     if data is None:
+        if assessment_recipe is not None:
+            raise ValueError("an assessment recipe requires explicit holdout inputs")
         return None, None
+    assessed_recipe = assessment_recipe if assessment_recipe is not None else recipe
     sets = []
     for split in ("valid", "test"):
         block, batch_size = data[split], data["batch_size"]
         seed, count = block["seed"], block["batches_per_task"]
-        tasks = _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed, recipe)
+        tasks = _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed, assessed_recipe)
         for language, group in sorted(block.get("language_groups", {}).items()):
             group_seed = seed + LANGUAGE_SEED_OFFSETS[language]
-            group_tasks = _build_holdout_tasks(group, args, config, tokenizer, batch_size, count, group_seed, recipe)
+            group_tasks = _build_holdout_tasks(group, args, config, tokenizer, batch_size, count, group_seed, assessed_recipe)
             tasks.update({f"{language}/{name}": task for name, task in group_tasks.items()})
         metadata = {"config_sha256": data["config_sha256"],
                     "input_manifest_sha256": data.get("input_manifest_sha256"),
                     "exposure_caveats": block.get("exposure_caveats", data.get("exposure_caveats", []))}
-        if recipe is not None:
-            metadata["recipe_sha256"] = recipe.sha256
+        if assessed_recipe is not None:
+            metadata["recipe_sha256"] = assessed_recipe.sha256
+        if assessment_recipe is not None:
+            metadata["assessment_recipe_sha256"] = assessment_recipe.sha256
         sets.append(HoldoutSet(tasks, count, seed, block["depth"], metadata))
     return tuple(sets)
+
+
+def _recipe_model_config(args, state=None):
+    """Read model geometry without allocating its weights or optimizer."""
+    if args.resume:
+        if state is None:
+            state = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
+        return NuriConfig.from_dict(state["config"])
+    if args.init:
+        data = json.loads((Path(args.init) / "config.json").read_text(encoding="utf-8"))
+        return NuriConfig.from_dict(data["nuri"] if "nuri" in data else data)
+    if args.stage == "base":
+        return PRESETS[args.preset]()
+    raise ValueError("recipe IT/embed stage requires --init or --resume")
 
 
 def prepare_recipe(args):
@@ -355,26 +381,58 @@ def prepare_recipe(args):
         if "min_span" in recipe.corruption and not args.corpus:
             raise ValueError("recipe min_span requires the IT span corpus")
     recipe.validate_tasks(available)
+    state = None
     if args.resume:
         # mmap keeps optimizer/model storage off the heap during this metadata check.
         state = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
         validate_recipe_resume(recipe, state.get("extra", {}))
-        config = NuriConfig.from_dict(state["config"])
-    elif args.init:
-        data = json.loads((Path(args.init) / "config.json").read_text(encoding="utf-8"))
-        config = NuriConfig.from_dict(data["nuri"] if "nuri" in data else data)
-    elif args.stage == "base":
-        config = PRESETS[args.preset]()
-    else:
-        raise ValueError("recipe IT/embed stage requires --init or --resume")
+    config = _recipe_model_config(args, state)
     recipe.validate_model(config)
     return recipe, losses, config
+
+
+def prepare_assessment_recipe(args, config=None, holdout_config=None):
+    """Validate an opt-in fixed corruption policy and its resume binding before allocation."""
+    recipe = load_recipe_config(args.assessment_recipe_config, args.stage)
+    if recipe is None:
+        return None
+    if not args.holdout_config:
+        raise ValueError("an assessment recipe requires --holdout-config")
+    if recipe.task_mix is not None or recipe.loss:
+        raise ValueError("assessment recipe supports corruption only; omit task_mix and nonempty loss")
+    if args.stage == "it" and "min_span" in recipe.corruption:
+        data = holdout_config if holdout_config is not None else load_holdout_config(args)
+        for split in ("valid", "test"):
+            block = data[split]
+            if any(not group.get("corpus") for group in (block, *block.get("language_groups", {}).values())):
+                raise ValueError("assessment min_span requires a corpus in every IT holdout group")
+    state = None
+    if args.resume:
+        state = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
+        extra = state.get("extra", {})
+        options = extra.get("task_options") if isinstance(extra, dict) else None
+        if not isinstance(options, dict) or not options or any(
+            not isinstance(task, dict) or task.get("assessment_recipe") != recipe.to_dict()
+            or task.get("assessment_recipe_sha256") != recipe.sha256 for task in options.values()
+        ):
+            raise ValueError("resume requires the same saved assessment recipe; use --init and a fresh output directory")
+    recipe.validate_model(config if config is not None else _recipe_model_config(args, state))
+    return recipe
+
+
+def bind_assessment_recipe(tasks, recipe):
+    """Bind explicit assessment controls without changing training sampling or losses."""
+    if recipe is not None:
+        for task in tasks.values():
+            task.options = {**task.options, "assessment_recipe": recipe.to_dict(),
+                            "assessment_recipe_sha256": recipe.sha256}
 
 
 def main(argv=None):
     args = parse_args(argv)
     recipe, loss_settings, recipe_config = prepare_recipe(args)
     holdout_config = load_holdout_config(args)
+    assessment_recipe = prepare_assessment_recipe(args, recipe_config, holdout_config)
     # Seed before building the model so --seed fully fixes the initial weights.
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -447,7 +505,8 @@ def main(argv=None):
             pairs = [(encode(tokenizer, r["query"]), encode(tokenizer, r["positive"])) for r in progress]
         tasks, mix = embedding_stage(pairs, config, args.batch_size, args.seed, **recipe_options)
 
-    validation, test = build_holdouts(holdout_config, args, config, tokenizer, recipe)
+    bind_assessment_recipe(tasks, assessment_recipe)
+    validation, test = build_holdouts(holdout_config, args, config, tokenizer, recipe, assessment_recipe)
     peak_lr = args.lr or (3e-4 if args.stage == "base" else 5e-5)
     warmup = args.warmup if args.warmup is not None else max(1, args.steps // 50)
     tensorboard_dir = args.tensorboard_dir
@@ -465,6 +524,8 @@ def main(argv=None):
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
     if recipe is not None:
         print(f"recipe schema=1 sha256={recipe.sha256}", flush=True)
+    if assessment_recipe is not None:
+        print(f"assessment recipe schema=1 sha256={assessment_recipe.sha256}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)
     print(f"[{args.stage}] {'Restoring state and continuing' if args.resume else 'Starting'} training...", flush=True)
