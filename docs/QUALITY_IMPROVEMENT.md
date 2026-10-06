@@ -7,6 +7,12 @@ embedding/retrieval and generation functions. It is not a promise of competence
 in every possible domain. No new model learning or quality gain is claimed by
 this preparation. Full paid continuation remains on hold.
 
+The [offline preparation record](PRE_GPU_PREPARATION.md) now covers committed
+recipe controls, exposure auditing, local reference checks and matched
+adaptation mechanics. The separately declared
+[wider frozen-probe diagnostic](ENCODER_BENCHMARK_RESULTS_V2.md) is complete.
+Its score changes do not represent new learning.
+
 [ARCHITECTURE.md](ARCHITECTURE.md) remains the design authority. This plan does
 not change the five releases, agreed Base mix, tokenizer, repair thresholds,
 reasoning pilot decision or immutable training package. A changed training
@@ -14,7 +20,8 @@ recipe needs its own versioned comparison and review.
 
 ## Evidence and missing coverage
 
-The [completed frozen comparison](ENCODER_BENCHMARK_RESULTS.md) is the measured
+The [original frozen comparison](ENCODER_BENCHMARK_RESULTS.md) and
+[versioned replacement diagnostic](ENCODER_BENCHMARK_RESULTS_V2.md) are the measured
 starting point. Its validation rows selected the ridge regularization; they
 are not completion TEST. It establishes limited representation utility, not
 full downstream fine-tuning quality.
@@ -89,9 +96,10 @@ Report conditional interval limits and seed variability where measured.
    curves cannot check retention of all the others. Expand the unassessed cells
    with privately reviewed inputs and matched evaluators.
    Correct the probe search before treating the current gap as a model ceiling:
-   19 of the 21 v1 reports select the upper regularization boundary. Prepare
-   a separately versioned equal-budget wider grid, explicit boundary flags
-   and immutable candidate reports from the existing features. Record prior
+   19 of the 21 v1 reports select the upper regularization boundary. The
+   separately versioned equal-budget wider grid, explicit boundary flags
+   and immutable candidate reports are now complete; all v2 selections are
+   interior. Preserve the originals and record prior
    diagnostic consultation of these validation rows. Add a compatible Korean
    RoBERTa-class reference and broader Korean tasks under a declared panel
    revision; do not overwrite v1 or claim new encoder learning from rescoring.

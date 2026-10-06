@@ -1,7 +1,10 @@
 # Practical quality evidence before full training
 
-Status: the authorized retained-encoder comparison is complete. See
-[the measured validation scores and limits](ENCODER_BENCHMARK_RESULTS.md).
+Status: the authorized retained-encoder comparison and separately declared
+CPU replacement diagnostic are complete. See the
+[original results](ENCODER_BENCHMARK_RESULTS.md),
+[replacement validation scores and limits](ENCODER_BENCHMARK_RESULTS_V2.md) and
+[offline preparation record](PRE_GPU_PREPARATION.md).
 The user's follow-up requires improvement across all supported languages and
 capabilities, including Korean, with extra priority on English. The
 [broad improvement work plan](QUALITY_IMPROVEMENT.md) records separate
@@ -10,14 +13,13 @@ is a starting point, not a sufficient Korean quality target. Optional
 [language-specific objective monitoring](HOLDOUT_MONITORING.md#separate-language-objectives)
 supports that preparation; it does not update model weights or establish
 downstream quality.
-The original ridge grid also needs revision: 19 of the 21 saved reports
-select its upper boundary. Preserve v1 scores and freeze an equally applied
-wider protocol before a new diagnostic. A probe-score change is not model
-learning, and further reuse of these validation rows is not independent
-confirmation. See the follow-up limitation in the result report.
+The original ridge grid has 19 upper-boundary selections among 21 reports.
+The equally applied wider protocol now selects interior optima for every job;
+v1 scores remain intact. A probe-score change is not model learning, and
+further reuse of these validation rows is not independent confirmation.
 The retained encoder has useful Korean topic features, but its English sentiment
-accuracy trails every requested Base reference by 13.28 to 23.05 percentage
-points under this frozen-head protocol. Sentence-pair differences remain
+accuracy trails every requested Base reference by 6.25 to 16.41 percentage
+points under the replacement frozen-head protocol. Sentence-pair differences remain
 inconclusive under conditional row intervals. General BERT-family quality is
 not established. Full production training remains on hold for the user's
 review; no rental, new allocation or additional spending cap is approved here.
@@ -62,9 +64,11 @@ untrained embedding projections are not the encoder-quality representation.
 This is an inexpensive diagnostic, not a substitute for matched fine-tuning;
 a weak probe alone does not establish that adapted performance must be weak.
 The separate feature extractor and supervised probe now implement this bounded
-diagnostic. See [the commands and result limits](ENCODER_BENCHMARK.md). Matched
-encoder fine-tuning remains a separate work unit. The training runtime and
-completed upload remain unchanged.
+diagnostic. See [the commands and result limits](ENCODER_BENCHMARK.md).
+The separate [matched encoder-adaptation worker](ENCODER_FINETUNING.md)
+is implemented and verified with synthetic CPU controls. Actual matched
+adaptation and its quality results remain unmeasured. Production defaults and
+the completed upload remain unchanged.
 
 The stronger comparison uses same-language Base checkpoints from the requested
 families, identical raw examples and split policy, comparable task heads,
