@@ -1,5 +1,10 @@
 # Retained Dense encoder: first frozen comparison
 
+This is the immutable **v1** assessment. The separately frozen
+[v2 CPU rescore](ENCODER_BENCHMARK_RESULTS_V2.md) uses the same cached features
+and a wider, equally applied head search. Read that follow-up for the revised
+validation comparison; none of these original measurements is overwritten.
+
 The retained encoder provides useful Korean classification features in this
 diagnostic. Its English sentiment score is below every requested reference:
 the accuracy gap is 13.28 to 23.05 percentage points.
