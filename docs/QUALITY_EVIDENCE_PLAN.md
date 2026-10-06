@@ -2,6 +2,19 @@
 
 Status: the authorized retained-encoder comparison is complete. See
 [the measured validation scores and limits](ENCODER_BENCHMARK_RESULTS.md).
+The user's follow-up requires improvement across all supported languages and
+capabilities, including Korean, with extra priority on English. The
+[broad improvement work plan](QUALITY_IMPROVEMENT.md) records separate
+language/task evidence and retention checks. The current Korean topic result
+is a starting point, not a sufficient Korean quality target. Optional
+[language-specific objective monitoring](HOLDOUT_MONITORING.md#separate-language-objectives)
+supports that preparation; it does not update model weights or establish
+downstream quality.
+The original ridge grid also needs revision: 19 of the 21 saved reports
+select its upper boundary. Preserve v1 scores and freeze an equally applied
+wider protocol before a new diagnostic. A probe-score change is not model
+learning, and further reuse of these validation rows is not independent
+confirmation. See the follow-up limitation in the result report.
 The retained encoder has useful Korean topic features, but its English sentiment
 accuracy trails every requested Base reference by 13.28 to 23.05 percentage
 points under this frozen-head protocol. Sentence-pair differences remain
