@@ -155,6 +155,31 @@ def _resource_path(spec: str, directory: Path, corpus: bool = False) -> tuple[Pa
     return resolved, str(resolved) + (separator + weight if separator else "")
 
 
+LANGUAGE_SEED_OFFSETS = {"ko": 1009, "en": 2017, "ja": 3011}
+
+
+def _resolve_holdout_inputs(block: dict, args, directory: Path, resources: list) -> None:
+    """Apply the same stage and split checks to aggregate and language inputs."""
+    required = "corpus" if args.stage == "base" else "instructions" if args.stage == "it" else "pairs"
+    if not block.get(required) or (args.stage == "it" and args.corpus and not block.get("corpus")):
+        raise ValueError("each holdout split needs its own stage inputs, including span corpus when trained")
+    if "corpus" in block and (not isinstance(block["corpus"], list) or not block["corpus"]):
+        raise ValueError("holdout corpus must be a nonempty list of folder specifications")
+    for name in ("corpus", "instructions", "reasoning", "pairs"):
+        values = block.get(name, []) if name == "corpus" else ([block[name]] if block.get(name) else [])
+        resolved_values = []
+        for spec in values:
+            if not isinstance(spec, str) or not spec:
+                raise ValueError("holdout paths must be nonempty strings")
+            resolved, value = _resource_path(spec, directory, name == "corpus")
+            if not resolved.exists():
+                raise ValueError("a configured holdout input does not exist")
+            resources.append((name, resolved))
+            resolved_values.append(value)
+        if values:
+            block[name] = resolved_values if name == "corpus" else resolved_values[0]
+
+
 def load_holdout_config(args) -> dict | None:
     """Validate explicit split paths before allocating the model.
 
@@ -182,31 +207,25 @@ def load_holdout_config(args) -> dict | None:
             resources["train"].append((name, resolved))
     for split in ("valid", "test"):
         block = data.get(split)
-        keys = {"corpus", "instructions", "reasoning", "pairs", "batches_per_task", "seed", "depth", "exposure_caveats"}
+        keys = {"corpus", "instructions", "reasoning", "pairs", "batches_per_task", "seed", "depth",
+                "exposure_caveats", "language_groups"}
         if not isinstance(block, dict) or set(block) - keys:
             raise ValueError("holdout config needs explicit valid and test blocks with supported fields")
         for key, default in (("batches_per_task", 8), ("seed", 0), ("depth", 4)):
             block[key] = block.get(key, default)
             if type(block[key]) is not int or block[key] < (1 if key == "batches_per_task" else 0):
                 raise ValueError(f"invalid holdout {key}")
-        required = "corpus" if args.stage == "base" else "instructions" if args.stage == "it" else "pairs"
-        if not block.get(required) or (args.stage == "it" and args.corpus and not block.get("corpus")):
-            raise ValueError("each holdout split needs its own stage inputs, including span corpus when trained")
-        if "corpus" in block and (not isinstance(block["corpus"], list) or not block["corpus"]):
-            raise ValueError("holdout corpus must be a nonempty list of folder specifications")
-        for name in ("corpus", "instructions", "reasoning", "pairs"):
-            values = block.get(name, []) if name == "corpus" else ([block[name]] if block.get(name) else [])
-            resolved_values = []
-            for spec in values:
-                if not isinstance(spec, str) or not spec:
-                    raise ValueError("holdout paths must be nonempty strings")
-                resolved, value = _resource_path(spec, path.parent, name == "corpus")
-                if not resolved.exists():
-                    raise ValueError("a configured holdout input does not exist")
-                resources[split].append((name, resolved))
-                resolved_values.append(value)
-            if values:
-                block[name] = resolved_values if name == "corpus" else resolved_values[0]
+        _resolve_holdout_inputs(block, args, path.parent, resources[split])
+        groups = block.get("language_groups", {})
+        if (not isinstance(groups, dict) or set(groups) - LANGUAGE_SEED_OFFSETS.keys()
+                or ("language_groups" in block and not groups)):
+            raise ValueError("language_groups must be a nonempty mapping using ko, en or ja")
+        for group in groups.values():
+            if not isinstance(group, dict) or set(group) - {"corpus", "instructions", "reasoning", "pairs"}:
+                raise ValueError("language groups support only explicit stage input fields")
+            _resolve_holdout_inputs(group, args, path.parent, resources[split])
+    if set(data["valid"].get("language_groups", {})) != set(data["test"].get("language_groups", {})):
+        raise ValueError("valid and test must declare the same language groups")
     for left, right in (("train", "valid"), ("train", "test"), ("valid", "test")):
         if {path for _, path in resources[left]} & {path for _, path in resources[right]}:
             raise ValueError("train, valid and test must use distinct resolved input paths")
@@ -262,6 +281,32 @@ def _holdout_examples(path, tokenizer, config, limit, seed, pairs=False):
                       "excluded_rows": seen - eligible, "selection": "fixed_uniform_reservoir"}
 
 
+def _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed):
+    """Build independent task objects; never share sampling state between groups."""
+    corpus = open_corpus(block["corpus"]) if block.get("corpus") else None
+    selections = {}
+    if args.stage == "base":
+        tasks, _ = base_stage(corpus, config, batch_size, seed, args.pack_mlm, args.bucket)
+    elif args.stage == "it":
+        require(tokenizer, "--tokenizer for holdout instructions")
+        limit = batch_size * count * (8 if args.bucket else 1)
+        examples, selections["instruction"] = _holdout_examples(block["instructions"], tokenizer, config, limit, seed)
+        reasoning = None
+        if block.get("reasoning"):
+            reasoning, selections["reasoning"] = _holdout_examples(block["reasoning"], tokenizer, config, limit, seed + 1)
+            if not reasoning:
+                raise ValueError("explicit holdout reasoning input has no eligible rows")
+        tasks, _ = instruction_stage(examples, config, batch_size, corpus, reasoning, seed, bucket=args.bucket)
+    else:
+        require(tokenizer, "--tokenizer for holdout pairs")
+        pairs, selections["pairs"] = _holdout_examples(block["pairs"], tokenizer, config, batch_size * count, seed, pairs=True)
+        tasks, _ = embedding_stage(pairs, config, batch_size, seed)
+    for name, selection in selections.items():
+        if name in tasks:
+            tasks[name].options.update(selection)
+    return tasks
+
+
 def build_holdouts(data, args, config, tokenizer) -> tuple[HoldoutSet | None, HoldoutSet | None]:
     if data is None:
         return None, None
@@ -269,25 +314,11 @@ def build_holdouts(data, args, config, tokenizer) -> tuple[HoldoutSet | None, Ho
     for split in ("valid", "test"):
         block, batch_size = data[split], data["batch_size"]
         seed, count = block["seed"], block["batches_per_task"]
-        corpus = open_corpus(block["corpus"]) if block.get("corpus") else None
-        selections = {}
-        if args.stage == "base":
-            tasks, _ = base_stage(corpus, config, batch_size, seed, args.pack_mlm, args.bucket)
-        elif args.stage == "it":
-            require(tokenizer, "--tokenizer for holdout instructions")
-            limit = batch_size * count * (8 if args.bucket else 1)
-            examples, selections["instruction"] = _holdout_examples(block["instructions"], tokenizer, config, limit, seed)
-            reasoning = None
-            if block.get("reasoning"):
-                reasoning, selections["reasoning"] = _holdout_examples(block["reasoning"], tokenizer, config, limit, seed + 1)
-            tasks, _ = instruction_stage(examples, config, batch_size, corpus, reasoning, seed, bucket=args.bucket)
-        else:
-            require(tokenizer, "--tokenizer for holdout pairs")
-            pairs, selections["pairs"] = _holdout_examples(block["pairs"], tokenizer, config, batch_size * count, seed, pairs=True)
-            tasks, _ = embedding_stage(pairs, config, batch_size, seed)
-        for name, selection in selections.items():
-            if name in tasks:
-                tasks[name].options.update(selection)
+        tasks = _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed)
+        for language, group in sorted(block.get("language_groups", {}).items()):
+            group_seed = seed + LANGUAGE_SEED_OFFSETS[language]
+            group_tasks = _build_holdout_tasks(group, args, config, tokenizer, batch_size, count, group_seed)
+            tasks.update({f"{language}/{name}": task for name, task in group_tasks.items()})
         metadata = {"config_sha256": data["config_sha256"],
                     "input_manifest_sha256": data.get("input_manifest_sha256"),
                     "exposure_caveats": block.get("exposure_caveats", data.get("exposure_caveats", []))}

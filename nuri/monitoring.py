@@ -206,6 +206,10 @@ class TrainingMonitor:
         self.writer.add_text(f"{split}/policy_sha256", report["policy_sha256"], step)
         for name, task_report in report["tasks"].items():
             task = name if name in {"mlm", "span", "instruction", "reasoning", "pairs"} else task_report["kind"]
+            language, separator, objective = name.partition("/")
+            if (separator and language in {"ko", "en", "ja"}
+                    and objective in {"mlm", "span", "instruction", "reasoning", "pairs"}):
+                task = name
             prefix = f"{split}/{task}"
             for key, value in task_report["metrics"].items():
                 tag = "objective_loss" if key == "loss" else key

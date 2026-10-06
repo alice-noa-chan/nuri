@@ -109,3 +109,66 @@ Non-finite or failed assessment retains a
 full recovery state and publishes no final weights. If an append was interrupted,
 its incomplete history line is preserved; atomic receipts are the authoritative
 completed records.
+
+## Separate language objectives
+
+Each split can optionally add `language_groups`, using only `ko`, `en` and `ja`
+as labels. The validation and test blocks must declare the same labels. Keep
+the existing aggregate inputs; groups are supplementary, independently sampled
+views. Each group provides its own stage inputs using `corpus`, `instructions`,
+`reasoning` and/or `pairs`. It inherits the split's batch size, bounded batch
+count, reasoning depth and exposure caveats. Nested groups and per-group
+schedule overrides are rejected.
+
+For example, the following belongs inside a private Base validation block:
+
+```json
+"language_groups": {
+  "ko": {"corpus": ["valid-ko-tokens"]},
+  "en": {"corpus": ["valid-en-tokens"]},
+  "ja": {"corpus": ["valid-ja-tokens"]}
+}
+```
+
+Supply the corresponding separate test resources in the test block. Labels
+describe privately prepared inputs; the CLI does not identify or verify the
+language of token IDs. A language with no prepared coverage remains unassessed.
+An explicit empty group mapping, missing stage input, or unmatched label set
+fails before model allocation. Do not rename English templates as Japanese
+examples to fill a missing assessment cell.
+An explicitly declared reasoning file with no eligible rows fails during
+holdout preparation before training updates, rather than silently dropping
+the aggregate or language-specific reasoning objective.
+
+The CLI checks nested resources for existence, cross-split resolved-path
+overlap and optional manifest coverage/content overlap just like aggregate
+resources. A group may reuse an aggregate resource within the same split, but
+no training, validation or test resource may alias another split. Preparation
+must still audit actual language labels, grouped isolation and input bytes.
+
+Aggregate task order, seeds and tags stay unchanged. Groups have independent
+task objects and random sources; their seeds are the split seed plus 1009 for
+Korean, 2017 for English and 3011 for Japanese. Group names and task settings
+are included in the assessment policy, so aggregate-only completion receipts
+cannot satisfy a grouped assessment.
+
+TensorBoard adds numeric tags such as `valid/ko/mlm/objective_loss`,
+`valid/en/span/objective_loss` and `test/ja/pairs/objective_loss`. The fixed
+`language/objective` vocabulary also preserves `ko/reasoning` separately from
+`ko/instruction`. Other custom task names retain the existing kind-only tag
+fallback, preventing arbitrary source-like labels from entering event files.
+TRAIN curves still describe sampled training objectives; this option does not
+add per-language training exposure counters or change the training mixture.
+
+Every group receives the full declared batch count per objective, increasing
+assessment time. Total assessed rows/batches include all aggregate and group
+presentations and are not unique coverage. Recalibrate validation overhead
+before preparing a new paid run. Contrastive groups also change their in-batch
+negative population; their losses are not matched full-pool retrieval scores.
+
+Only the current stage's objectives are assessed: Base has MLM/span, IT has
+instruction/explicit reasoning/span, and Embed has pairs. These curves cannot
+serve as an all-capability retention gate. Use the separate multilingual
+classification, generation and fixed-candidate retrieval packet in
+[QUALITY_IMPROVEMENT.md](QUALITY_IMPROVEMENT.md) to check other capabilities.
+No language quality gain follows from adding monitoring alone.
