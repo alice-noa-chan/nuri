@@ -45,7 +45,7 @@ PYTHON = sys.executable
 # Plan keys passed straight through to scripts/train.py as --flags.
 TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
                "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes",
-               "holdout_config", "valid_every", "stop_after_completed_steps")
+               "holdout_config", "valid_every", "stop_after_completed_steps", "recipe_config")
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
@@ -87,6 +87,21 @@ def validate_holdout_settings(plan: dict) -> None:
 def newest_state(stage_dir: Path) -> Path | None:
     states = sorted((stage_dir / "training_state").glob("*.pt"), key=lambda p: p.stat().st_mtime)
     return states[-1] if states else None
+
+
+def validate_recipe_settings(plan: dict) -> None:
+    """Require a deliberate recipe path for each stage before launching work.
+
+    Recipes describe one stage, so a plan-wide recipe would be ambiguous.
+    The training CLI checks the actual private JSON and model geometry.
+    """
+    if "recipe_config" in plan.get("train", {}):
+        raise ValueError("recipe_config must be set per stage")
+    for name, spec in plan["stages"].items():
+        if "recipe_config" in spec:
+            path = spec["recipe_config"]
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError(f"{name}: recipe_config must be a nonempty path string")
 
 
 def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
@@ -374,6 +389,7 @@ def main(argv=None):
 
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     validate_holdout_settings(plan)
+    validate_recipe_settings(plan)
     out = Path(plan["out"])
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "run_summary.json"
