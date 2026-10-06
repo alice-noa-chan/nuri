@@ -43,10 +43,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nuri.checkpoint import load_pretrained, training_state_config  # noqa: E402
-from nuri.config import PRESETS  # noqa: E402
+from nuri.config import NuriConfig, PRESETS  # noqa: E402
 from nuri.data import chat_prompt_text, open_corpus, usable_instruction  # noqa: E402
 from nuri.model import NuriModel  # noqa: E402
 from nuri.pipeline import base_stage, embedding_stage, instruction_stage, read_jsonl  # noqa: E402
+from nuri.recipe import load_recipe_config, recipe_loss_settings, validate_recipe_resume  # noqa: E402
 from nuri.tasks import reasoning_examples  # noqa: E402
 from nuri.tokenizer import check_tokenizer, load_tokenizer, vocab_size  # noqa: E402
 from nuri.trainer import (INTERRUPTED_EXIT_CODE, NONFINITE_EXIT_CODE, NonFiniteTraining,  # noqa: E402
@@ -86,6 +87,8 @@ def parse_args(argv=None):
     p.add_argument("--tensorboard-dir", help="custom event directory; also enables TensorBoard")
     p.add_argument("--holdout-config", default=os.environ.get("NURI_HOLDOUT_CONFIG"),
                    help="private JSON with explicit valid/test inputs; no training-input fallback")
+    p.add_argument("--recipe-config", default=os.environ.get("NURI_RECIPE_CONFIG"),
+                   help="optional private versioned JSON for existing task, loss and corruption controls")
     p.add_argument("--valid-every", type=nonnegative_int, default=None,
                    help="validation interval in completed updates (0 = completion only); requires --holdout-config")
     p.add_argument("--resume", help="private training_state/*.pt file of an interrupted run with the same flags")
@@ -102,7 +105,7 @@ def parse_args(argv=None):
     p.add_argument("--compile", action="store_true", help="torch.compile the model blocks (GPU runs)")
     p.add_argument("--native-gqa", action="store_true",
                    help="let supported SDPA backends use compact GQA heads; benchmark before enabling")
-    p.add_argument("--cross-mode-weight", type=float, default=0.0,
+    p.add_argument("--cross-mode-weight", type=float, default=None,
                    help="embed stage: also align reasoning-mode queries with fast-mode documents (0 = off)")
     p.add_argument("--pack-mlm", action="store_true",
                    help="base stage: fill each MLM row with several documents (attention stays inside each one)")
@@ -118,6 +121,9 @@ def parse_args(argv=None):
     p.add_argument("--reasoning-examples", type=int, default=20000,
                    help="synthetic reasoning examples for the it stage (0 = none)")
     args = p.parse_args(argv)
+    args.cross_mode_weight_explicit = args.cross_mode_weight is not None
+    if args.cross_mode_weight is None:
+        args.cross_mode_weight = 0.0
     if args.stop_after_completed_steps is not None and args.stop_after_completed_steps >= args.steps:
         p.error("--stop-after-completed-steps must be below --steps")
     if args.valid_every is not None and not args.holdout_config:
@@ -281,12 +287,14 @@ def _holdout_examples(path, tokenizer, config, limit, seed, pairs=False):
                       "excluded_rows": seen - eligible, "selection": "fixed_uniform_reservoir"}
 
 
-def _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed):
+def _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed, recipe=None):
     """Build independent task objects; never share sampling state between groups."""
     corpus = open_corpus(block["corpus"]) if block.get("corpus") else None
     selections = {}
+    # Assessment visits every available task, independent of training mix draws.
+    recipe_options = {"recipe": recipe, "apply_recipe_mix": False} if recipe is not None else {}
     if args.stage == "base":
-        tasks, _ = base_stage(corpus, config, batch_size, seed, args.pack_mlm, args.bucket)
+        tasks, _ = base_stage(corpus, config, batch_size, seed, args.pack_mlm, args.bucket, **recipe_options)
     elif args.stage == "it":
         require(tokenizer, "--tokenizer for holdout instructions")
         limit = batch_size * count * (8 if args.bucket else 1)
@@ -296,38 +304,76 @@ def _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed
             reasoning, selections["reasoning"] = _holdout_examples(block["reasoning"], tokenizer, config, limit, seed + 1)
             if not reasoning:
                 raise ValueError("explicit holdout reasoning input has no eligible rows")
-        tasks, _ = instruction_stage(examples, config, batch_size, corpus, reasoning, seed, bucket=args.bucket)
+        tasks, _ = instruction_stage(examples, config, batch_size, corpus, reasoning, seed, bucket=args.bucket,
+                                     **recipe_options)
     else:
         require(tokenizer, "--tokenizer for holdout pairs")
         pairs, selections["pairs"] = _holdout_examples(block["pairs"], tokenizer, config, batch_size * count, seed, pairs=True)
-        tasks, _ = embedding_stage(pairs, config, batch_size, seed)
+        tasks, _ = embedding_stage(pairs, config, batch_size, seed, **recipe_options)
     for name, selection in selections.items():
         if name in tasks:
             tasks[name].options.update(selection)
     return tasks
 
 
-def build_holdouts(data, args, config, tokenizer) -> tuple[HoldoutSet | None, HoldoutSet | None]:
+def build_holdouts(data, args, config, tokenizer, recipe=None) -> tuple[HoldoutSet | None, HoldoutSet | None]:
     if data is None:
         return None, None
     sets = []
     for split in ("valid", "test"):
         block, batch_size = data[split], data["batch_size"]
         seed, count = block["seed"], block["batches_per_task"]
-        tasks = _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed)
+        tasks = _build_holdout_tasks(block, args, config, tokenizer, batch_size, count, seed, recipe)
         for language, group in sorted(block.get("language_groups", {}).items()):
             group_seed = seed + LANGUAGE_SEED_OFFSETS[language]
-            group_tasks = _build_holdout_tasks(group, args, config, tokenizer, batch_size, count, group_seed)
+            group_tasks = _build_holdout_tasks(group, args, config, tokenizer, batch_size, count, group_seed, recipe)
             tasks.update({f"{language}/{name}": task for name, task in group_tasks.items()})
         metadata = {"config_sha256": data["config_sha256"],
                     "input_manifest_sha256": data.get("input_manifest_sha256"),
                     "exposure_caveats": block.get("exposure_caveats", data.get("exposure_caveats", []))}
+        if recipe is not None:
+            metadata["recipe_sha256"] = recipe.sha256
         sets.append(HoldoutSet(tasks, count, seed, block["depth"], metadata))
     return tuple(sets)
 
 
+def prepare_recipe(args):
+    """Validate an optional recipe and its model geometry before constructing tensors."""
+    recipe = load_recipe_config(args.recipe_config, args.stage)
+    losses = recipe_loss_settings(recipe, args.cross_mode_weight, args.cross_mode_weight_explicit)
+    if recipe is None:
+        return None, losses, None
+    required = "corpus" if args.stage == "base" else "instructions" if args.stage == "it" else "pairs"
+    if not getattr(args, required):
+        raise ValueError(f"recipe stage requires --{required}")
+    available = {"mlm", "span"} if args.stage == "base" else {"pairs"} if args.stage == "embed" else {"instruction"}
+    if args.stage == "it":
+        if args.corpus:
+            available.add("span")
+        if args.reasoning_examples > 0:
+            available.add("reasoning")
+        if "min_span" in recipe.corruption and not args.corpus:
+            raise ValueError("recipe min_span requires the IT span corpus")
+    recipe.validate_tasks(available)
+    if args.resume:
+        # mmap keeps optimizer/model storage off the heap during this metadata check.
+        state = torch.load(args.resume, map_location="cpu", weights_only=False, mmap=True)
+        validate_recipe_resume(recipe, state.get("extra", {}))
+        config = NuriConfig.from_dict(state["config"])
+    elif args.init:
+        data = json.loads((Path(args.init) / "config.json").read_text(encoding="utf-8"))
+        config = NuriConfig.from_dict(data["nuri"] if "nuri" in data else data)
+    elif args.stage == "base":
+        config = PRESETS[args.preset]()
+    else:
+        raise ValueError("recipe IT/embed stage requires --init or --resume")
+    recipe.validate_model(config)
+    return recipe, losses, config
+
+
 def main(argv=None):
     args = parse_args(argv)
+    recipe, loss_settings, recipe_config = prepare_recipe(args)
     holdout_config = load_holdout_config(args)
     # Seed before building the model so --seed fully fixes the initial weights.
     random.seed(args.seed)
@@ -343,7 +389,7 @@ def main(argv=None):
     if args.resume:
         print(f"[{args.stage}] Building model from the resume configuration...", flush=True)
         # The interrupted run decides the model shape; its weights are loaded by train().
-        model = NuriModel(training_state_config(args.resume))
+        model = NuriModel(recipe_config if recipe_config is not None else training_state_config(args.resume))
     elif args.init:
         print(f"[{args.stage}] Loading initial checkpoint weights for a fresh training run...", flush=True)
         model = load_pretrained(args.init)
@@ -366,9 +412,10 @@ def main(argv=None):
     corpus = open_corpus(args.corpus) if args.corpus else None
 
     print(f"[{args.stage}] Preparing training tasks...", flush=True)
+    recipe_options = {"recipe": recipe} if recipe is not None else {}
     if args.stage == "base":
         tasks, mix = base_stage(require(corpus, "--corpus"), config, args.batch_size, args.seed, args.pack_mlm,
-                                args.bucket)
+                                args.bucket, **recipe_options)
     elif args.stage == "it":
         require(tokenizer, "--tokenizer")
 
@@ -385,17 +432,22 @@ def main(argv=None):
                   dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
             reasoning = [tokenize(m, a) for m, a in progress]
         tasks, mix = instruction_stage(examples, config, args.batch_size, corpus, reasoning, args.seed,
-                                       bucket=args.bucket)
-        config.length_head_trained = True  # saved into every checkpoint of this run
+                                       bucket=args.bucket, **recipe_options)
+        if recipe is None:
+            config.length_head_trained = True  # legacy stage behavior
+        else:
+            trains_length = loss_settings.get("length_weight", 0.1) > 0 and any(
+                tasks[name].kind == "instruction" for name in mix)
+            config.length_head_trained = config.length_head_trained or trains_length
     else:
         require(tokenizer, "--tokenizer")
         with tqdm(read_jsonl(require(args.pairs, "--pairs")),
                   desc="embed | tokenizing pairs", unit="pair", ascii=True,
                   dynamic_ncols=True, mininterval=0.5, disable=args.no_progress) as progress:
             pairs = [(encode(tokenizer, r["query"]), encode(tokenizer, r["positive"])) for r in progress]
-        tasks, mix = embedding_stage(pairs, config, args.batch_size, args.seed)
+        tasks, mix = embedding_stage(pairs, config, args.batch_size, args.seed, **recipe_options)
 
-    validation, test = build_holdouts(holdout_config, args, config, tokenizer)
+    validation, test = build_holdouts(holdout_config, args, config, tokenizer, recipe)
     peak_lr = args.lr or (3e-4 if args.stage == "base" else 5e-5)
     warmup = args.warmup if args.warmup is not None else max(1, args.steps // 50)
     tensorboard_dir = args.tensorboard_dir
@@ -406,11 +458,13 @@ def main(argv=None):
                              stage=args.stage, progress=not args.no_progress, tensorboard_dir=tensorboard_dir,
                              tokenizer_dir=str(tokenizer_path) if tokenizer_path else None,
                              grad_accum=args.grad_accum, gradient_checkpointing=args.gradient_checkpointing,
-                             compile=args.compile, cross_mode_weight=args.cross_mode_weight, native_gqa=args.native_gqa,
+                             compile=args.compile, native_gqa=args.native_gqa, **loss_settings,
                              save_every_minutes=args.save_every_minutes,
                              valid_every=holdout_config["valid_every"] if holdout_config else 0,
                              stop_after_completed_steps=args.stop_after_completed_steps)
     print(f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    if recipe is not None:
+        print(f"recipe schema=1 sha256={recipe.sha256}", flush=True)
     if tensorboard_dir:
         print(f"TensorBoard events: {tensorboard_dir}", flush=True)
     print(f"[{args.stage}] {'Restoring state and continuing' if args.resume else 'Starting'} training...", flush=True)

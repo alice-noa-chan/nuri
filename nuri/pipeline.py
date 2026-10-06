@@ -24,6 +24,7 @@ from .config import NuriConfig
 from .data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
                        build_span_batch, has_mlm_target, usable_instruction)
 from .trainer import Task
+from .recipe import TrainingRecipe
 
 
 def read_jsonl(path: str | Path) -> Iterator[dict]:
@@ -56,7 +57,8 @@ def _bucket_options(config: NuriConfig, batch_size: int, enabled: bool) -> dict:
 
 
 def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
-                  pack_mlm: bool = False, bucket: bool = False) -> dict[str, Task]:
+                  pack_mlm: bool = False, bucket: bool = False,
+                  recipe: TrainingRecipe | None = None) -> dict[str, Task]:
     """MLM and span batches drawn from the corpus, skipping documents they cannot use.
 
     pack_mlm fills each MLM row with several documents (no padding waste for
@@ -67,18 +69,22 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
     mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
+    controls = recipe.corruption if recipe is not None else {}
+    mlm_options = {"rate": controls["mlm_rate"]} if "mlm_rate" in controls else {}
+    span_options = {"min_span": controls["min_span"]} if "min_span" in controls else {}
 
     def mlm_batch() -> dict:
         if pack_mlm:
             return build_packed_mlm_batch(lambda: corpus.sample(1, rng, usable=mlm_usable)[0], batch_size,
-                                          config, rng, generator)
+                                          config, rng, generator, **mlm_options)
         docs = corpus.sample(batch_size, rng, usable=mlm_usable)
-        return build_mlm_batch(docs, config, rng, generator)
+        return build_mlm_batch(docs, config, rng, generator, **mlm_options)
 
     def span_batch() -> dict:
         count = batch_size * BUCKET_POOL if bucket else batch_size
         docs = corpus.sample(count, rng, usable=lambda d: len(d) >= 2)  # one token on each side
-        return build_span_batch(docs, config, rng, generator, bucket=_bucket(config, batch_size) if bucket else None)
+        return build_span_batch(docs, config, rng, generator,
+                                bucket=_bucket(config, batch_size) if bucket else None, **span_options)
 
     options = {"batch_size": batch_size, "corpus_documents": len(corpus),
                "corpus_weights": getattr(corpus, "weights", None),  # set for a MixedCorpus
@@ -113,13 +119,26 @@ def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int
                  **_bucket_options(config, batch_size, bucket)})
 
 
+def _apply_recipe(tasks, mix, recipe, config, stage, apply_recipe_mix):
+    if recipe is not None:
+        if recipe.stage != stage:
+            raise ValueError("recipe stage must match the pipeline stage")
+        recipe.validate_model(config)
+        if apply_recipe_mix:
+            mix = recipe.resolve_mix(mix)
+        recipe.bind_tasks(tasks)
+    return tasks, mix
+
+
 def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False,
-               bucket: bool = False):
-    return _corpus_tasks(corpus, config, batch_size, seed, pack_mlm, bucket), {"mlm": 0.5, "span": 0.5}
+               bucket: bool = False, *, recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True):
+    tasks = _corpus_tasks(corpus, config, batch_size, seed, pack_mlm, bucket, recipe)
+    return _apply_recipe(tasks, {"mlm": 0.5, "span": 0.5}, recipe, config, "base", apply_recipe_mix)
 
 
 def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpus: TokenCorpus | None = None,
-                      reasoning: list | None = None, seed: int = 0, bucket: bool = False):
+                      reasoning: list | None = None, seed: int = 0, bucket: bool = False, *,
+                      recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True):
     examples = _usable_examples(examples, config, "instruction")
     tasks = {"instruction": _example_task("instruction", examples, config, batch_size, seed, bucket)}
     mix = {"instruction": 0.7}
@@ -130,14 +149,15 @@ def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpu
     else:
         mix["instruction"] += 0.15
     if corpus is not None:
-        tasks["span"] = _corpus_tasks(corpus, config, batch_size, seed + 2, bucket=bucket)["span"]
+        tasks["span"] = _corpus_tasks(corpus, config, batch_size, seed + 2, bucket=bucket, recipe=recipe)["span"]
         mix["span"] = 0.15
     else:
         mix["instruction"] += 0.15
-    return tasks, mix
+    return _apply_recipe(tasks, mix, recipe, config, "it", apply_recipe_mix)
 
 
-def embedding_stage(pairs: list, config: NuriConfig, batch_size: int, seed: int = 0):
+def embedding_stage(pairs: list, config: NuriConfig, batch_size: int, seed: int = 0, *,
+                    recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True):
     # A side that tokenized to nothing cannot be encoded; drop such pairs.
     pairs = [(q, d) for q, d in pairs if q and d]
     # In-batch InfoNCE needs at least one other row as a negative.
@@ -146,4 +166,4 @@ def embedding_stage(pairs: list, config: NuriConfig, batch_size: int, seed: int 
     rng = random.Random(seed)
     task = Task("pairs", lambda: build_pair_batch(rng.sample(pairs, min(batch_size, len(pairs))), config), rng,
                 options={"batch_size": batch_size, "pairs": len(pairs)})
-    return {"pairs": task}, {"pairs": 1.0}
+    return _apply_recipe({"pairs": task}, {"pairs": 1.0}, recipe, config, "embed", apply_recipe_mix)
