@@ -222,22 +222,24 @@ def length_window(items: list, sizes: list[tuple[int, int]], input_budget: int, 
 
 def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
                      generator: torch.Generator | None = None, min_span: int = 16,
-                     bucket: tuple[int, int, int] | None = None) -> dict:
+                     bucket: tuple[int, int, int] | None = None, *, full_mask_prob: float = 0.1) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
 
     bucket=(input budget, canvas budget, max rows): pass more documents than one batch needs;
     a run of similar-length samples is kept (see length_window).
+    full_mask_prob controls the existing whole-canvas corruption branch.
     """
     pairs = [split_span(doc, config.max_input_len, config.max_response_len, config.eos_id, min_span, rng)
              for doc in documents if len(doc) >= 2]
     if bucket is not None:
         pairs = length_window(pairs, [(len(s), len(t)) for s, t in pairs], *bucket, rng)
-    return _canvas_batch([p[0] for p in pairs], [p[1] for p in pairs], config, generator)
+    return _canvas_batch([p[0] for p in pairs], [p[1] for p in pairs], config, generator, full_mask_prob)
 
 
 def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config: NuriConfig,
                             generator: torch.Generator | None = None,
-                            bucket: tuple[int, int, int] | None = None, rng: random.Random | None = None) -> dict:
+                            bucket: tuple[int, int, int] | None = None, rng: random.Random | None = None, *,
+                            full_mask_prob: float = 0.1) -> dict:
     """examples: (prompt ids, answer ids without EOS).
 
     EOS is appended to every answer (a real ending). Answers longer than M
@@ -245,6 +247,7 @@ def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config:
     their last N tokens, since the end of a conversation matters most.
     bucket=(input budget, canvas budget, max rows) with rng keeps only a run of
     similar-length examples (see length_window).
+    full_mask_prob applies to each eligible answer, including its EOS.
     """
     if bucket is not None:
         usable = [e for e in examples if usable_instruction(e, config)]
@@ -257,7 +260,7 @@ def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config:
         target = list(answer) + [config.eos_id]
         prompts.append(list(prompt)[-config.max_input_len:])
         targets.append(target)
-    batch = _canvas_batch(prompts, targets, config, generator) if prompts else {}
+    batch = _canvas_batch(prompts, targets, config, generator, full_mask_prob) if prompts else {}
     if prompts:
         batch["lengths"] = torch.tensor([len(t) for t in targets])
     batch["dropped"] = len(examples) - len(prompts)
@@ -282,9 +285,10 @@ def build_pair_batch(pairs: list[tuple[list[int], list[int]]], config: NuriConfi
             "false_negatives": false_negatives}
 
 
-def _canvas_batch(sources, targets, config: NuriConfig, generator) -> dict:
+def _canvas_batch(sources, targets, config: NuriConfig, generator, full_mask_prob: float = 0.1) -> dict:
     input_ids, input_valid = pad_batch(sources, config.pad_id)
     target_ids, canvas_valid = pad_batch(targets, config.pad_id)
-    canvas, loss_mask = corrupt_canvas(target_ids, canvas_valid, config.mask_id, generator=generator)
+    canvas, loss_mask = corrupt_canvas(target_ids, canvas_valid, config.mask_id,
+                                       full_mask_prob=full_mask_prob, generator=generator)
     return {"input_ids": input_ids, "input_valid": input_valid, "canvas": canvas,
             "canvas_valid": canvas_valid, "targets": target_ids, "loss_mask": loss_mask}

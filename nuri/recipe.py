@@ -14,7 +14,8 @@ from typing import Mapping
 STAGE_TASKS = {"base": ("mlm", "span"), "it": ("instruction", "reasoning", "span"), "embed": ("pairs",)}
 STAGE_LOSSES = {"base": set(), "it": {"length_weight"},
                 "embed": {"embed_dims", "temperature", "cross_mode_weight"}}
-STAGE_CORRUPTION = {"base": {"mlm_rate", "min_span"}, "it": {"min_span"}, "embed": set()}
+STAGE_CORRUPTION = {"base": {"mlm_rate", "min_span", "full_mask_prob"},
+                    "it": {"min_span", "full_mask_prob"}, "embed": set()}
 
 
 def _number(value, name: str, *, positive: bool = False) -> float:
@@ -91,9 +92,9 @@ class TrainingRecipe:
                     raise ValueError("recipe min_span must be a positive integer")
                 corruption[name] = value
             else:
-                corruption[name] = _number(value, name, positive=True)
+                corruption[name] = _number(value, name, positive=name == "mlm_rate")
                 if corruption[name] > 1:
-                    raise ValueError("recipe mlm_rate must be at most 1")
+                    raise ValueError(f"recipe {name} must be at most 1")
         return cls(stage, MappingProxyType(mix) if mix is not None else None,
                    MappingProxyType(loss), MappingProxyType(corruption))
 

@@ -71,7 +71,7 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
     mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
     controls = recipe.corruption if recipe is not None else {}
     mlm_options = {"rate": controls["mlm_rate"]} if "mlm_rate" in controls else {}
-    span_options = {"min_span": controls["min_span"]} if "min_span" in controls else {}
+    span_options = {name: controls[name] for name in ("min_span", "full_mask_prob") if name in controls}
 
     def mlm_batch() -> dict:
         if pack_mlm:
@@ -103,16 +103,20 @@ def _usable_examples(examples: list, config: NuriConfig, name: str) -> list:
 
 
 def _example_task(kind: str, examples: list, config: NuriConfig, batch_size: int, seed: int,
-                  bucket: bool = False) -> Task:
+                  bucket: bool = False, recipe: TrainingRecipe | None = None) -> Task:
     """Endless random batches over a pre-filtered list of (prompt ids, answer ids)."""
     rng = random.Random(seed)
     generator = torch.Generator().manual_seed(seed)
+    controls = recipe.corruption if recipe is not None else {}
+    canvas_options = {"full_mask_prob": controls["full_mask_prob"]} if "full_mask_prob" in controls else {}
 
     def next_batch() -> dict:
         if not bucket:
-            return build_instruction_batch(rng.sample(examples, min(batch_size, len(examples))), config, generator)
+            return build_instruction_batch(rng.sample(examples, min(batch_size, len(examples))), config, generator,
+                                           **canvas_options)
         pool = rng.sample(examples, min(batch_size * BUCKET_POOL, len(examples)))
-        return build_instruction_batch(pool, config, generator, bucket=_bucket(config, batch_size), rng=rng)
+        return build_instruction_batch(pool, config, generator, bucket=_bucket(config, batch_size), rng=rng,
+                                       **canvas_options)
 
     return Task(kind, next_batch, rng, generator,
                 {"batch_size": batch_size, "examples": len(examples), "bucket": bucket,
@@ -140,11 +144,11 @@ def instruction_stage(examples: list, config: NuriConfig, batch_size: int, corpu
                       reasoning: list | None = None, seed: int = 0, bucket: bool = False, *,
                       recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True):
     examples = _usable_examples(examples, config, "instruction")
-    tasks = {"instruction": _example_task("instruction", examples, config, batch_size, seed, bucket)}
+    tasks = {"instruction": _example_task("instruction", examples, config, batch_size, seed, bucket, recipe)}
     mix = {"instruction": 0.7}
     if reasoning:
         reasoning = _usable_examples(reasoning, config, "reasoning")
-        tasks["reasoning"] = _example_task("instruction", reasoning, config, batch_size, seed + 1, bucket)
+        tasks["reasoning"] = _example_task("instruction", reasoning, config, batch_size, seed + 1, bucket, recipe)
         mix["reasoning"] = 0.15
     else:
         mix["instruction"] += 0.15

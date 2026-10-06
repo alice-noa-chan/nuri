@@ -35,7 +35,7 @@ recommended ratio:
 |---|---|---|---|
 | `task_mix` keys | `mlm`, `span` | `instruction`, `reasoning`, `span` | `pairs` |
 | `loss` keys | None | `length_weight` | `embed_dims`, `temperature`, `cross_mode_weight` |
-| `corruption` keys | `mlm_rate`, `min_span` | `min_span` | None |
+| `corruption` keys | `mlm_rate`, `min_span`, `full_mask_prob` | `min_span`, `full_mask_prob` | None |
 
 Task weights are positive finite relative weights, and their sum must be
 finite. An explicit mix may select a subset of the available stage tasks; an
@@ -59,6 +59,22 @@ default 16. It sets the minimum random continuation span when enough document
 tokens remain; shorter document tails still produce shorter spans. EOS and
 prefix/target separation are unchanged.
 
+`full_mask_prob` is in `[0, 1]`, default 0.1. It controls the existing
+per-response probability of masking every real canvas position for Base span
+denoising and IT instruction, reasoning and span batches, with or without
+length bucketing. Padding remains excluded and EOS remains an ordinary target.
+The other branch still draws its mask ratio from `[0.15, 0.95]` and masks at
+least one position; setting the probability to zero disables the dedicated
+whole-canvas branch but short responses can still have every position selected
+by that partial-mask rule. MLM corruption is independent of this setting.
+
+For example, `"corruption": {"full_mask_prob": 0.5}` declares an experimental
+50% whole-canvas branch. It changes the training distribution and the number
+of vocabulary targets, and may change compute. Better alignment with the
+initial all-MASK inference fill is a hypothesis, not a measured quality gain
+or a new beneficial default. Keep the D-021 comparator and any independent
+assessment policy frozen rather than replacing their settings.
+
 `length_weight` and `cross_mode_weight` are finite and nonnegative. Their
 defaults remain 0.1 and 0 respectively. `temperature` is finite and positive,
 default 0.05. `embed_dims` contains 1 to 8 strictly increasing positive integer
@@ -74,8 +90,8 @@ does not newly set `length_head_trained`; a previously trained length head
 retains its flag. No-recipe IT keeps its legacy stage behavior.
 
 Learning-rate schedules, batch size, accumulation, packing, bucketing and
-runtime backend settings remain separate CLI controls. Canvas full-mask
-probability/range, new objectives, MLM replay during IT, auxiliary loss weights,
+runtime backend settings remain separate CLI controls. The partial canvas mask
+ratio range, new objectives, MLM replay during IT, auxiliary loss weights,
 architecture changes and decoding policies are not part of this schema.
 
 ## Assessment and resume binding
