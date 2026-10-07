@@ -36,6 +36,7 @@
   },
   "budget": {
     "total_hours": 168,
+    "package_hours": 1,
     "reserve_hours": 8,
     "safety": 0.9,
     "max_epochs": 3,
