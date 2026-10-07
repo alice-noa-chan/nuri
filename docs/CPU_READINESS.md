@@ -59,7 +59,16 @@ with complete, untruncated references and eligible comparison partners.
 
 ## Remaining GPU checks
 
-Seven CUDA-specific test cases remain unverified. Six are applicable to A100:
+The subsequent [bounded A100 validation](GPU_VALIDATION.md) completed the six
+applicable CUDA checks: the selected suite passed 48 cases with one expected
+Hopper-only skip. It also measured backends, exercised actual save/resume and
+compared three short Dense warm starts with encoder retention checks. The
+report records the quality limits, verified retrieval and owned-instance
+cleanup. These results do not establish parity with established encoders.
+
+At the end of this CPU audit, seven CUDA-specific cases were unverified.
+The original GPU verification sequence is retained below for reproducibility.
+Six cases are applicable to A100:
 FlashAttention 2 parity, CUDA allocator reporting, two Liger loss cases, Liger
 layer gradients, and native GQA BF16 parity. The seventh checks FlashAttention 3
 and requires Hopper hardware; its A100 skip is expected.
