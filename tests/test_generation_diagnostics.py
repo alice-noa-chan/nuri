@@ -44,11 +44,21 @@ def test_experiment_grid_has_unique_keys_and_expected_rows():
     assert len(keys) == len(set(keys))
     rows = {run.row for run in runs}
     assert "tasks/branch-single/mask" in rows
-    assert "draft/reverse/self-draft" in rows
-    assert "eos/copy/mask+eos0.1" in rows
-    assert "readout/count/mask+readout4" in rows
+    assert "draft/branch/self-draft" in rows
+    assert "eos/count/mask+eos0.1" in rows
+    assert "readout/copy/mask+readout4" in rows
+    assert "readout/copy/mask+pos-from-start" in rows
     assert "readout/reverse/mask+pos-from-end" in rows
     assert len(runs) == 2 * len(rows)
+
+
+def test_runs_reject_unknown_options():
+    with pytest.raises(ValueError):
+        script.Run("tasks", "unknown", 0)
+    with pytest.raises(ValueError):
+        script.Run("tasks", "copy", 0, canvas_training="other")
+    with pytest.raises(ValueError):
+        script.Run("tasks", "copy", 0, input_positions="middle")
 
 
 def test_mask_training_matches_the_base_recipe():
@@ -91,15 +101,31 @@ def test_unknown_options_are_rejected():
         script.decode(model, make_examples("copy", 2, seed=0, spec=SPEC), "other", 1)
 
 
-def test_end_positions_change_memory_only_through_the_input_end():
+@pytest.mark.parametrize(
+    "mode, expected",
+    [
+        ("from-start", [[0, 1, 2, 0, 0], [0, 1, 2, 3, 4]]),
+        ("from-end", [[2, 1, 0, 0, 0], [4, 3, 2, 1, 0]]),
+    ],
+)
+def test_input_position_ids(mode, expected):
+    run = script.Run("readout", "copy", 0, input_positions=mode)
+    model = small_model(run)
+    assert isinstance(model, script.InputPositionNuriModel)
+    ids = torch.tensor([[5, 6, 7, 0, 0], [5, 6, 7, 8, 9]])
+    assert model.position_ids(ids != PAD_ID).tolist() == expected
+    with pytest.raises(ValueError):
+        script.InputPositionNuriModel(model.config, "middle")
+
+
+def test_end_positions_change_the_memory_of_a_shared_prefix():
     run = script.Run("readout", "reverse", 0, input_positions="from-end")
     model = small_model(run)
-    assert isinstance(model, script.EndPositionNuriModel)
     ids = torch.tensor([[5, 6, 7, 0, 0], [5, 6, 7, 8, 9]])
     x, valid = model.encode(ids)
     assert valid.tolist() == [[True] * 3 + [False] * 2, [True] * 5]
     # The same tokens at a different distance from the end get different
-    # embeddings, so the memory differs even for the shared prefix.
+    # position vectors, so the memory differs even for the shared prefix.
     assert not torch.allclose(x[0, :3], x[1, :3])
     with pytest.raises(ValueError):
         model.encode(ids, segments=torch.zeros_like(ids))
@@ -175,8 +201,8 @@ def test_main_trains_resumes_and_summarizes(tmp_path, capsys):
     ]
     summary = script.main(argv)
     assert {entry["row"] for entry in summary} == {
-        "eos/copy/mask+eos0.1",
         "eos/count/mask+eos0.1",
+        "eos/branch-single/mask+eos0.1",
     }
     assert all(entry["seeds"] == 2 for entry in summary)
     lines = (tmp_path / "results-0.jsonl").read_text(encoding="utf-8").splitlines()

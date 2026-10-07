@@ -15,14 +15,15 @@ canvas length with S=1 and S=4 refinement rounds.
 Experiment groups (one hypothesis each; see docs/GENERATION_DIAGNOSTICS.md):
 - tasks:   the unchanged recipe on all five tasks. Does generation fail even
            when there is exactly one answer, and does S=4 lose to S=1?
-- draft:   train the readout to revise drafts. "random-noise" replaces some
-           visible canvas tokens with random tokens; "self-draft" fills some
-           masked positions with the model's own predictions (SMART-style).
-           Both put the loss on every canvas position.
-- eos:     the unchanged recipe, but EOS appears in only 10% of training
-           canvases, as in base span denoising.
-- readout: readout depth 1 and 4 instead of 2, and an end-relative position
-           signal added to the input embeddings.
+- draft:   train the readout to revise drafts on the branch tasks.
+           "random-noise" replaces some visible canvas tokens with random
+           tokens; "self-draft" fills some masked positions with the model's
+           own predictions (SMART-style). Both score every canvas position.
+- eos:     the unchanged recipe on count and branch-single, but EOS appears
+           in only 10% of training canvases, as in base span denoising.
+- readout: copy and reverse with readout depth 1 and 4 instead of 2, and
+           with a start- or end-relative absolute position signal added to
+           the input embeddings.
 
 Two decoders are compared. "standard" is nuri.generation.generate
 (Mask-Predict: kept tokens are never rescored). "revise" re-predicts every
@@ -75,12 +76,12 @@ from nuri.trainer import canvas_loss  # noqa: E402
 
 GROUPS = ("tasks", "draft", "eos", "readout")
 CANVAS_TRAINING = ("mask", "random-noise", "self-draft")
-INPUT_POSITIONS = ("none", "from-end")
+INPUT_POSITIONS = ("none", "from-start", "from-end")
 DECODERS = ("standard", "revise")
 ROUNDS = (1, 4)
 
-# Model size shared by every run. Small enough for CPU, large enough to learn
-# copy and reverse with the unchanged recipe.
+# Model size shared by every run. Small enough for CPU; the unchanged recipe
+# solves the count task at this size within 2,000 steps (CPU calibration).
 MODEL_SIZE = dict(
     hidden_size=128,
     num_heads=4,
@@ -107,6 +108,14 @@ class Run:
     eos_prob: float = 1.0
     readout_layers: int = 2
     input_positions: str = "none"
+
+    def __post_init__(self):
+        if self.task not in TASK_NAMES:
+            raise ValueError(f"unknown task {self.task!r}")
+        if self.canvas_training not in CANVAS_TRAINING:
+            raise ValueError(f"unknown canvas training {self.canvas_training!r}")
+        if self.input_positions not in INPUT_POSITIONS:
+            raise ValueError(f"unknown input positions {self.input_positions!r}")
 
     @property
     def variant(self) -> str:
@@ -135,36 +144,57 @@ def experiment_runs(groups: list[str], seeds: list[int]) -> list[Run]:
         if "tasks" in groups:
             runs += [Run("tasks", task, seed) for task in TASK_NAMES]
         if "draft" in groups:
+            # Branch tasks: the unchanged recipe learns them only partly, so
+            # there is room to see whether revision training changes S=4.
             for training in ("random-noise", "self-draft"):
-                for task in ("reverse", "count", "branch"):
+                for task in BRANCH_TASKS:
                     runs.append(Run("draft", task, seed, canvas_training=training))
         if "eos" in groups:
-            runs += [Run("eos", task, seed, eos_prob=0.1) for task in ("copy", "count")]
+            # Tasks the unchanged recipe can solve, so EOS is the only difference.
+            for task in ("count", "branch-single"):
+                runs.append(Run("eos", task, seed, eos_prob=0.1))
         if "readout" in groups:
-            for task in ("reverse", "count"):
+            # Copy and reverse fail with the unchanged recipe on CPU calibration
+            # runs; they need position-aligned reads from the input.
+            for task in ("copy", "reverse"):
                 runs.append(Run("readout", task, seed, readout_layers=1))
                 runs.append(Run("readout", task, seed, readout_layers=4))
-                runs.append(Run("readout", task, seed, input_positions="from-end"))
+                for mode in ("from-start", "from-end"):
+                    runs.append(Run("readout", task, seed, input_positions=mode))
     return runs
 
 
-class EndPositionNuriModel(NuriModel):
-    """Nuri with a learned "distance from the input end" vector added to input embeddings.
+class InputPositionNuriModel(NuriModel):
+    """Nuri with a learned absolute position vector added to the input embeddings.
 
     The unchanged model gives X only relative (RoPE) position information, and
-    readout cross-attention has none, so the canvas must infer from content
-    where the input ends. This variant tests whether an explicit end-relative
-    signal helps. Everything else, including generate(), is inherited.
+    readout cross-attention has none, so a canvas position cannot directly
+    ask for "input token i". This variant tests whether an explicit position
+    signal fixes that:
+    - from-start: index counted from the first input token (aligns copy).
+    - from-end: index counted back from the last input token (aligns
+      reverse and continuation).
+    Everything else, including generate(), is inherited.
     """
 
-    def __init__(self, config: NuriConfig):
+    def __init__(self, config: NuriConfig, mode: str):
+        if mode not in ("from-start", "from-end"):
+            raise ValueError(f"unknown input position mode {mode!r}")
         super().__init__(config)
-        self.end_positions = nn.Embedding(config.max_input_len, config.hidden_size)
-        nn.init.normal_(self.end_positions.weight, std=config.initializer_range)
+        self.position_mode = mode
+        self.input_positions = nn.Embedding(config.max_input_len, config.hidden_size)
+        nn.init.normal_(self.input_positions.weight, std=config.initializer_range)
+
+    def position_ids(self, valid: torch.Tensor) -> torch.Tensor:
+        """[B, N] position index of every input token; padding gets 0."""
+        positions = torch.arange(valid.shape[1], device=valid.device)[None, :]
+        if self.position_mode == "from-end":
+            positions = valid.sum(dim=1, keepdim=True) - 1 - positions
+        return positions.clamp(min=0) * valid
 
     def encode(self, input_ids, attention_mask=None, segments=None):
         if segments is not None:
-            raise ValueError("end-relative positions do not support packed rows")
+            raise ValueError("input position variants do not support packed rows")
         valid = (
             self.input_mask(input_ids)
             if attention_mask is None
@@ -172,12 +202,8 @@ class EndPositionNuriModel(NuriModel):
         )
         if not valid.any(dim=1).all():
             raise ValueError("every sample needs at least one valid input token")
-        lengths = valid.sum(dim=1, keepdim=True)
-        positions = torch.arange(input_ids.shape[1], device=input_ids.device)
-        from_end = (lengths - 1 - positions[None, :]).clamp(min=0)
-        embedded = self.embedding(input_ids) + self.end_positions(from_end) * valid[
-            ..., None
-        ].to(self.embedding.weight.dtype)
+        position_vectors = self.input_positions(self.position_ids(valid))
+        embedded = self.embedding(input_ids) + position_vectors * valid[..., None]
         return self.encoder(embedded, valid), valid
 
 
@@ -189,9 +215,9 @@ def build_model(run: Run, spec: TaskSpec) -> NuriModel:
         max_input_len=spec.input_len[1],
         max_response_len=spec.max_target_len + 1,
     )
-    if run.input_positions == "from-end":
-        return EndPositionNuriModel(config)
-    return NuriModel(config)
+    if run.input_positions == "none":
+        return NuriModel(config)
+    return InputPositionNuriModel(config, run.input_positions)
 
 
 def make_batch(examples: list[Example], rng: random.Random, eos_prob: float) -> dict:
@@ -449,7 +475,7 @@ def parse_args(argv=None):
     parser.add_argument("--out", type=Path, default=Path("runs/generation_diagnostics"))
     parser.add_argument("--groups", nargs="+", choices=GROUPS, default=list(GROUPS))
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
-    parser.add_argument("--steps", type=int, default=3000)
+    parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--eval-examples", type=int, default=512)
