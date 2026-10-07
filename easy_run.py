@@ -40,9 +40,11 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 from collections import deque
 import urllib.error
@@ -97,6 +99,7 @@ OOM_MARKERS = ("out of memory", "outofmemoryerror")
 MIN_BASE_STEPS = 100  # a base stage shorter than this is not worth running
 MIN_FREE_DISK_GB = 300
 UNPACKED_MARKER = ".easy_run_unpacked"  # written into the data folder after unpacking
+STOP_GRACE_SECONDS = 20 * 60  # a stopped child that has not exited by then is killed
 
 
 # ----- small helpers -------------------------------------------------------------------
@@ -135,12 +138,43 @@ def run(command: list[str], **kwargs) -> int:
     return subprocess.run(command, cwd=ROOT, **kwargs).returncode
 
 
-def run_logged(command: list[str], name: str) -> tuple[int, str]:
+# The child started by run_logged, so a SIGTERM to easy_run can be passed on.
+_child: subprocess.Popen | None = None
+
+
+def request_stop(process: subprocess.Popen, reason: str) -> None:
+    """Ask a training child to save and exit (scripts/train.py handles SIGTERM)."""
+    log(f"stopping the running step: {reason}")
+    try:
+        os.kill(process.pid, signal.SIGTERM)
+    except OSError:
+        pass  # it has already exited
+
+
+def on_sigterm(signum, frame) -> None:
+    """easy_run itself was asked to stop: let the child save first, then package.
+
+    With a child running, the child gets SIGTERM, saves its state and exits
+    with INTERRUPTED_EXIT_CODE; the caller then stops and main() packages
+    what is finished. Without a child, easy_run stops right away.
+    """
+    if _child is not None:
+        request_stop(_child, "easy_run received SIGTERM")
+    else:
+        raise SystemExit("easy_run received SIGTERM; run it again to continue")
+
+
+def run_logged(
+    command: list[str], name: str, stop_at: float | None = None
+) -> tuple[int, str]:
     """Run a command, streaming its output to the console and easy_run_work/logs/<name>.log.
 
     Returns the exit code and the last lines of output, so the caller can tell
-    an out-of-memory failure from other failures.
+    an out-of-memory failure from other failures. With stop_at (a now()
+    time), the command is asked to stop at that moment and killed if it is
+    still running STOP_GRACE_SECONDS later.
     """
+    global _child
     log("$ " + " ".join(command))
     path = WORK / "logs" / f"{name}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,10 +183,28 @@ def run_logged(command: list[str], name: str) -> tuple[int, str]:
         command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
     ) as process:  # fmt: skip
-        for line in process.stdout:
-            print(line, end="", flush=True)
-            handle.write(line)
-            tail.append(line)
+        timers = []
+        if stop_at is not None:
+            delay = max(0.0, stop_at - now())
+            timers = [
+                threading.Timer(
+                    delay, request_stop, (process, "the time budget is used up")
+                ),
+                threading.Timer(delay + STOP_GRACE_SECONDS, process.kill),
+            ]
+        _child = process
+        for timer in timers:
+            timer.daemon = True
+            timer.start()
+        try:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                handle.write(line)
+                tail.append(line)
+        finally:
+            _child = None
+            for timer in timers:
+                timer.cancel()
     return process.returncode, "".join(tail)
 
 
@@ -209,6 +261,10 @@ def load_config(path: Path | None = None) -> dict:
         )
     if not 0 < budget.get("total_hours", 0) <= 24 * 30:
         raise SystemExit("budget.total_hours must be between 0 and 720")
+    if not 0 <= budget.get("package_hours", 1.0) < budget["total_hours"]:
+        raise SystemExit(
+            "budget.package_hours must be at least 0 and below total_hours"
+        )
     if not 0 < budget.get("safety", 0.9) <= 1:
         raise SystemExit("budget.safety must be in (0, 1]")
     train = config.get("train", {})
@@ -505,6 +561,8 @@ def calibrate(config: dict, state: dict) -> None:
             accum = effective // micro
             command = calibration_command(name, spec, config, micro, accum)
             code, output = run_logged(command, f"calibrate-{name}")
+            if code == INTERRUPTED_EXIT_CODE:
+                raise SystemExit("calibration was stopped; run easy_run.py again")
             if code == 0:
                 share = peak_memory_share(out / "train_log.jsonl", state)
                 if share <= MEMORY_HEADROOM:
@@ -668,6 +726,13 @@ def make_plan(config: dict, state: dict) -> None:
     log(f"release plan written to {path}")
 
 
+def deadline(config: dict, state: dict) -> float:
+    """The now() time at which training must stop so packaging still fits."""
+    budget = config["budget"]
+    hours = budget["total_hours"] - budget.get("package_hours", 1.0)
+    return state["started_at"] + hours * 3600
+
+
 def train_all(config: dict, state: dict) -> None:
     """Run the release plan, restarting it after failures; every restart resumes.
 
@@ -675,13 +740,23 @@ def train_all(config: dict, state: dict) -> None:
     that are not finished yet (a resume-free setting: less memory, same
     results, about one extra forward pass). Other failures are retried as
     they are, because most are transient on a long run.
+
+    At the deadline (budget.total_hours minus budget.package_hours after the
+    first start) the running stage saves and stops, and easy_run moves on
+    to packaging the stages that are finished. The plan keeps reserve
+    hours, so this only happens when the run is slower than calibrated.
     """
+    stop_at = deadline(config, state)
     for attempt in range(1, TRAIN_ATTEMPTS + 1):
+        if now() >= stop_at:
+            break
         code, output = run_logged(
-            [PYTHON, "scripts/run_release.py", state["plan"]], "train"
+            [PYTHON, "scripts/run_release.py", state["plan"]], "train", stop_at
         )
         if code == 0:
             return
+        if now() >= stop_at:
+            break  # stopped (or killed) at the deadline
         if code == INTERRUPTED_EXIT_CODE:
             raise SystemExit(
                 "training stopped after saving; run `python easy_run.py` again to continue"
@@ -691,9 +766,12 @@ def train_all(config: dict, state: dict) -> None:
         )
         if is_out_of_memory(output):
             enable_gradient_checkpointing(Path(state["plan"]))
-    raise SystemExit(
-        "training kept failing; see easy_run_work/logs/train.log, then run again"
-    )
+    else:
+        raise SystemExit(
+            "training kept failing; see easy_run_work/logs/train.log, then run again"
+        )
+    log("the time budget is used up; packaging the finished stages")
+    state["deadline_reached"] = True
 
 
 def enable_gradient_checkpointing(plan_path: Path) -> None:
@@ -706,8 +784,13 @@ def enable_gradient_checkpointing(plan_path: Path) -> None:
     log("out of memory: gradient checkpointing is now on for unfinished stages")
 
 
-def package(config: dict, state: dict) -> None:
-    """Collect what should be brought back: models, evaluations, logs and summaries."""
+def package(config: dict, state: dict, status: str = "complete") -> None:
+    """Collect what should be brought back: models, evaluations, logs and summaries.
+
+    Also called when easy_run stops early (status names the reason), so the
+    archive always holds the finished stages and the logs that show what
+    happened. status.json at the top of the archive says which.
+    """
     runs = WORK / "runs"
     shutil.rmtree(OUTPUT, ignore_errors=True)
     OUTPUT.mkdir()
@@ -729,6 +812,17 @@ def package(config: dict, state: dict) -> None:
     for item in (runs / "run_summary.json", STATE_PATH, LOG_PATH, WORK / "plan.json"):
         if item.exists():
             shutil.copy2(item, OUTPUT / item.name)
+    if (WORK / "logs").exists():
+        shutil.copytree(WORK / "logs", OUTPUT / "easy_run_logs")
+    models = OUTPUT / "models"
+    released = sorted(p.name for p in models.iterdir()) if models.exists() else []
+    summary = {
+        "status": status,
+        "finished_steps": state.get("done", []),
+        "deadline_reached": state.get("deadline_reached", False),
+        "released_models": released,
+    }
+    (OUTPUT / "status.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     with tarfile.open(ARCHIVE, "w") as bundle:
         bundle.add(OUTPUT, arcname=OUTPUT.name)
     log(f"done: bring back {ARCHIVE.name} ({ARCHIVE.stat().st_size / 1e9:.2f} GB)")
@@ -750,13 +844,26 @@ def main() -> None:
     state = load_state()
     save_state(state)
     log(f"easy_run started; finished steps: {state['done'] or 'none'}")
-    for name, step in STEPS:
-        if name in state["done"]:
-            continue
-        log(f"step {name}")
-        step(config, state)
-        state["done"].append(name)
+    signal.signal(signal.SIGTERM, on_sigterm)
+    try:
+        for name, step in STEPS:
+            if name in state["done"]:
+                continue
+            log(f"step {name}")
+            step(config, state)
+            state["done"].append(name)
+            save_state(state)
+    except BaseException as error:
+        # Whatever stopped the run, leave an archive with what is finished.
         save_state(state)
+        if "package" not in state["done"]:
+            reason = f"stopped early: {type(error).__name__}: {error}"
+            log(reason)
+            try:
+                package(config, state, status=reason)
+            except Exception as problem:  # never hide the original error
+                log(f"packaging after the stop failed too: {problem}")
+        raise
     log("all steps finished")
 
 

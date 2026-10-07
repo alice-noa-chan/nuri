@@ -87,7 +87,8 @@ def make_config(payload: bytes, **budget) -> dict:
             for split in ("valid", "test")
         },
         "evaluation": {"eval_corpus": "valid/corpus", "eval_pairs": "valid/pairs.jsonl"},
-        "budget": {"total_hours": 0.05, "safety": 1.0, "reserve_hours": 0, "max_epochs": 2,
+        "budget": {"total_hours": 0.05, "package_hours": 0, "safety": 1.0, "reserve_hours": 0,
+                   "max_epochs": 2,
                    "shares": {"base-dense": 4, "base-moe": 2, "it-dense": 1, "it-moe": 1,
                               "embed": 1}, **budget},
         "train": {"batch_size": 4, "embed_batch_size": 4, "reasoning_examples": 0,
@@ -140,6 +141,10 @@ def test_config_validation_names_the_problem(easy, tmp_path):
     config["data"]["url"] = "ftp://x"
     easy.CONFIG_PATH.write_text(json.dumps(config))
     with pytest.raises(SystemExit, match="data.url"):
+        easy.load_config()
+    config = make_config(b"x", total_hours=1, package_hours=1)
+    easy.CONFIG_PATH.write_text(json.dumps(config))
+    with pytest.raises(SystemExit, match="package_hours"):
         easy.load_config()
 
 
@@ -227,6 +232,9 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     monkeypatch.setattr(
         easy, "now", lambda: 0.0
     )  # the test's own runtime is not budget
+    # The frozen clock never reaches a deadline, but the stop timer runs in
+    # real seconds; keep it far away.
+    monkeypatch.setattr(easy, "deadline", lambda config, state: 1e5)
     config = make_config(payload, total_hours=0.01)
     easy.CONFIG_PATH.write_text(json.dumps(config))
 
@@ -322,27 +330,121 @@ def test_calibration_stops_on_other_failures(easy, monkeypatch):
         easy.calibrate(make_config(b"x"), {"host": {}})
 
 
-def test_training_retries_and_turns_on_checkpointing_after_oom(easy, monkeypatch):
-    easy.WORK.mkdir(parents=True)
+def write_plan(easy, finished=("base-dense",)) -> Path:
     runs = easy.WORK / "runs"
-    (runs / "base-dense" / "final").mkdir(parents=True)  # already finished
+    for name in finished:
+        (runs / name / "final").mkdir(parents=True)
     plan_path = easy.WORK / "plan.json"
     plan_path.write_text(
         json.dumps({"out": str(runs), "stages": {"base-dense": {}, "it-dense": {}}})
     )
+    return plan_path
+
+
+def fake_runs(easy, monkeypatch, results):
+    """Replace run_logged with a queue of (exit code, output) answers."""
+    monkeypatch.setattr(
+        easy, "run_logged", lambda command, name, stop_at=None: results.pop(0)
+    )
+
+
+def test_training_retries_and_turns_on_checkpointing_after_oom(easy, monkeypatch):
+    easy.WORK.mkdir(parents=True)
+    plan_path = write_plan(easy)
+    config = make_config(b"x", total_hours=10)
+    state = {"plan": str(plan_path), "started_at": easy.now()}
     results = [(1, "CUDA out of memory"), (0, "")]
-    monkeypatch.setattr(easy, "run_logged", lambda command, name: results.pop(0))
-    easy.train_all({}, {"plan": str(plan_path)})
+    fake_runs(easy, monkeypatch, results)
+    easy.train_all(config, state)
     stages = json.loads(plan_path.read_text())["stages"]
     assert stages["it-dense"]["gradient_checkpointing"] is True
     assert "gradient_checkpointing" not in stages["base-dense"]
 
     results.extend([(1, "boom")] * easy.TRAIN_ATTEMPTS)
     with pytest.raises(SystemExit, match="kept failing"):
-        easy.train_all({}, {"plan": str(plan_path)})
-    monkeypatch.setattr(easy, "run_logged", lambda command, name: (75, ""))
+        easy.train_all(config, state)
+    fake_runs(easy, monkeypatch, [(75, "")])
     with pytest.raises(SystemExit, match="run `python easy_run.py` again"):
-        easy.train_all({}, {"plan": str(plan_path)})
+        easy.train_all(config, state)
+
+
+def test_training_stops_at_the_deadline_and_moves_on(easy, monkeypatch):
+    easy.WORK.mkdir(parents=True)
+    plan_path = write_plan(easy)
+    config = make_config(b"x", total_hours=10, package_hours=1)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(easy, "now", lambda: clock["now"])
+    state = {"plan": str(plan_path), "started_at": 0.0}
+    assert easy.deadline(config, state) == 9 * 3600
+    seen = []
+
+    def run_logged(command, name, stop_at=None):
+        seen.append(stop_at)
+        clock["now"] = stop_at  # the run lasts until the deadline stops it
+        return 75, ""
+
+    monkeypatch.setattr(easy, "run_logged", run_logged)
+    easy.train_all(config, state)  # no error: packaging comes next
+    assert seen == [9 * 3600] and state["deadline_reached"] is True
+
+    # Restarted after the deadline: nothing is trained at all.
+    seen.clear()
+    easy.train_all(config, {"plan": str(plan_path), "started_at": 0.0})
+    assert seen == []
+
+
+def test_run_logged_stops_a_child_at_the_deadline(easy, monkeypatch):
+    monkeypatch.setattr(easy, "STOP_GRACE_SECONDS", 30)
+    sleeper = [
+        sys.executable,
+        "-c",
+        "import time; print('up', flush=True); time.sleep(60)",
+    ]
+    started = easy.time.monotonic()
+    code, output = easy.run_logged(sleeper, "sleeper", stop_at=easy.now() + 1)
+    assert code != 0 and "up" in output
+    assert easy.time.monotonic() - started < 30
+    assert "the time budget is used up" in easy.LOG_PATH.read_text()
+    assert easy._child is None
+
+
+def test_sigterm_is_passed_to_the_running_child(easy):
+    easy.WORK.mkdir(parents=True)
+    child = easy.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    easy._child = child
+    try:
+        easy.on_sigterm(easy.signal.SIGTERM, None)
+        assert child.wait(timeout=30) != 0
+    finally:
+        easy._child = None
+        child.kill()
+    with pytest.raises(SystemExit, match="received SIGTERM"):
+        easy.on_sigterm(easy.signal.SIGTERM, None)
+
+
+def test_a_failed_run_still_packages_what_is_finished(easy, monkeypatch):
+    model = easy.WORK / "runs" / "release" / "nuri-base"
+    model.mkdir(parents=True)
+    (model / "model.safetensors").write_bytes(b"weights")
+    (easy.WORK / "logs").mkdir()
+    (easy.WORK / "logs" / "train.log").write_text("it-dense crashed")
+    easy.CONFIG_PATH.write_text(json.dumps(make_config(b"x")))
+
+    def broken(config, state):
+        raise SystemExit("training kept failing")
+
+    monkeypatch.setattr(easy, "STEPS", [("train", broken), ("package", easy.package)])
+    with pytest.raises(SystemExit, match="kept failing"):
+        easy.main()
+    with tarfile.open(easy.ARCHIVE) as bundle:
+        names = bundle.getnames()
+        status = json.load(bundle.extractfile("easy_run_output/status.json"))
+    assert "easy_run_output/models/nuri-base/model.safetensors" in names
+    assert "easy_run_output/easy_run_logs/train.log" in names
+    assert status["status"].startswith("stopped early: SystemExit: training kept")
+    assert status["released_models"] == ["nuri-base"]
+    state = json.loads(easy.STATE_PATH.read_text())
+    assert state["done"] == []  # the next run tries training again
 
 
 def test_batches_must_be_powers_of_two(easy):
