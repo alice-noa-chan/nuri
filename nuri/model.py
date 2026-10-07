@@ -9,7 +9,11 @@ from torch import nn
 from .config import NuriConfig
 from .core import RecurrentReasoningCore
 from .encoder import InputEncoder
-from .layers import configure_attention_backend, configure_native_gqa
+from .layers import (
+    configure_attention_backend,
+    configure_liger_kernels,
+    configure_native_gqa,
+)
 from .moe import MoEFFN
 from .readout import BidirectionalReadout, MemoryCache
 
@@ -73,6 +77,10 @@ class NuriModel(nn.Module):
         """
         self.encoder.gradient_checkpointing = enabled
         self.readout.gradient_checkpointing = enabled
+
+    def set_liger_kernels(self, enabled: bool = True) -> None:
+        """Enable optional CUDA RMSNorm/SwiGLU kernels without changing weights."""
+        configure_liger_kernels(self, enabled)
 
     def set_native_gqa(self, enabled: bool = True) -> None:
         """Let SDPA consume compact grouped K/V heads when this runtime supports it.

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from . import liger_backend
 from .attention_backend import flash_attention, validate_attention_backend
 
 
@@ -14,9 +15,12 @@ class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
+        self.liger_enabled = False
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.liger_enabled:
+            return liger_backend.rms_norm(x, self.weight, self.eps)
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -168,6 +172,15 @@ def configure_attention_backend(module: nn.Module, backend: str = "sdpa") -> Non
         layer.used_backends.clear()
 
 
+def configure_liger_kernels(module: nn.Module, enabled: bool = True) -> None:
+    """Select fused RMSNorm/SwiGLU without replacing modules or checkpoint weights."""
+    if enabled:
+        liger_backend.validate_liger(next(module.parameters()).device)
+    for layer in module.modules():
+        if isinstance(layer, (RMSNorm, SwiGLU)):
+            layer.liger_enabled = bool(enabled)
+
+
 def configure_native_gqa(module: nn.Module, enabled: bool = True) -> None:
     """Configure all Attention descendants without changing checkpoint weights.
 
@@ -225,6 +238,7 @@ def run_checkpointed(module: nn.Module, *args):
 class SwiGLU(nn.Module):
     def __init__(self, hidden_size: int, ffn_size: int):
         super().__init__()
+        self.liger_enabled = False
         self.gate_proj = nn.Linear(hidden_size, ffn_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, ffn_size, bias=False)
         self.down_proj = nn.Linear(ffn_size, hidden_size, bias=False)
@@ -233,4 +247,8 @@ class SwiGLU(nn.Module):
         self, x: torch.Tensor, valid: torch.Tensor | None = None
     ) -> torch.Tensor:
         # `valid` is accepted so dense and MoE FFNs share one call signature.
+        if self.liger_enabled:
+            return self.down_proj(
+                liger_backend.swiglu(self.gate_proj(x), self.up_proj(x))
+            )
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))

@@ -6,14 +6,22 @@ import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from . import liger_backend
 
-def _linear_ce_sum(hidden, weight, targets, token_weights):
+
+def _linear_ce_sum(hidden, weight, targets, token_weights, ce_backend):
     logits = F.linear(hidden, weight)
-    losses = F.cross_entropy(logits.float(), targets, reduction="none")
+    losses = (
+        liger_backend.cross_entropy(logits.float(), targets)
+        if ce_backend == "liger"
+        else F.cross_entropy(logits.float(), targets, reduction="none")
+    )
     return (losses * token_weights).sum()
 
 
-def _chunked_linear_ce(hidden, weight, targets, token_weights, chunk_size):
+def _chunked_linear_ce(
+    hidden, weight, targets, token_weights, chunk_size, ce_backend="torch"
+):
     """Recompute each vocabulary projection in backward instead of retaining logits."""
     if (
         isinstance(chunk_size, bool)
@@ -29,6 +37,8 @@ def _chunked_linear_ce(hidden, weight, targets, token_weights, chunk_size):
         )
     if token_weights.shape != targets.shape:
         raise ValueError("token weights must have the same shape as targets")
+    if ce_backend not in ("torch", "liger"):
+        raise ValueError("ce_backend must be torch or liger")
 
     loss = hidden.new_zeros((), dtype=torch.float32)
     recompute = torch.is_grad_enabled() and (
@@ -40,6 +50,7 @@ def _chunked_linear_ce(hidden, weight, targets, token_weights, chunk_size):
             weight,
             targets[start : start + chunk_size],
             token_weights[start : start + chunk_size],
+            ce_backend,
         )
         if recompute:
             part = checkpoint(
@@ -78,6 +89,8 @@ def linear_sample_mean_ce(
     targets: torch.Tensor,
     loss_mask: torch.Tensor,
     chunk_size: int = 256,
+    *,
+    ce_backend: str = "torch",
 ) -> torch.Tensor:
     """Canvas row mean with the same weighting as sample_mean_ce, without full logits.
 
@@ -98,8 +111,19 @@ def linear_sample_mean_ce(
     target_rows = (counts > 0).sum()
     token_weights = counts[rows].float().reciprocal() / target_rows.clamp_min(1)
     return _chunked_linear_ce(
-        hidden, weight, targets[loss_mask], token_weights, chunk_size
+        hidden, weight, targets[loss_mask], token_weights, chunk_size, ce_backend
     )
+
+
+def liger_token_mean_ce(hidden, weight, targets):
+    """Fused scalar MLM mean; canvas row weights use chunked non-fused CE instead."""
+    if hidden.ndim != 2 or weight.ndim != 2 or hidden.shape[1] != weight.shape[1]:
+        raise ValueError("hidden and vocabulary weight must be compatible matrices")
+    if targets.ndim != 1 or targets.shape[0] != hidden.shape[0] or not targets.numel():
+        raise ValueError(
+            "each selected hidden row needs one target, with at least one target"
+        )
+    return liger_backend.fused_linear_ce(hidden, weight, targets)
 
 
 def token_mean_ce(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
