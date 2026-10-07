@@ -312,12 +312,14 @@ def build_span_batch(
     bucket: tuple[int, int, int] | None = None,
     *,
     full_mask_prob: float = 0.1,
+    return_indices: bool = False,
 ) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
 
     bucket=(input budget, canvas budget, max rows): pass more documents than one batch needs;
     a run of similar-length samples is kept (see length_window).
     full_mask_prob controls the existing whole-canvas corruption branch.
+    return_indices adds selected original document indices for exposure audits.
     """
     pairs = [
         split_span(
@@ -331,11 +333,19 @@ def build_span_batch(
         for doc in documents
         if len(doc) >= 2
     ]
+    indices = [index for index, doc in enumerate(documents) if len(doc) >= 2]
     if bucket is not None:
-        pairs = length_window(pairs, [(len(s), len(t)) for s, t in pairs], *bucket, rng)
-    return _canvas_batch(
+        selected = length_window(
+            list(range(len(pairs))), [(len(s), len(t)) for s, t in pairs], *bucket, rng
+        )
+        pairs = [pairs[index] for index in selected]
+        indices = [indices[index] for index in selected]
+    batch = _canvas_batch(
         [p[0] for p in pairs], [p[1] for p in pairs], config, generator, full_mask_prob
     )
+    if return_indices:
+        batch["source_indices"] = torch.tensor(indices, dtype=torch.long)
+    return batch
 
 
 def build_instruction_batch(

@@ -22,8 +22,14 @@ import torch  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
 from nuri.config import NuriConfig  # noqa: E402
-from nuri.data import (TokenCorpus, build_mlm_batch, build_packed_mlm_batch,
-                       build_span_batch, has_mlm_target)  # noqa: E402
+from nuri.data import (  # noqa: E402
+    TokenCorpus,
+    build_mlm_batch,
+    build_packed_mlm_batch,
+    build_span_batch,
+    has_mlm_target,
+)
+from nuri.pipeline import BUCKET_POOL, _bucket  # noqa: E402
 
 
 def digest(path):
@@ -36,13 +42,32 @@ def digest(path):
 
 def validate(spec):
     """Bound work and require deliberately declared TRAIN-only resources."""
-    allowed = {"schema_version", "model_config", "corpora", "seed", "batches",
-               "batch_size", "pack_mlm", "bucket_span", "mlm_rate", "min_span"}
-    if (not isinstance(spec, dict) or set(spec) - allowed
-            or type(spec.get("schema_version")) is not int or spec["schema_version"] != 1):
+    allowed = {
+        "schema_version",
+        "model_config",
+        "corpora",
+        "seed",
+        "batches",
+        "batch_size",
+        "pack_mlm",
+        "bucket_span",
+        "mlm_rate",
+        "min_span",
+        "full_mask_prob",
+    }
+    if (
+        not isinstance(spec, dict)
+        or set(spec) - allowed
+        or type(spec.get("schema_version")) is not int
+        or spec["schema_version"] != 1
+    ):
         raise ValueError("unsupported audit schema or fields")
-    for name, default, minimum, maximum in (("batches", 32, 1, 512), ("batch_size", 2, 1, 64),
-                                          ("seed", 0, 0, 2**31 - 1), ("min_span", 16, 1, 4096)):
+    for name, default, minimum, maximum in (
+        ("batches", 32, 1, 512),
+        ("batch_size", 2, 1, 64),
+        ("seed", 0, 0, 2**31 - 1),
+        ("min_span", 16, 1, 4096),
+    ):
         value = spec.get(name, default)
         if type(value) is not int or not minimum <= value <= maximum:
             raise ValueError(f"invalid {name}")
@@ -52,15 +77,28 @@ def validate(spec):
     rate = spec.get("mlm_rate", 0.3)
     if type(rate) not in (float, int) or not math.isfinite(rate) or not 0 < rate <= 1:
         raise ValueError("invalid mlm_rate")
-    if not isinstance(spec.get("model_config"), str) or not spec["model_config"].strip():
+    probability = spec.get("full_mask_prob", 0.1)
+    if (
+        type(probability) not in (float, int)
+        or not math.isfinite(probability)
+        or not 0 <= probability <= 1
+    ):
+        raise ValueError("invalid full_mask_prob")
+    if (
+        not isinstance(spec.get("model_config"), str)
+        or not spec["model_config"].strip()
+    ):
         raise ValueError("model_config must be a path")
     sources = spec.get("corpora")
     if not isinstance(sources, list) or not sources or len(sources) > 3:
         raise ValueError("corpora must declare one to three TRAIN resources")
     languages = []
     for source in sources:
-        if (not isinstance(source, dict) or set(source) != {"language", "path", "weight", "split"}
-                or source["split"] != "train"):
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"language", "path", "weight", "split"}
+            or source["split"] != "train"
+        ):
             raise ValueError("every resource must explicitly declare split=train")
         if source["language"] not in ("ko", "en", "ja"):
             raise ValueError("unknown language")
@@ -72,18 +110,28 @@ def validate(spec):
             raise ValueError("invalid corpus weight")
     if len(set(languages)) != len(languages):
         raise ValueError("language resources must be unique")
+    if not math.isfinite(sum(source["weight"] for source in sources)):
+        raise ValueError("corpus weight total must be finite")
 
 
 def counts():
-    return {"sampled_documents": 0, "input_positions": 0, "canvas_positions": 0,
-            "supervised_targets": 0, "rows": 0}
+    return {
+        "sampled_documents": 0,
+        "input_positions": 0,
+        "canvas_positions": 0,
+        "supervised_targets": 0,
+        "rows": 0,
+    }
 
 
 def mixed_mlm(corpora, languages, weights, config, spec):
     """Count actual segment positions; a packed row can contain many languages."""
     rng = random.Random(spec.get("seed", 0))
     generator = torch.Generator().manual_seed(spec.get("seed", 0))
-    report = {language: {**counts(), "draws": 0, "rejected_documents": 0} for language in languages}
+    report = {
+        language: {**counts(), "draws": 0, "rejected_documents": 0}
+        for language in languages
+    }
     batch_size = spec.get("batch_size", 2)
     total_rows = 0
     for _ in tqdm(range(spec.get("batches", 32)), desc="CPU mixed MLM batches"):
@@ -103,8 +151,9 @@ def mixed_mlm(corpora, languages, weights, config, spec):
             raise ValueError("too few usable TRAIN documents")
 
         if spec.get("pack_mlm", True):
-            batch = build_packed_mlm_batch(draw, batch_size, config, rng, generator,
-                                          rate=spec.get("mlm_rate", 0.3))
+            batch = build_packed_mlm_batch(
+                draw, batch_size, config, rng, generator, rate=spec.get("mlm_rate", 0.3)
+            )
             cursor = 0
             for row in range(len(batch["input_ids"])):
                 segments = batch["segments"][row]
@@ -113,18 +162,29 @@ def mixed_mlm(corpora, languages, weights, config, spec):
                     cursor += 1
                     positions = (segments == segment) & batch["input_valid"][row]
                     report[language]["input_positions"] += int(positions.sum())
-                    report[language]["supervised_targets"] += int((positions & batch["target_mask"][row]).sum())
+                    report[language]["supervised_targets"] += int(
+                        (positions & batch["target_mask"][row]).sum()
+                    )
             if cursor != len(accepted):
                 raise ValueError("packed document/segment attribution mismatch")
         else:
-            batch = build_mlm_batch([draw() for _ in range(batch_size)], config, rng, generator,
-                                    rate=spec.get("mlm_rate", 0.3))
+            batch = build_mlm_batch(
+                [draw() for _ in range(batch_size)],
+                config,
+                rng,
+                generator,
+                rate=spec.get("mlm_rate", 0.3),
+            )
             if len(batch["input_ids"]) != len(accepted):
                 raise ValueError("unexpected usable MLM row drop")
             for row, language in enumerate(accepted):
                 report[language]["rows"] += 1
-                report[language]["input_positions"] += int(batch["input_valid"][row].sum())
-                report[language]["supervised_targets"] += int(batch["target_mask"][row].sum())
+                report[language]["input_positions"] += int(
+                    batch["input_valid"][row].sum()
+                )
+                report[language]["supervised_targets"] += int(
+                    batch["target_mask"][row].sum()
+                )
         total_rows += len(batch["input_ids"])
     for block in report.values():
         if spec.get("pack_mlm", True):
@@ -138,12 +198,19 @@ def isolated_span(corpus, config, spec, seed):
     generator = torch.Generator().manual_seed(seed)
     report = counts()
     size = spec.get("batch_size", 2)
-    bucket = (size * config.max_input_len, size * config.max_response_len, size * 4)
-    offered = size * 8 if spec.get("bucket_span", True) else size
+    bucket = _bucket(config, size)
+    offered = size * BUCKET_POOL if spec.get("bucket_span", True) else size
     for _ in tqdm(range(spec.get("batches", 32)), desc="CPU isolated span batches"):
         docs = corpus.sample(offered, rng, usable=lambda doc: len(doc) >= 2)
-        batch = build_span_batch(docs, config, rng, generator, min_span=spec.get("min_span", 16),
-                                 bucket=bucket if spec.get("bucket_span", True) else None)
+        batch = build_span_batch(
+            docs,
+            config,
+            rng,
+            generator,
+            min_span=spec.get("min_span", 16),
+            bucket=bucket if spec.get("bucket_span", True) else None,
+            full_mask_prob=spec.get("full_mask_prob", 0.1),
+        )
         report["sampled_documents"] += len(docs)
         report["rows"] += len(batch["input_ids"])
         report["input_positions"] += int(batch["input_valid"].sum())
@@ -151,6 +218,71 @@ def isolated_span(corpus, config, spec, seed):
         report["supervised_targets"] += int(batch["loss_mask"].sum())
     report["offered_eligible_documents"] = report.pop("sampled_documents")
     return report
+
+
+def mixed_span(corpora, languages, weights, config, spec):
+    """Attribute retained rows after real mixed-language length selection.
+
+    Document draws and split/corruption RNG match the production span builder.
+    A bucket can change language shares, so offered and selected rows are separate.
+    """
+    rng = random.Random(spec.get("seed", 0))
+    generator = torch.Generator().manual_seed(spec.get("seed", 0))
+    groups = {
+        language: {
+            **counts(),
+            "draws": 0,
+            "rejected_documents": 0,
+            "offered_eligible_documents": 0,
+            "fully_masked_rows": 0,
+        }
+        for language in languages
+    }
+    size = spec.get("batch_size", 2)
+    bucketed = spec.get("bucket_span", True)
+    offered = size * BUCKET_POOL if bucketed else size
+    total = {"total_rows": 0, "padded_input_positions": 0, "padded_canvas_positions": 0}
+    for _ in tqdm(range(spec.get("batches", 32)), desc="CPU mixed span batches"):
+        documents, labels = [], []
+        for _ in range(offered * 100):
+            source = rng.choices(range(len(corpora)), weights)[0]
+            language = languages[source]
+            groups[language]["draws"] += 1
+            document = corpora[source].random_document(rng)
+            if len(document) < 2:
+                groups[language]["rejected_documents"] += 1
+                continue
+            documents.append(document)
+            labels.append(language)
+            groups[language]["offered_eligible_documents"] += 1
+            if len(documents) == offered:
+                break
+        if len(documents) != offered:
+            raise ValueError("too few usable TRAIN documents for mixed spans")
+        batch = build_span_batch(
+            documents,
+            config,
+            rng,
+            generator,
+            min_span=spec.get("min_span", 16),
+            bucket=_bucket(config, size) if bucketed else None,
+            full_mask_prob=spec.get("full_mask_prob", 0.1),
+            return_indices=True,
+        )
+        for row, source_index in enumerate(batch["source_indices"].tolist()):
+            group = groups[labels[source_index]]
+            group["sampled_documents"] += 1
+            group["rows"] += 1
+            group["input_positions"] += int(batch["input_valid"][row].sum())
+            group["canvas_positions"] += int(batch["canvas_valid"][row].sum())
+            group["supervised_targets"] += int(batch["loss_mask"][row].sum())
+            group["fully_masked_rows"] += int(
+                torch.equal(batch["loss_mask"][row], batch["canvas_valid"][row])
+            )
+        total["total_rows"] += len(batch["input_ids"])
+        total["padded_input_positions"] += batch["input_ids"].numel()
+        total["padded_canvas_positions"] += batch["canvas"].numel()
+    return {**total, "by_language": groups}
 
 
 def main(argv=None):
@@ -179,34 +311,79 @@ def main(argv=None):
     folders = [resolve(source["path"]) for source in spec["corpora"]]
     if len(set(folders)) != len(folders):
         raise ValueError("corpus resources must not alias")
-    resources = [path, model_config, *[folder / name for folder in folders
-                                      for name in ("tokens.bin", "offsets.npy")]]
+    resources = [
+        path,
+        model_config,
+        *[
+            folder / name
+            for folder in folders
+            for name in ("tokens.bin", "offsets.npy")
+        ],
+    ]
     print("Binding TRAIN inputs before CPU batch simulation", flush=True)
     bindings = {str(item): digest(item) for item in resources}
-    before = {str(item): (item.stat().st_size, item.stat().st_mtime_ns) for item in resources}
-    sources = [Path(__file__).resolve(), ROOT / "nuri" / "data.py", ROOT / "nuri" / "corruption.py",
-               ROOT / "nuri" / "config.py"]
+    before = {
+        str(item): (item.stat().st_size, item.stat().st_mtime_ns) for item in resources
+    }
+    sources = [
+        Path(__file__).resolve(),
+        ROOT / "nuri" / "data.py",
+        ROOT / "nuri" / "corruption.py",
+        ROOT / "nuri" / "config.py",
+        ROOT / "nuri" / "pipeline.py",
+    ]
     source_binding = {str(item.relative_to(ROOT)): digest(item) for item in sources}
     corpora = [TokenCorpus(folder) for folder in folders]
     if any(len(corpus) == 0 for corpus in corpora):
         raise ValueError("TRAIN corpus is empty")
     torch.set_num_threads(2)
     languages = [source["language"] for source in spec["corpora"]]
-    report = {"schema_version": 1, "status": "cpu_batch_policy_simulation",
-              "input_sha256": bindings, "runtime_source_sha256": source_binding,
-              "configuration": spec, "mlm_mixed": mixed_mlm(corpora, languages,
-                  [source["weight"] for source in spec["corpora"]], config, spec),
-              "span_isolated_by_language": {language: isolated_span(corpus, config, spec,
-                  spec.get("seed", 0) + 1009 * (index + 1))
-                  for index, (language, corpus) in enumerate(zip(languages, corpora))},
-              "model_loaded": False, "optimizer_updates": 0, "gpu_used": False, "test_used": False,
-              "limits": ["TRAIN membership is caller-declared, not established by this utility.",
-                         "Counts measure these simulated batch policies, not historical training exposure.",
-                         "Isolated span batches cannot establish mixed-language bucket selection shares.",
-                         "Source weights are document weights, never target, gradient or compute shares."]}
-    after = {str(item): (item.stat().st_size, item.stat().st_mtime_ns) for item in resources}
-    if (before != after or bindings != {str(item): digest(item) for item in resources}
-            or source_binding != {str(item.relative_to(ROOT)): digest(item) for item in sources}):
+    report = {
+        "schema_version": 1,
+        "status": "cpu_batch_policy_simulation",
+        "input_sha256": bindings,
+        "runtime_source_sha256": source_binding,
+        "configuration": spec,
+        "mlm_mixed": mixed_mlm(
+            corpora,
+            languages,
+            [source["weight"] for source in spec["corpora"]],
+            config,
+            spec,
+        ),
+        "span_mixed": mixed_span(
+            corpora,
+            languages,
+            [source["weight"] for source in spec["corpora"]],
+            config,
+            spec,
+        ),
+        "span_isolated_by_language": {
+            language: isolated_span(
+                corpus, config, spec, spec.get("seed", 0) + 1009 * (index + 1)
+            )
+            for index, (language, corpus) in enumerate(zip(languages, corpora))
+        },
+        "model_loaded": False,
+        "optimizer_updates": 0,
+        "gpu_used": False,
+        "test_used": False,
+        "limits": [
+            "TRAIN membership is caller-declared, not established by this utility.",
+            "Counts measure these simulated batch policies, not historical training exposure.",
+            "Mixed span counts include actual bucket selection; isolated counts describe separate runs.",
+            "Source weights are document weights, never target, gradient or compute shares.",
+        ],
+    }
+    after = {
+        str(item): (item.stat().st_size, item.stat().st_mtime_ns) for item in resources
+    }
+    if (
+        before != after
+        or bindings != {str(item): digest(item) for item in resources}
+        or source_binding
+        != {str(item.relative_to(ROOT)): digest(item) for item in sources}
+    ):
         raise ValueError("inputs or runtime sources changed during the simulation")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as stream:
