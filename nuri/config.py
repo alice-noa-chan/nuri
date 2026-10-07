@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -94,21 +95,74 @@ class NuriConfig:
 
     def validate(self) -> None:
         """Fail early with a clear message instead of deep inside a forward pass."""
-        sizes = ("vocab_size", "hidden_size", "num_heads", "ffn_size", "input_layers", "readout_layers",
-                 "latent_slots", "max_input_len", "max_response_len", "embed_dim")
+        integer_fields = (
+            "vocab_size",
+            "hidden_size",
+            "num_heads",
+            "ffn_size",
+            "input_layers",
+            "readout_layers",
+            "latent_slots",
+            "max_input_len",
+            "max_response_len",
+            "embed_dim",
+            "default_depth",
+            "refine_rounds",
+            "num_labels",
+            "pad_id",
+            "mask_id",
+            "eos_id",
+            "local_radius",
+            "slot_groups",
+        )
+        for name in integer_fields:
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an integer")
+        for name in ("num_kv_heads", "kv_latent_dim"):
+            if getattr(self, name) is not None and type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an integer when supplied")
+        if any(type(depth) is not int for depth in self.train_depths):
+            raise ValueError("reasoning depths must be integers")
+        for name in ("rope_theta", "norm_eps", "gate_init", "initializer_range"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        sizes = (
+            "vocab_size",
+            "hidden_size",
+            "num_heads",
+            "ffn_size",
+            "input_layers",
+            "readout_layers",
+            "latent_slots",
+            "max_input_len",
+            "max_response_len",
+            "embed_dim",
+        )
         for name in sizes:
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
-        if self.num_kv_heads is not None and (self.num_kv_heads < 1 or self.num_heads % self.num_kv_heads):
+        if self.num_kv_heads is not None and (
+            self.num_kv_heads < 1 or self.num_heads % self.num_kv_heads
+        ):
             raise ValueError("num_kv_heads must be >= 1 and divide num_heads")
-        if self.kv_latent_dim is not None and not 1 <= self.kv_latent_dim <= self.hidden_size:
+        if (
+            self.kv_latent_dim is not None
+            and not 1 <= self.kv_latent_dim <= self.hidden_size
+        ):
             raise ValueError("kv_latent_dim must be between 1 and hidden_size")
         if self.head_dim % 2:
             raise ValueError("RoPE needs an even head_dim")
-        if not self.train_depths or min(self.train_depths) < 0 or self.default_depth < 0:
-            raise ValueError("reasoning depths must be >= 0 and train_depths must not be empty")
+        if (
+            not self.train_depths
+            or min(self.train_depths) < 0
+            or self.default_depth < 0
+        ):
+            raise ValueError(
+                "reasoning depths must be >= 0 and train_depths must not be empty"
+            )
         if self.refine_rounds <= 0:
             raise ValueError("refine_rounds must be positive")
         if self.canvas_position_encoding not in ("none", "learned"):
@@ -116,10 +170,16 @@ class NuriConfig:
         if not 0.0 < self.gate_init < 1.0:
             raise ValueError("gate_init is a sigmoid output and must be in (0, 1)")
         if self.norm_eps <= 0 or self.rope_theta <= 0 or self.initializer_range <= 0:
-            raise ValueError("norm_eps, rope_theta and initializer_range must be positive")
+            raise ValueError(
+                "norm_eps, rope_theta and initializer_range must be positive"
+            )
         if self.attention_schedule:
-            if len(self.attention_schedule) != self.input_layers or set(self.attention_schedule) - {"G", "L"}:
-                raise ValueError("attention_schedule needs one 'G' or 'L' per input layer")
+            if len(self.attention_schedule) != self.input_layers or set(
+                self.attention_schedule
+            ) - {"G", "L"}:
+                raise ValueError(
+                    "attention_schedule needs one 'G' or 'L' per input layer"
+                )
             if self.local_radius < 1:
                 raise ValueError("local_radius must be >= 1")
         if self.slot_groups < 1 or self.latent_slots % self.slot_groups:
@@ -128,19 +188,50 @@ class NuriConfig:
             raise ValueError("num_labels must be >= 0")
         special = (self.pad_id, self.mask_id, self.eos_id)
         if len(set(special)) != 3 or not all(0 <= i < self.vocab_size for i in special):
-            raise ValueError("pad_id, mask_id and eos_id must be distinct ids inside the vocabulary")
+            raise ValueError(
+                "pad_id, mask_id and eos_id must be distinct ids inside the vocabulary"
+            )
         if self.moe is not None:
             moe = self.moe
-            if moe.num_experts <= 0 or moe.expert_ffn_size <= 0 or moe.num_shared_experts < 0:
+            for name in (
+                "num_experts",
+                "expert_ffn_size",
+                "top_k",
+                "num_shared_experts",
+            ):
+                if type(getattr(moe, name)) is not int:
+                    raise ValueError(f"MoE {name} must be an integer")
+            if any(
+                type(index) is not int
+                for index in (*moe.input_layers, *moe.readout_layers)
+            ):
+                raise ValueError("MoE layer indices must be integers")
+            for name in ("balance_loss_weight", "z_loss_weight"):
+                value = getattr(moe, name)
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or value < 0
+                ):
+                    raise ValueError(f"MoE {name} must be a finite nonnegative number")
+            if (
+                moe.num_experts <= 0
+                or moe.expert_ffn_size <= 0
+                or moe.num_shared_experts < 0
+            ):
                 raise ValueError("MoE sizes must be positive")
             if not 2 <= moe.top_k <= moe.num_experts:
                 raise ValueError("MoE top_k must be between 2 and num_experts")
             if moe.backend not in ("loop", "grouped"):
                 raise ValueError('MoE backend must be "loop" or "grouped"')
             if not all(1 <= i <= self.input_layers for i in moe.input_layers):
-                raise ValueError("MoE input_layers must be 1-based indices of input layers")
+                raise ValueError(
+                    "MoE input_layers must be 1-based indices of input layers"
+                )
             if not all(1 <= i <= self.readout_layers for i in moe.readout_layers):
-                raise ValueError("MoE readout_layers must be 1-based indices of readout layers")
+                raise ValueError(
+                    "MoE readout_layers must be 1-based indices of readout layers"
+                )
 
     def to_dict(self) -> dict:
         return asdict(self)
