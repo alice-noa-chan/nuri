@@ -71,7 +71,8 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
     mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
     controls = recipe.corruption if recipe is not None else {}
     mlm_options = {"rate": controls["mlm_rate"]} if "mlm_rate" in controls else {}
-    span_options = {name: controls[name] for name in ("min_span", "full_mask_prob") if name in controls}
+    span_options = {name: controls[name] for name in ("min_span", "full_mask_prob", "span_end_prob")
+                    if name in controls}
 
     def mlm_batch() -> dict:
         if pack_mlm:

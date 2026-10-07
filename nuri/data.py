@@ -312,6 +312,7 @@ def build_span_batch(
     bucket: tuple[int, int, int] | None = None,
     *,
     full_mask_prob: float = 0.1,
+    span_end_prob: float = 0.0,
     return_indices: bool = False,
 ) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
@@ -319,6 +320,8 @@ def build_span_batch(
     bucket=(input budget, canvas budget, max rows): pass more documents than one batch needs;
     a run of similar-length samples is kept (see length_window).
     full_mask_prob controls the existing whole-canvas corruption branch.
+    span_end_prob is the share of spans forced to end at the document end
+    with EOS (see split_span); 0 keeps the original sampling exactly.
     return_indices adds selected original document indices for exposure audits.
     """
     pairs = [
@@ -329,6 +332,7 @@ def build_span_batch(
             config.eos_id,
             min_span,
             rng,
+            span_end_prob,
         )
         for doc in documents
         if len(doc) >= 2

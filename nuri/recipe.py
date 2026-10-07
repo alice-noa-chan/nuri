@@ -14,8 +14,8 @@ from typing import Mapping
 STAGE_TASKS = {"base": ("mlm", "span"), "it": ("instruction", "reasoning", "span"), "embed": ("pairs",)}
 STAGE_LOSSES = {"base": set(), "it": {"length_weight"},
                 "embed": {"embed_dims", "temperature", "cross_mode_weight"}}
-STAGE_CORRUPTION = {"base": {"mlm_rate", "min_span", "full_mask_prob"},
-                    "it": {"min_span", "full_mask_prob"}, "embed": set()}
+STAGE_CORRUPTION = {"base": {"mlm_rate", "min_span", "full_mask_prob", "span_end_prob"},
+                    "it": {"min_span", "full_mask_prob", "span_end_prob"}, "embed": set()}
 
 
 def _number(value, name: str, *, positive: bool = False) -> float:

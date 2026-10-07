@@ -145,6 +145,7 @@ def split_span(
     eos_id: int,
     min_span: int = 16,
     rng: random.Random | None = None,
+    end_prob: float = 0.0,
 ) -> tuple[list[int], list[int]]:
     """Cut one raw document into (input prefix, target span) for text span denoising (§8-C).
 
@@ -156,10 +157,19 @@ def split_span(
       because only then is it a real ending. If such a span already fills the
       whole canvas, the cut moves forward so the span keeps ending at the
       document end and EOS still fits.
+    - With probability end_prob the span is instead chosen to end at the
+      document end, so it always carries EOS. Random cuts rarely reach the
+      end, which leaves EOS almost untrained (docs/GENERATION_DIAGNOSTICS.md).
+      The default 0 draws no extra random numbers, so existing runs and
+      exact resumes are unchanged.
     """
     if len(document) < 2:
         raise ValueError("a document needs at least two tokens to be split")
+    if type(end_prob) not in (int, float) or not 0 <= end_prob <= 1:
+        raise ValueError("end_prob must be a number in [0, 1]")
     rng = rng or random
+    if end_prob > 0 and rng.random() < end_prob:
+        return _split_at_end(document, max_input_len, max_response_len, eos_id, min_span, rng)
     cut = rng.randint(1, len(document) - 1)
     remaining = len(document) - cut
     longest = min(max_response_len, remaining)
@@ -173,3 +183,23 @@ def split_span(
         target = document[cut : cut + span]
     source = document[max(0, cut - max_input_len) : cut]
     return source, target
+
+
+def _split_at_end(
+    document: list[int],
+    max_input_len: int,
+    max_response_len: int,
+    eos_id: int,
+    min_span: int,
+    rng: random.Random,
+) -> tuple[list[int], list[int]]:
+    """A span that reaches the document end, plus EOS, and the prefix before it.
+
+    The span has between min_span and the longest length that still leaves
+    one input token and room for EOS on the canvas (fewer for short documents).
+    """
+    longest = min(max_response_len - 1, len(document) - 1)
+    span = rng.randint(min(min_span, longest), longest)
+    cut = len(document) - span
+    source = document[max(0, cut - max_input_len) : cut]
+    return source, document[cut:] + [eos_id]
