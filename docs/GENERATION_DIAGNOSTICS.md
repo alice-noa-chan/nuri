@@ -127,6 +127,39 @@ training nor the revising decoder harms a one-answer task. Revision training hel
 decoder, and only by about 0.035 over the unchanged pair. It is a minor
 lever next to positions, single-answer targets and EOS.
 
+## Real-text check of the fixes (CPU)
+
+`scripts/readout_probe.py` starts from the corrected Dense initializer
+(the retained Dense Base with D-019 canvas positions), freezes the encoder,
+core and token embedding, caches X and R (T=4) and trains only the readout
+for 600 steps (batch 8, LR 3e-4, inputs cut to 128 tokens, spans to 32).
+Training uses the training corpora (Korean/English/Japanese weights
+0.6/0.3/0.1); evaluation uses 192 validation examples per set, never test,
+with oracle canvas lengths. "mid" spans are cut at random points; "end"
+spans end at the document end and must finish with EOS. One seed; treat
+small differences as noise.
+
+| Arm | Set | Full-mask CE | Acc S=1 | Acc S=4 | Token F1 S=4 | Repeat S=1 | Correct EOS S=4 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| initial (no readout training) | end | 6.836 | 0.070 | 0.054 | 0.214 | 0.794 | 0.130 |
+| baseline | end | 6.850 | 0.085 | 0.070 | 0.223 | 0.783 | 0.198 |
+| memory positions | end | 6.852 | 0.085 | 0.069 | 0.224 | 0.789 | 0.193 |
+| memory positions + span_end_prob 0.5 | end | **6.475** | **0.131** | **0.132** | **0.250** | 0.798 | **0.745** |
+| baseline | mid | 6.794 | 0.097 | 0.080 | 0.238 | 0.787 | - |
+| memory positions | mid | 6.786 | 0.099 | 0.081 | 0.239 | 0.781 | - |
+| memory positions + span_end_prob 0.5 | mid | 6.933 | 0.083 | 0.070 | 0.226 | 0.817 | - |
+
+- EOS-bearing spans work on real text: correct EOS placement rises from
+  0.198 to 0.745 and document-end token accuracy nearly doubles. Half of
+  the training spans moved to document ends, which costs some mid-document
+  accuracy in this short probe. This supports D-023.
+- Memory positions are indistinguishable from the baseline after 600
+  steps: the tables start at zero and barely move in so few updates. A
+  longer probe decides whether they stay (see DISCUSSION).
+- All arms still repeat heavily at S=1 (about 0.79) and reach under 15%
+  token accuracy: a short readout-only repair on a frozen encoder does not
+  make the Dense Base a good generator.
+
 ## Limits
 
 - Small synthetic models, 2,000 updates and three seeds. Large effects

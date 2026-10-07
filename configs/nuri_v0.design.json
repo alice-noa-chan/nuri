@@ -324,8 +324,21 @@
       "ja(minor)"
     ],
     "license": "MIT",
-    "training_budget": "Historical one-day plan; the current Vast run follows D-018 below",
+    "training_budget": "Historical one-day plan; the current run follows D-022 below",
     "current_run_budget": {
+      "decision": "D-022",
+      "gpu": "1x A100 80GB, external host, unattended",
+      "wall_hours": 168,
+      "runner": "easy_run.py (resumable; calibrates step time on real data)",
+      "reserve_hours": 8,
+      "safety_factor": 0.9,
+      "stage_shares": {"base-dense": 50, "base-moe": 30, "it-dense": 8, "it-moe": 6, "embed": 6},
+      "it_and_embed_max_epochs": 3,
+      "freed_time": "to_base_dense",
+      "span_denoising": {"decision": "D-023", "span_end_prob": 0.5},
+      "historical_decisions": "D-003_D-006_D-017_D-018_allocations_remain_recorded"
+    },
+    "previous_run_budget": {
       "decision": "D-018",
       "provider": "Vast.ai",
       "gpu": "1x compatible A100 80GB on-demand",
