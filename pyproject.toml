@@ -14,6 +14,8 @@ dependencies = ["torch>=2.4", "safetensors>=0.4", "tokenizers>=0.19", "numpy>=1.
 dev = ["pytest>=8", "transformers>=4.45"]
 hf = ["transformers>=4.45"]
 tensorboard = ["tensorboard>=2.16"]
+flash2 = ["flash-attn>=2.6.3,<3"]
+liger = ["liger-kernel>=0.6.4,<1"]
 
 [tool.setuptools.packages.find]
 include = ["nuri*"]
