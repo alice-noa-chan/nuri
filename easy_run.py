@@ -35,6 +35,7 @@ state.json), so a restart does not grant extra time.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -44,6 +45,7 @@ import sys
 import tarfile
 import time
 from collections import deque
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,10 +277,21 @@ def install(config: dict, state: dict) -> None:
         raise SystemExit("CUDA is not available after installation")
 
 
+DOWNLOAD_ATTEMPTS = 20
+RETRYABLE_HTTP = {408, 425, 429}  # plus every 5xx; other 4xx answers are final
+
+
 def download(url: str, target: Path) -> None:
-    """Download with resume: a partial file continues with an HTTP Range request."""
+    """Download with resume: a partial file continues with an HTTP Range request.
+
+    A transfer that ends early (a dropped connection, with or without an
+    error) keeps its bytes and the next attempt continues from there. A
+    "416 Range Not Satisfiable" answer to a resume means the partial file is
+    already complete. Client errors such as 403 or 404 stop at once, because
+    retrying cannot fix a wrong or expired URL.
+    """
     partial = target.with_suffix(target.suffix + ".part")
-    for attempt in range(1, 21):
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         offset = partial.stat().st_size if partial.exists() else 0
         request = urllib.request.Request(
             url, headers={"Range": f"bytes={offset}-"} if offset else {}
@@ -288,19 +301,34 @@ def download(url: str, target: Path) -> None:
                 if offset and response.status != 206:
                     log("server ignored the resume request; restarting the download")
                     offset = 0
-                total = response.headers.get("Content-Length")
+                length = response.headers.get("Content-Length")
+                expected = offset + int(length) if length else None
                 log(
-                    f"downloading from byte {offset} ({total or 'unknown'} bytes to go)"
+                    f"downloading from byte {offset} ({length or 'unknown'} bytes to go)"
                 )
                 with partial.open("ab" if offset else "wb") as handle:
                     shutil.copyfileobj(response, handle, length=16 * 1024 * 1024)
+            received = partial.stat().st_size
+            if expected is not None and received != expected:
+                raise OSError(f"transfer ended at byte {received} of {expected}")
             os.replace(partial, target)
             return
-        except OSError as error:  # network errors are retried with backoff
-            wait = min(300, 10 * attempt)
-            log(f"download attempt {attempt} failed ({error}); retrying in {wait}s")
-            time.sleep(wait)
-    raise SystemExit("the data download failed 20 times")
+        except urllib.error.HTTPError as error:
+            if error.code == 416 and offset:
+                log("the partial download is already complete")
+                os.replace(partial, target)
+                return
+            if error.code < 500 and error.code not in RETRYABLE_HTTP:
+                raise SystemExit(
+                    f"the data URL answered HTTP {error.code}; check data.url"
+                ) from error
+            problem = f"HTTP {error.code}"
+        except (OSError, http.client.HTTPException) as error:
+            problem = f"{type(error).__name__}: {error}"
+        wait = min(300, 10 * attempt)
+        log(f"download attempt {attempt} failed ({problem}); retrying in {wait}s")
+        time.sleep(wait)
+    raise SystemExit(f"the data download failed {DOWNLOAD_ATTEMPTS} times")
 
 
 def safe_extract(archive: Path, destination: Path) -> None:

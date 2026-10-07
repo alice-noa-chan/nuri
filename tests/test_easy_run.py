@@ -4,6 +4,7 @@ import io
 import json
 import sys
 import tarfile
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -358,3 +359,61 @@ def test_dense_products_train_before_the_moe_variants(easy):
     for name, spec in easy.STAGES.items():
         if "init" in spec:  # every stage starts after the stage it builds on
             assert order.index(spec["init"]) < order.index(name)
+
+
+class ShortResponse(FakeResponse):
+    """Announces the full length but delivers only the first `keep` bytes, without error."""
+
+    def __init__(self, payload: bytes, status: int, keep: int):
+        super().__init__(payload[:keep], status)
+        self.headers = {"Content-Length": str(len(payload))}
+
+
+def test_download_survives_short_and_broken_transfers(easy, monkeypatch, tmp_path):
+    payload = make_archive(tmp_path)
+    calls = []
+
+    def urlopen(request, timeout=None):
+        header = request.headers.get("Range")
+        start = int(header.split("=")[1].rstrip("-")) if header else 0
+        calls.append(start)
+        if len(calls) == 1:  # the connection closes quietly after 700 bytes
+            return ShortResponse(payload, 200, keep=700)
+        if len(calls) == 2:  # the next one breaks with an incomplete read
+            raise easy.http.client.IncompleteRead(b"")
+        return FakeResponse(payload[start:], 206)
+
+    monkeypatch.setattr(easy.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(easy.time, "sleep", lambda seconds: None)
+    easy.WORK.mkdir(parents=True)
+    easy.download("https://example.invalid/data.tar", easy.WORK / "data.tar")
+    assert calls == [0, 700, 700]
+    assert (easy.WORK / "data.tar").read_bytes() == payload
+
+
+def http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://example.invalid", code, "x", {}, None)
+
+
+def test_download_finishes_on_416_and_stops_on_client_errors(easy, monkeypatch):
+    easy.WORK.mkdir(parents=True)
+    (easy.WORK / "data.tar.part").write_bytes(b"complete")
+
+    def answer(code):
+        def urlopen(request, timeout=None):
+            raise http_error(code)
+
+        monkeypatch.setattr(easy.urllib.request, "urlopen", urlopen)
+
+    monkeypatch.setattr(easy.time, "sleep", lambda seconds: None)
+    answer(416)  # the resume asks for bytes past the end: nothing is missing
+    easy.download("https://example.invalid/data.tar", easy.WORK / "data.tar")
+    assert (easy.WORK / "data.tar").read_bytes() == b"complete"
+
+    answer(404)
+    with pytest.raises(SystemExit, match="HTTP 404"):
+        easy.download("https://example.invalid/x.tar", easy.WORK / "x.tar")
+    answer(503)  # server errors are retried until the attempts run out
+    monkeypatch.setattr(easy, "DOWNLOAD_ATTEMPTS", 3)
+    with pytest.raises(SystemExit, match="failed 3 times"):
+        easy.download("https://example.invalid/x.tar", easy.WORK / "x.tar")
