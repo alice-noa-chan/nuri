@@ -15,12 +15,16 @@ easy_run_work/state.json and skipped on the next run:
 2. install     pip-install this package and its training extras (once).
 3. data        Download the data archive from the configured URL (resuming
                a partial download), verify its SHA256 and unpack it.
-4. calibrate   Train each release stage for a few steps on the real data
-               and measure seconds per step.
+4. calibrate   Train each release stage for a few steps on the real data,
+               pick a micro-batch that fits in GPU memory (the effective
+               batch stays fixed; accumulation makes up the rest) and
+               measure seconds per optimizer step.
 5. plan        Turn the time budget into steps per stage and write the
                release plan (frozen once written).
 6. train       Run scripts/run_release.py: train, evaluate and export every
                stage. It resumes interrupted stages from their newest state.
+               Failures are retried a few times; out of memory turns on
+               gradient checkpointing for the unfinished stages first.
 7. package     Copy models, evaluations, logs and summaries into
                easy_run_output/ and pack easy_run_output.tar for retrieval.
 
@@ -39,6 +43,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections import deque
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +85,11 @@ EVALUATE = {
     "embed": ["retrieval"],
 }
 CALIBRATION_STEPS = 30  # measured steps per stage; the first third is warmup
+MAX_MICRO_BATCH = 64  # the fastest measured A100 batch (docs/GPU_CAPACITY.md)
+MIN_MICRO_BATCH = 4
+MEMORY_HEADROOM = 0.85  # calibration peaks above this share of GPU memory are too tight
+TRAIN_ATTEMPTS = 4  # run_release restarts after failures (each resumes)
+OOM_MARKERS = ("out of memory", "outofmemoryerror")
 MIN_BASE_STEPS = 100  # a base stage shorter than this is not worth running
 MIN_FREE_DISK_GB = 300
 
@@ -118,6 +128,32 @@ def run(command: list[str], **kwargs) -> int:
     """Run a command in the project folder, streaming its output; returns the exit code."""
     log("$ " + " ".join(command))
     return subprocess.run(command, cwd=ROOT, **kwargs).returncode
+
+
+def run_logged(command: list[str], name: str) -> tuple[int, str]:
+    """Run a command, streaming its output to the console and easy_run_work/logs/<name>.log.
+
+    Returns the exit code and the last lines of output, so the caller can tell
+    an out-of-memory failure from other failures.
+    """
+    log("$ " + " ".join(command))
+    path = WORK / "logs" / f"{name}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tail = deque(maxlen=400)
+    with path.open("a", encoding="utf-8") as handle, subprocess.Popen(
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    ) as process:  # fmt: skip
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            handle.write(line)
+            tail.append(line)
+    return process.returncode, "".join(tail)
+
+
+def is_out_of_memory(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in OOM_MARKERS)
 
 
 def check(command: list[str]) -> None:
@@ -170,6 +206,13 @@ def load_config(path: Path | None = None) -> dict:
         raise SystemExit("budget.total_hours must be between 0 and 720")
     if not 0 < budget.get("safety", 0.9) <= 1:
         raise SystemExit("budget.safety must be in (0, 1]")
+    train = config.get("train", {})
+    for key, default in (("batch_size", 64), ("embed_batch_size", 128)):
+        value = train.get(key, default)
+        if type(value) is not int or value < 1 or value & (value - 1):
+            raise SystemExit(
+                f"train.{key} must be a power of two (it is split into micro-batches)"
+            )
     return config
 
 
@@ -370,28 +413,72 @@ def seconds_per_step(log_file: Path) -> float:
     return (last_time - first_time) / (last_step - first_step)
 
 
+def peak_memory_share(log_file: Path, state: dict) -> float:
+    """Largest reserved CUDA memory in a train log, as a share of the GPU (0 on CPU)."""
+    total = state.get("host", {}).get("memory_gb", 0) * 1e9
+    if not total:
+        return 0.0
+    rows = [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    peak = max((row.get("cuda_peak_reserved_bytes", 0) for row in rows), default=0)
+    return peak / total
+
+
+def calibration_command(
+    name: str, spec: dict, config: dict, micro: int, accum: int
+) -> list[str]:
+    out = WORK / "calibration" / name
+    command = [PYTHON, "scripts/train.py", "--stage", spec["stage"], "--out", str(out),
+               "--steps", str(CALIBRATION_STEPS), "--log-every", "1", "--no-progress",
+               "--batch-size", str(micro), "--grad-accum", str(accum)]  # fmt: skip
+    if spec["stage"] == "base":
+        command += ["--preset", spec["preset"], "--pack-mlm", "--bucket"]
+    else:
+        command += ["--init", str(scratch_init(STAGES[spec["init"]]["preset"]))]
+        if spec["stage"] == "it":
+            command += ["--bucket"]
+    return command + stage_data_flags(config, spec["stage"])
+
+
 def calibrate(config: dict, state: dict) -> None:
-    """Measure seconds per step of every stage on the real data."""
+    """Pick a micro-batch that fits and measure seconds per optimizer step, per stage.
+
+    The effective batch (micro-batch x accumulation) stays as configured. A
+    run that runs out of memory, or peaks above MEMORY_HEADROOM of the GPU,
+    is repeated with half the micro-batch and twice the accumulation.
+    """
     timings = state.setdefault("seconds_per_step", {})
+    batches = state.setdefault("batches", {})
     for name, spec in STAGES.items():
         if name in timings:
             continue
+        effective = batch_size(config, spec["stage"])
+        micro = min(effective, MAX_MICRO_BATCH)
         out = WORK / "calibration" / name
-        shutil.rmtree(out, ignore_errors=True)
-        command = [PYTHON, "scripts/train.py", "--stage", spec["stage"], "--out", str(out),
-                   "--steps", str(CALIBRATION_STEPS), "--log-every", "1", "--no-progress",
-                   "--batch-size", str(batch_size(config, spec["stage"]))]  # fmt: skip
-        if spec["stage"] == "base":
-            command += ["--preset", spec["preset"], "--pack-mlm", "--bucket"]
-        else:
-            base_preset = STAGES[spec["init"]]["preset"]
-            command += ["--init", str(scratch_init(base_preset))]
-            if spec["stage"] == "it":
-                command += ["--bucket"]
-        command += stage_data_flags(config, spec["stage"])
-        check(command)
+        while True:
+            shutil.rmtree(out, ignore_errors=True)
+            accum = effective // micro
+            command = calibration_command(name, spec, config, micro, accum)
+            code, output = run_logged(command, f"calibrate-{name}")
+            if code == 0:
+                share = peak_memory_share(out / "train_log.jsonl", state)
+                if share <= MEMORY_HEADROOM:
+                    break
+                log(f"{name}: micro-batch {micro} peaks at {share:.0%} of GPU memory")
+            elif not is_out_of_memory(output):
+                raise SystemExit(
+                    f"calibration of {name} failed (exit {code}); see logs"
+                )
+            if micro // 2 < MIN_MICRO_BATCH:
+                raise SystemExit(f"{name} does not fit even with micro-batch {micro}")
+            micro //= 2
+            log(f"{name}: retrying with micro-batch {micro}")
         timings[name] = seconds_per_step(out / "train_log.jsonl")
-        log(f"{name}: {timings[name]:.3f} s/step")
+        batches[name] = {"micro_batch": micro, "grad_accum": accum}
+        log(f"{name}: micro-batch {micro} x {accum}, {timings[name]:.3f} s/step")
         save_state(state)
         shutil.rmtree(out, ignore_errors=True)
 
@@ -497,7 +584,8 @@ def make_plan(config: dict, state: dict) -> None:
         stage = {
             "stage": kind,
             "steps": steps[name],
-            "batch_size": batch_size(config, kind),
+            "batch_size": state["batches"][name]["micro_batch"],
+            "grad_accum": state["batches"][name]["grad_accum"],
             "save_every_minutes": train.get("save_every_minutes", 30),
             "holdout_config": str(holdouts),
             "valid_every": max(
@@ -539,15 +627,41 @@ def make_plan(config: dict, state: dict) -> None:
 
 
 def train_all(config: dict, state: dict) -> None:
-    code = run([PYTHON, "scripts/run_release.py", state["plan"]])
-    if code == INTERRUPTED_EXIT_CODE:
-        raise SystemExit(
-            "training stopped after saving; run `python easy_run.py` again to continue"
+    """Run the release plan, restarting it after failures; every restart resumes.
+
+    An out-of-memory failure turns on gradient checkpointing for the stages
+    that are not finished yet (a resume-free setting: less memory, same
+    results, about one extra forward pass). Other failures are retried as
+    they are, because most are transient on a long run.
+    """
+    for attempt in range(1, TRAIN_ATTEMPTS + 1):
+        code, output = run_logged(
+            [PYTHON, "scripts/run_release.py", state["plan"]], "train"
         )
-    if code != 0:
-        raise SystemExit(
-            f"run_release.py failed with exit code {code}; fix the cause and run again"
+        if code == 0:
+            return
+        if code == INTERRUPTED_EXIT_CODE:
+            raise SystemExit(
+                "training stopped after saving; run `python easy_run.py` again to continue"
+            )
+        log(
+            f"run_release.py failed with exit code {code} (attempt {attempt}/{TRAIN_ATTEMPTS})"
         )
+        if is_out_of_memory(output):
+            enable_gradient_checkpointing(Path(state["plan"]))
+    raise SystemExit(
+        "training kept failing; see easy_run_work/logs/train.log, then run again"
+    )
+
+
+def enable_gradient_checkpointing(plan_path: Path) -> None:
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    runs = Path(plan["out"])
+    for name, stage in plan["stages"].items():
+        if not (runs / name / "final").exists():
+            stage["gradient_checkpointing"] = True
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    log("out of memory: gradient checkpointing is now on for unfinished stages")
 
 
 def package(config: dict, state: dict) -> None:

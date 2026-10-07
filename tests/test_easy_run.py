@@ -266,3 +266,87 @@ def test_example_config_passes_validation_once_filled_in(easy):
     loaded = easy.load_config()
     assert set(loaded["budget"]["shares"]) == set(easy.STAGES)
     assert loaded["budget"]["total_hours"] == 168
+
+
+def fake_calibration(easy, monkeypatch, outcomes):
+    """Replace run_logged: each call pops (exit code, output, peak bytes) and writes a log."""
+    commands = []
+
+    def run_logged(command, name):
+        commands.append(command)
+        code, output, peak = outcomes.pop(0)
+        out = Path(command[command.index("--out") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        rows = [{"step": i, "seconds": float(i), "cuda_peak_reserved_bytes": peak}
+                for i in range(easy.CALIBRATION_STEPS)]  # fmt: skip
+        write_jsonl(out / "train_log.jsonl", rows)
+        return code, output
+
+    monkeypatch.setattr(easy, "run_logged", run_logged)
+    monkeypatch.setattr(easy, "scratch_init", lambda preset: Path("init"))
+    return commands
+
+
+def test_calibration_halves_the_micro_batch_on_oom_or_tight_memory(easy, monkeypatch):
+    monkeypatch.setattr(
+        easy,
+        "STAGES",
+        {"embed": easy.STAGES["embed"], "base-dense": easy.STAGES["base-dense"]},
+    )
+    config = make_config(b"x")
+    config["train"]["embed_batch_size"] = 128
+    config["train"]["batch_size"] = 64
+    gb = 1e9
+    outcomes = [
+        (1, "torch.OutOfMemoryError: CUDA out of memory", 0),  # embed micro 64
+        (0, "", 79 * gb),  # embed micro 32: fits but peaks above the headroom
+        (0, "", 40 * gb),  # embed micro 16
+        (0, "", 50 * gb),  # base-dense micro 64
+    ]
+    commands = fake_calibration(easy, monkeypatch, outcomes)
+    state = {"host": {"memory_gb": 80}}
+    easy.calibrate(config, state)
+    micro = [c[c.index("--batch-size") + 1] for c in commands]
+    accum = [c[c.index("--grad-accum") + 1] for c in commands]
+    assert micro == ["64", "32", "16", "64"] and accum == ["2", "4", "8", "1"]
+    assert state["batches"] == {"embed": {"micro_batch": 16, "grad_accum": 8},
+                                "base-dense": {"micro_batch": 64, "grad_accum": 1}}  # fmt: skip
+    assert state["seconds_per_step"]["embed"] == pytest.approx(1.0)
+
+
+def test_calibration_stops_on_other_failures(easy, monkeypatch):
+    monkeypatch.setattr(easy, "STAGES", {"base-dense": easy.STAGES["base-dense"]})
+    fake_calibration(easy, monkeypatch, [(1, "ValueError: bad corpus", 0)])
+    with pytest.raises(SystemExit, match="calibration of base-dense failed"):
+        easy.calibrate(make_config(b"x"), {"host": {}})
+
+
+def test_training_retries_and_turns_on_checkpointing_after_oom(easy, monkeypatch):
+    easy.WORK.mkdir(parents=True)
+    runs = easy.WORK / "runs"
+    (runs / "base-dense" / "final").mkdir(parents=True)  # already finished
+    plan_path = easy.WORK / "plan.json"
+    plan_path.write_text(
+        json.dumps({"out": str(runs), "stages": {"base-dense": {}, "it-dense": {}}})
+    )
+    results = [(1, "CUDA out of memory"), (0, "")]
+    monkeypatch.setattr(easy, "run_logged", lambda command, name: results.pop(0))
+    easy.train_all({}, {"plan": str(plan_path)})
+    stages = json.loads(plan_path.read_text())["stages"]
+    assert stages["it-dense"]["gradient_checkpointing"] is True
+    assert "gradient_checkpointing" not in stages["base-dense"]
+
+    results.extend([(1, "boom")] * easy.TRAIN_ATTEMPTS)
+    with pytest.raises(SystemExit, match="kept failing"):
+        easy.train_all({}, {"plan": str(plan_path)})
+    monkeypatch.setattr(easy, "run_logged", lambda command, name: (75, ""))
+    with pytest.raises(SystemExit, match="run `python easy_run.py` again"):
+        easy.train_all({}, {"plan": str(plan_path)})
+
+
+def test_batches_must_be_powers_of_two(easy):
+    config = make_config(b"x")
+    config["train"]["batch_size"] = 48
+    easy.CONFIG_PATH.write_text(json.dumps(config))
+    with pytest.raises(SystemExit, match="power of two"):
+        easy.load_config()
