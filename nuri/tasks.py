@@ -23,13 +23,55 @@ from __future__ import annotations
 
 import random
 
-NAMES = ["Alex", "Bora", "Chen", "Dana", "Eun", "Farah", "Gabi", "Hana", "Ivan", "Jin", "Kai", "Lena",
-         "Min", "Nora", "Omar", "Pia", "Quinn", "Rin", "Sora", "Taro", "Uma", "Vic", "Wen", "Yuna",
-         "Zed", "Ari", "Beni", "Cleo", "Dov", "Ema", "Finn", "Gia", "Hugo", "Ines", "Jade", "Kenji"]
+NAMES = [
+    "Alex",
+    "Bora",
+    "Chen",
+    "Dana",
+    "Eun",
+    "Farah",
+    "Gabi",
+    "Hana",
+    "Ivan",
+    "Jin",
+    "Kai",
+    "Lena",
+    "Min",
+    "Nora",
+    "Omar",
+    "Pia",
+    "Quinn",
+    "Rin",
+    "Sora",
+    "Taro",
+    "Uma",
+    "Vic",
+    "Wen",
+    "Yuna",
+    "Zed",
+    "Ari",
+    "Beni",
+    "Cleo",
+    "Dov",
+    "Ema",
+    "Finn",
+    "Gia",
+    "Hugo",
+    "Ines",
+    "Jade",
+    "Kenji",
+]
 NODES = [f"N{i}" for i in range(60)]
 
 
 SPLITS = ("train", "shared", "eval")
+LANGUAGES = ("ko", "en")
+
+
+def _validate_language(lang: str) -> None:
+    """Reject labels without templates instead of silently generating English."""
+    if lang not in LANGUAGES:
+        raise ValueError(f"language must be one of {LANGUAGES}")
 
 
 def _pool(items: list[str], split: str) -> list[str]:
@@ -40,9 +82,10 @@ def _pool(items: list[str], split: str) -> list[str]:
 
 
 def relation_example(rng: random.Random, lang: str, split: str = "train"):
+    _validate_language(lang)
     hops = rng.randint(2, 4)
     people = rng.sample(_pool(NAMES, split), hops + 2)
-    chain = people[:hops + 1]
+    chain = people[: hops + 1]
     facts = [(chain[i], chain[i + 1]) for i in range(hops)]
     # Distractor: an extra child of someone in the chain. It never adds a second
     # parent, so walking up from the target always has exactly one path.
@@ -59,18 +102,23 @@ def relation_example(rng: random.Random, lang: str, split: str = "train"):
 
 
 def arithmetic_example(rng: random.Random, lang: str, split: str = "train"):
+    _validate_language(lang)
     _pool([], split)  # validates the split name
     low, high = (51, 99) if split == "eval" else (1, 50)
     a, b, c, d = (rng.randint(low, high) for _ in range(4))
     op1, op2 = rng.choice("+-"), rng.choice("+-*")
     expression = f"({a} {op1} {b}) {op2} {c} - {d}"
     value = eval(expression)  # safe: built only from integers and + - *
-    question = (f"다음 식의 값을 계산하세요. 숫자만 답하세요.\n{expression}" if lang == "ko"
-                else f"Compute the value of the expression. Answer with the number only.\n{expression}")
+    question = (
+        f"다음 식의 값을 계산하세요. 숫자만 답하세요.\n{expression}"
+        if lang == "ko"
+        else f"Compute the value of the expression. Answer with the number only.\n{expression}"
+    )
     return [{"role": "user", "content": question}], str(value)
 
 
 def reachability_example(rng: random.Random, lang: str, split: str = "train"):
+    _validate_language(lang)
     nodes = rng.sample(_pool(NODES, split), 7)
     edges = {(rng.choice(nodes), rng.choice(nodes)) for _ in range(8)}
     edges = sorted((a, b) for a, b in edges if a != b)
@@ -97,7 +145,18 @@ def reachability_example(rng: random.Random, lang: str, split: str = "train"):
 TASKS = (relation_example, arithmetic_example, reachability_example)
 
 
-def reasoning_examples(count: int, seed: int = 0, split: str = "train", languages=("ko", "en")):
+def reasoning_examples(
+    count: int, seed: int = 0, split: str = "train", languages=("ko", "en")
+):
     """`count` examples, mixing all tasks and languages evenly at random."""
+    if type(count) is not int or count < 0:
+        raise ValueError("count must be a nonnegative integer")
+    _pool([], split)
+    if not isinstance(languages, (tuple, list)) or not languages:
+        raise ValueError(
+            "languages must be a nonempty sequence of supported language labels"
+        )
+    for language in languages:
+        _validate_language(language)
     rng = random.Random(seed)
     return [rng.choice(TASKS)(rng, rng.choice(languages), split) for _ in range(count)]

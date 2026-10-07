@@ -2,7 +2,13 @@ import random
 
 import pytest
 
-from nuri.tasks import NAMES, arithmetic_example, reachability_example, reasoning_examples, relation_example
+from nuri.tasks import (
+    NAMES,
+    arithmetic_example,
+    reachability_example,
+    reasoning_examples,
+    relation_example,
+)
 
 
 def parse_parents(text: str) -> dict[str, str]:
@@ -30,10 +36,22 @@ def test_relation_answer_follows_the_chain():
 
 
 def test_splits_use_disjoint_names():
-    train = {n for m, a in (relation_example(random.Random(i), "en", "train") for i in range(200))
-             for n in NAMES if n in m[0]["content"]}
-    evaluation = {n for m, a in (relation_example(random.Random(i), "en", "eval") for i in range(200))
-                  for n in NAMES if n in m[0]["content"]}
+    train = {
+        n
+        for m, a in (
+            relation_example(random.Random(i), "en", "train") for i in range(200)
+        )
+        for n in NAMES
+        if n in m[0]["content"]
+    }
+    evaluation = {
+        n
+        for m, a in (
+            relation_example(random.Random(i), "en", "eval") for i in range(200)
+        )
+        for n in NAMES
+        if n in m[0]["content"]
+    }
     assert train and evaluation and not train & evaluation
 
 
@@ -55,14 +73,55 @@ def test_mix_has_both_languages():
 
 def test_shared_split_uses_training_pools_but_new_combinations():
     def names(split, seeds):
-        return {n for i in seeds for n in NAMES if n in relation_example(random.Random(i), "en", split)[0][0]["content"]}
+        return {
+            n
+            for i in seeds
+            for n in NAMES
+            if n in relation_example(random.Random(i), "en", split)[0][0]["content"]
+        }
 
     assert names("shared", range(200)) <= names("train", range(1000))
-    train_prompts = {relation_example(random.Random(i), "en", "train")[0][0]["content"] for i in range(500)}
-    shared_prompts = {relation_example(random.Random(10_000 + i), "en", "shared")[0][0]["content"] for i in range(500)}
+    train_prompts = {
+        relation_example(random.Random(i), "en", "train")[0][0]["content"]
+        for i in range(500)
+    }
+    shared_prompts = {
+        relation_example(random.Random(10_000 + i), "en", "shared")[0][0]["content"]
+        for i in range(500)
+    }
     assert not train_prompts & shared_prompts
 
 
 def test_unknown_split_is_rejected():
     with pytest.raises(ValueError):
         reasoning_examples(1, split="test")
+
+
+@pytest.mark.parametrize(
+    "task", [relation_example, arithmetic_example, reachability_example]
+)
+@pytest.mark.parametrize("language", ["ja", "fr", "", None])
+def test_unsupported_language_never_becomes_english(task, language):
+    rng = random.Random(11)
+    before = rng.getstate()
+    with pytest.raises(ValueError, match="language"):
+        task(rng, language)
+    assert rng.getstate() == before
+
+
+@pytest.mark.parametrize("languages", [(), [], "en", ("ja",), ("en", "ja")])
+def test_language_declarations_are_validated_even_with_zero_examples(languages):
+    with pytest.raises(ValueError, match="language"):
+        reasoning_examples(0, languages=languages)
+
+
+@pytest.mark.parametrize("count", [-1, True, 1.5])
+def test_invalid_reasoning_count_is_rejected(count):
+    with pytest.raises(ValueError, match="count"):
+        reasoning_examples(count)
+
+
+def test_empty_request_still_validates_split():
+    with pytest.raises(ValueError, match="split"):
+        reasoning_examples(0, split="test")
+    assert reasoning_examples(0) == []
