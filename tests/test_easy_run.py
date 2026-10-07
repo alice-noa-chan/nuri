@@ -350,3 +350,11 @@ def test_batches_must_be_powers_of_two(easy):
     easy.CONFIG_PATH.write_text(json.dumps(config))
     with pytest.raises(SystemExit, match="power of two"):
         easy.load_config()
+
+
+def test_dense_products_train_before_the_moe_variants(easy):
+    order = list(easy.STAGES)
+    assert order[:3] == ["base-dense", "it-dense", "embed"]
+    for name, spec in easy.STAGES.items():
+        if "init" in spec:  # every stage starts after the stage it builds on
+            assert order.index(spec["init"]) < order.index(name)

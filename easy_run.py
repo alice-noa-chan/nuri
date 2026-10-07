@@ -58,26 +58,28 @@ ARCHIVE = ROOT / "easy_run_output.tar"
 PYTHON = sys.executable
 INTERRUPTED_EXIT_CODE = 75  # scripts/train.py and run_release.py after a saved stop
 
-# The release stages (ARCHITECTURE.md D-004, D-005, D-007). "init" names the
-# stage whose final checkpoint starts this one.
+# The release stages (ARCHITECTURE.md D-004, D-005, D-007), in training order.
+# "init" names the stage whose final checkpoint starts this one. The three
+# dense products come first: if the host stops the job early, only the MoE
+# variants are missing, never the main model family.
 STAGES = {
     "base-dense": {
         "stage": "base",
         "preset": "release-dense",
         "release_name": "nuri-base",
     },
-    "base-moe": {
-        "stage": "base",
-        "preset": "release-moe",
-        "release_name": "nuri-base-moe",
-    },
     "it-dense": {"stage": "it", "init": "base-dense", "release_name": "nuri-base-it"},
-    "it-moe": {"stage": "it", "init": "base-moe", "release_name": "nuri-base-moe-it"},
     "embed": {
         "stage": "embed",
         "init": "base-dense",
         "release_name": "nuri-base-embed",
     },
+    "base-moe": {
+        "stage": "base",
+        "preset": "release-moe",
+        "release_name": "nuri-base-moe",
+    },
+    "it-moe": {"stage": "it", "init": "base-moe", "release_name": "nuri-base-moe-it"},
 }
 EVALUATE = {
     "base": ["mlm", "denoise", "diagnostics"],
