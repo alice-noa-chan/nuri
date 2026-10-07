@@ -8,6 +8,49 @@ from torch.utils.checkpoint import checkpoint
 
 from . import liger_backend
 
+VOCAB_LOSS_BACKENDS = ("torch", "chunked", "liger")
+
+
+def validate_vocab_loss(backend: str, chunk_size: int, device: torch.device) -> None:
+    """Reject invalid or unavailable runtime options before an optimizer is created."""
+    if backend not in VOCAB_LOSS_BACKENDS:
+        raise ValueError(
+            f"vocabulary loss backend must be one of {VOCAB_LOSS_BACKENDS}"
+        )
+    if type(chunk_size) is not int or chunk_size < 1:
+        raise ValueError("vocabulary chunk size must be a positive integer")
+    if backend == "liger":
+        liger_backend.validate_liger(device)
+
+
+def vocab_token_mean_ce(hidden, weight, targets, backend="torch", chunk_size=256):
+    """Dispatch projection and MLM CE together so fused paths avoid full logits."""
+    if backend == "torch":
+        return token_mean_ce(F.linear(hidden, weight), targets)
+    if backend == "chunked":
+        return linear_token_mean_ce(hidden, weight, targets, chunk_size)
+    if backend == "liger":
+        return liger_token_mean_ce(hidden, weight, targets)
+    raise ValueError(f"unknown vocabulary loss backend: {backend!r}")
+
+
+def vocab_sample_mean_ce(
+    hidden, weight, targets, mask, backend="torch", chunk_size=256
+):
+    """Dispatch canvas CE while retaining equal weight for target-bearing samples."""
+    if backend == "torch":
+        return sample_mean_ce(F.linear(hidden, weight), targets, mask)
+    if backend in ("chunked", "liger"):
+        return linear_sample_mean_ce(
+            hidden,
+            weight,
+            targets,
+            mask,
+            chunk_size,
+            ce_backend="liger" if backend == "liger" else "torch",
+        )
+    raise ValueError(f"unknown vocabulary loss backend: {backend!r}")
+
 
 def _linear_ce_sum(hidden, weight, targets, token_weights, ce_backend):
     logits = F.linear(hidden, weight)
