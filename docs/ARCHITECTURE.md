@@ -10,7 +10,7 @@ One bidirectional encoder-based model supports embeddings, retrieval, classifica
 
 Hardware is one A100 80GB or H100. The training time is **about one day for all released models together** (D-003, D-006). Languages are Korean and English first, with some Japanese (D-002). The outputs are dense/MoE × base/IT (four models), an embedding model and the tokenizer, all released under MIT (§15). Tokenizer details and the data mix are not decided yet.
 
-The ~49.3M dense model is a reference for checking the structure and the cost math. No separate pilot is run (D-014); public training follows the release settings in §3 and the shared budget in §11. We do not assume that one day of training from scratch produces general chat quality. Reusing a pretrained encoder is a separate comparison path.
+The ~49.8M dense model is a reference for checking the structure and the cost math. No separate pilot is run (D-014); public training follows the release settings in §3 and the shared budget in §11. We do not assume that one day of training from scratch produces general chat quality. Reusing a pretrained encoder is a separate comparison path.
 
 Here "encoder family" means every self-attention is non-causal and there is no autoregressive decoder. Because there is a separate cross-attention readout, the topology is not a strict single BERT stack. The precise description is **bidirectional encoder backbone + recurrent latent core + bidirectional masked readout**. A simpler baseline that processes the prompt and the masked output in one encoder stack is part of the future comparisons.
 
@@ -61,7 +61,7 @@ The 32,768 vocabulary does not mean a tokenizer was chosen. It is decided after 
 
 ### Release model sizes (D-009)
 
-The table above is the structure-check reference (49.3M). The public models use the same topology at the larger settings below. Names and formulas are the same as above.
+The table above is the structure-check reference (49.8M). The public models use the same topology at the larger settings below. Names and formulas are the same as above.
 
 | Item | reference | **release dense** | **release MoE** |
 |---|---:|---:|---:|
@@ -72,7 +72,7 @@ The table above is the structure-check reference (49.3M). The public models use 
 | slots `K` | 16 | 32 | 32 |
 | `V` | 32,768 | 65,536 | 65,536 |
 | `N` / `M` | 512 / 64 | 1,024 / 256 | 1,024 / 256 |
-| total parameters | 49.3M | ≈ 150M | ≈ 242M |
+| total parameters | 49.8M | ≈ 150M | ≈ 242M |
 | active parameters | same | same | ≈ 150M |
 
 Release dense breakdown: embedding 50.3M + input 10 × 7.08M + core 9.44M + readout 2 × 9.44M + embedding head 0.79M.
@@ -179,6 +179,8 @@ The two readout layers have different weights and are shared across refinement r
 
 **Canvas input positions (D-019).** At each fresh readout entry, set `C_s[i] = token_embedding(canvas_s[i]) + position_embedding[i]` for valid output positions. The independently learned table has shape `[M,D]`, uses the existing normal initialization scale, and is added once before the first block. Padding gets no position vector. Q/K-only self-attention RoPE cannot break an all-MASK value symmetry: identical value vectors still give identical attention outputs. Residual positions distinguish the values and memory queries from the first fill. They do not expose answer content or change X/R caching.
 
+**Readout memory positions (D-024).** When the readout memory is prepared, every valid input token of X gets `memory_from_start[i] + memory_from_end[n-1-i]` added (two learned `[N,D]` tables, zero-initialized; padding gets nothing; R slots unchanged). X carries only relative RoPE information and memory cross-attention has none, so without this a canvas position can find an input token by content but cannot read the input in order: small models trained on copy and reverse failed (token accuracy ≈0.24, heavy repetition) and reached 1.000 with these tables ([GENERATION_DIAGNOSTICS.md](GENERATION_DIAGNOSTICS.md)). The encoder, MLM, embeddings and X/R caching are unchanged; legacy configs keep `none`, and `add_memory_positions` enables it on a trained model without changing its outputs.
+
 New reference, release and tiny presets use `canvas_position_encoding="learned"`. A legacy configuration without this field means `"none"` and keeps its old topology and strict weight loading. An explicit repair initializer adds only this table and preserves every existing tensor. It starts a fresh optimizer, schedule and run counter; it is not exact resume. Legacy full states may resume a legacy model, but cannot resume a corrected model. Input-length-offset memory RoPE and a deeper readout remain separate experiments.
 
 Memory cross-attention uses no RoPE by default. Canvas positions are positions inside the output and are not treated as the same coordinates as input positions. The memory K/V of X and R are projected separately per readout layer and reused for the S rounds of one generation request. Canvas hidden states and self-attention K/V are recomputed every round.
@@ -233,7 +235,7 @@ This method is not the same algorithm as absorbing masked diffusion. A diffusion
 
 ### A. Scratch pilot of the new structure — v0 reference
 
-The ~49.3M model checks the structure with backbone MLM, supervised contrastive pairs, short instruction answers and structured reasoning tasks. General language ability and the effect of reasoning are kept apart. Synthetic tasks use relation composition, bounded arithmetic, graph reachability and so on, with template/entity/graph-based splits to reduce memorization.
+The ~49.8M model checks the structure with backbone MLM, supervised contrastive pairs, short instruction answers and structured reasoning tasks. General language ability and the effect of reasoning are kept apart. Synthetic tasks use relation composition, bounded arithmetic, graph reachability and so on, with template/entity/graph-based splits to reduce memorization.
 
 The candidate batch mix is text MLM 30%, embedding pairs 30%, short denoising instructions 25% and reasoning tasks 15%. These ratios are unverified starting values. Each kind is its own batch, and only objectives with valid labels are active. We never invent labels for every head on the same sample.
 
@@ -327,10 +329,11 @@ Below are the linear matrix and embedding counts for V=32768, D=512, F=1408. Sma
 | learned latent slots | KD | 8,192 |
 | readout, 2 layers | 2(8D²+3DF) | 8,519,680 |
 | learned canvas position table (D-019) | MD | 32,768 |
+| readout memory positions, start and end (D-024) | 2ND | 524,288 |
 | embedding P + reasoning W_r | 256D+D² | 393,216 |
-| total, small heads excluded | | 49,258,496 |
+| total, small heads excluded | | 49,782,784 |
 
-The length head `2D→64` adds 65,536 weights. With RMSNorm and task heads the total is about 49.3M. Raising T and S does not add shared weights, but it does increase activations, compute and latency. (`tests/test_model.py` checks these counts and the release counts below exactly.)
+The length head `2D→64` adds 65,536 weights. With RMSNorm and task heads the total is about 49.8M. Raising T and S does not add shared weights, but it does increase activations, compute and latency. (`tests/test_model.py` checks these counts and the release counts below exactly.)
 
 Inference matmul FLOP estimates for one sample with N=512, K=16, M=64, T=4, S=4 follow. 1 MAC = 2 FLOPs; softmax, norms, activations, sampling and kernel overhead are excluded. The full vocabulary projection at every canvas position and the precomputed fixed-memory K/V are included.
 
@@ -347,7 +350,7 @@ Training processes one corruption, so the inference S=4 formula is not simply mu
 
 ### Release cost
 
-Main weights excluding norms, gates, length and classification heads are **150,429,696** for dense and **242,515,968** for MoE. These include D-019's 196,608 canvas position weights; the legacy counts were 150,233,088 and 242,319,360. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
+Main weights excluding norms, gates, length and classification heads are **152,002,560** for dense and **244,088,832** for MoE. These include D-019's 196,608 canvas position weights and D-024's 1,572,864 readout memory position weights (2 × 1,024 × 768); without D-024 they were 150,429,696 and 242,515,968, and the legacy counts were 150,233,088 and 242,319,360. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
 
 Release inference at N1024/M256/K32/T4/S4, all-global input, 1 MAC = 2, with the same exclusions:
 
@@ -473,6 +476,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-021 | 2026-10-05 | The Dense Base repair warm start from the fully decayed retained checkpoint uses peak LR 1e-4 (scratch Base keeps 3e-4; the undecayed MoE warm start is chosen separately) and keep the 50/50 MLM/span mix; the input-free span frequency line is reported beside the repair gate but is not a gate criterion | Re-warming the decayed checkpoint to 3e-4 would put the encoder, which already works, back at the scratch peak; the frozen gate is read at peak LR against a fully decayed legacy baseline; keeping the mix makes the first repair a cleaner comparison | user approval of Claude's recommendation |
 | D-022 | 2026-10-07 | The release run gets about 7 days (168 wall-clock hours) on one A100 80GB, executed unattended on an external host with `easy_run.py`; this replaces the one-day budget of D-003/D-006 and the D-018 rental for this run. Model sizes (D-009) and the five released models (D-004, D-005, D-007) stay; the time split is Dense first with MoE included (shares 50/30/8/6/6 for base-dense/base-moe/it-dense/it-moe/embed, IT and embedding capped at 3 epochs, freed time to base-dense) | The user secured 7 days on an A100 80GB that cannot be watched during training; the allocation follows Claude's recommendation, with MoE kept as the user asked | user (allocation recommended by Claude) |
 | D-023 | 2026-10-07 | Base and IT span denoising use `span_end_prob = 0.5`: half of the spans end at the document end and carry EOS | Synthetic runs: 10% EOS canvases cut correct EOS placement to 0.38-0.43. Real-text CPU A/B (readout-only, 600 steps from the corrected Dense initializer): EOS placement on document-end spans 0.198 → 0.745 and their token accuracy 0.070 → 0.132, with mid-document accuracy 0.080 → 0.070 (docs/GENERATION_DIAGNOSTICS.md) | user rule: keep what the A/B supports; Claude measurement |
+| D-024 | 2026-10-07 | New release presets add zero-initialized start- and end-relative position tables to X in the readout memory (`memory_position_encoding = "learned"`); legacy configs keep `none` | Synthetic copy/reverse: ≈0.24 → 1.000 token accuracy in all runs. Real text from scratch (Colab T4, 66M model, 2,000 steps, one seed): S=4 repeat rate 0.515 → 0.412 (mid) and 0.479 → 0.382 (end), token F1 0.135 → 0.157 and 0.128 → 0.151, full-mask CE and token accuracy unchanged; no effect when added to an already trained readout. Weak but consistent real-text evidence, no measured harm, +1.57M weights | user rule: keep what the A/B supports; Claude measurement |
 
 ## 15. Release plan
 

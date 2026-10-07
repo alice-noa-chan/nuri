@@ -182,8 +182,38 @@ The same probe was repeated for 3,000 steps on a Colab T4 GPU
   the final training loss matches the baseline to three decimals. Zero-
   initialized tables on a readout that learned to work without positions
   barely train in a short warm start, so this does not test training from
-  scratch, which the release run does. A from-scratch real-text A/B
-  decides (see DISCUSSION).
+  scratch, which the release run does.
+
+### From-scratch real-text A/B of memory positions
+
+Two models built from the same random initialization (reference geometry
+with the 65,536-token vocabulary: 66.1M weights, 66.6M with the memory
+tables; the tables start at zero and every other weight is identical)
+were trained from scratch with `scripts/train.py --stage base` on a Colab
+T4 for 2,000 steps (batch 32, MLM/span 50/50, packed MLM, bucketing, seed
+0) on a 68,000-document training subset (Korean/English/Japanese weights
+0.72/0.27/0.01, about 42M tokens). Evaluation used the probe's validation
+sets above. One seed, early in training (span loss about 7.3).
+
+| Metric | none | learned |
+|---|---:|---:|
+| span training loss, last quarter | 7.303 | 7.257 |
+| MLM training loss, last quarter | 6.081 | 6.034 |
+| mid: full-mask CE | 7.929 | 7.933 |
+| mid: S=4 token accuracy | 0.055 | 0.055 |
+| mid: S=4 token F1 | 0.135 | **0.157** |
+| mid: S=4 repeat rate | 0.515 | **0.412** |
+| end: full-mask CE | 7.979 | 7.966 |
+| end: S=4 token accuracy | 0.051 | 0.052 |
+| end: S=4 token F1 | 0.128 | **0.151** |
+| end: S=4 repeat rate | 0.479 | **0.382** |
+
+Memory positions reduce repetition by about a fifth and raise token F1 in
+both sets, with unchanged cross-entropy and accuracy. The MLM loss, which
+never uses the readout, also moved by a similar amount, so part of the
+difference may be run-to-run noise. The evidence is weak but consistent
+with the synthetic result and shows no harm; D-024 enables the tables in
+new release presets.
 
 ## Limits
 

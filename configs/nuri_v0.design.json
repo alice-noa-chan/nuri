@@ -84,6 +84,15 @@
   },
   "generation": {
     "readout_layers": 2,
+    "memory_position_linkage": {
+      "decision": "D-024",
+      "model_field": "memory_position_encoding",
+      "new_presets": "learned",
+      "legacy_default": "none",
+      "tables": "from_start_and_from_end_max_input_len_x_hidden_size_zero_initialized",
+      "applies_to": "X_part_of_readout_memory_only_R_slots_unchanged",
+      "evidence": "docs/GENERATION_DIAGNOSTICS.md"
+    },
     "canvas_position_correction": {
       "decision": "D-019",
       "model_field": "canvas_position_encoding",
