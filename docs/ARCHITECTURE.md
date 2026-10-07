@@ -1,6 +1,6 @@
 # Nuri v0 Architecture
 
-Status: design spec with an executable implementation. Fixed-shape A100/H100 throughput is measured in [GPU_COMPARISON.md](GPU_COMPARISON.md). The first Dense Base completed training, but direct evaluation found inadequate generation and an all-MASK canvas symmetry defect; see [DENSE_BASE_EVALUATION.md](DENSE_BASE_EVALUATION.md). D-019 corrects the position path. Corrected language quality remains unmeasured.
+Status: design spec with an executable implementation. Fixed-shape A100/H100 throughput is measured in [GPU_COMPARISON.md](GPU_COMPARISON.md). The first Dense Base completed training, but direct evaluation found inadequate generation and an all-MASK canvas symmetry defect; see [DENSE_BASE_EVALUATION.md](DENSE_BASE_EVALUATION.md). D-019 corrects the position path. Short corrected Dense warm-start diagnostics are recorded in [GPU_VALIDATION.md](GPU_VALIDATION.md); competitive encoder quality and useful generation remain unproven.
 
 > **User decisions in §14 take priority.** If the body and §14 disagree, follow §14 and record the conflict in §17 (open questions).
 
