@@ -96,6 +96,7 @@ TRAIN_ATTEMPTS = 4  # run_release restarts after failures (each resumes)
 OOM_MARKERS = ("out of memory", "outofmemoryerror")
 MIN_BASE_STEPS = 100  # a base stage shorter than this is not worth running
 MIN_FREE_DISK_GB = 300
+UNPACKED_MARKER = ".easy_run_unpacked"  # written into the data folder after unpacking
 
 
 # ----- small helpers -------------------------------------------------------------------
@@ -353,7 +354,18 @@ def safe_extract(archive: Path, destination: Path) -> None:
 
 
 def fetch_data(config: dict, state: dict) -> None:
+    """Download, verify and unpack the data archive.
+
+    A marker file holding the archive SHA256 is written once the data is
+    unpacked and checked, before the archive is deleted. A run interrupted
+    after that point finds the marker and does not download again.
+    """
     data = config["data"]
+    target = data_dir(config)
+    marker = target / UNPACKED_MARKER
+    if marker.exists() and marker.read_text().strip() == data["sha256"].lower():
+        log(f"the data is already unpacked in {target}")
+        return
     name = (
         data.get("archive_name") or Path(data["url"].split("?")[0]).name or "data.tar"
     )
@@ -366,7 +378,6 @@ def fetch_data(config: dict, state: dict) -> None:
         raise SystemExit(
             "the downloaded archive does not match data.sha256; run again to retry"
         )
-    target = data_dir(config)
     if target.exists():
         shutil.rmtree(target)  # a half-unpacked folder from an interrupted run
     log(f"unpacking into {target}")
@@ -374,6 +385,7 @@ def fetch_data(config: dict, state: dict) -> None:
     missing = [path for path in input_paths(config) if not Path(path).exists()]
     if missing:
         raise SystemExit(f"the archive does not contain: {missing}")
+    marker.write_text(data["sha256"].lower())
     if data.get("delete_archive_after_unpack", True):
         archive.unlink()
 

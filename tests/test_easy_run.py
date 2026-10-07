@@ -417,3 +417,23 @@ def test_download_finishes_on_416_and_stops_on_client_errors(easy, monkeypatch):
     monkeypatch.setattr(easy, "DOWNLOAD_ATTEMPTS", 3)
     with pytest.raises(SystemExit, match="failed 3 times"):
         easy.download("https://example.invalid/x.tar", easy.WORK / "x.tar")
+
+
+def test_unpacked_data_is_not_downloaded_again(easy, monkeypatch, tmp_path):
+    payload = make_archive(tmp_path)
+    calls = serve(monkeypatch, easy, payload)
+    config = make_config(payload)
+    easy.WORK.mkdir(parents=True)
+    easy.fetch_data(config, {})
+    assert calls == [0] and not (easy.WORK / "data.tar").exists()
+
+    # Interrupted after the archive was deleted but before "data" was recorded.
+    easy.fetch_data(config, {})
+    assert calls == [0]
+    assert (easy.WORK / "data" / "tok" / "tokenizer.json").is_file()
+
+    # A different archive (new SHA256) is fetched again.
+    config["data"]["sha256"] = "0" * 64
+    with pytest.raises(SystemExit, match="does not match"):
+        easy.fetch_data(config, {})
+    assert calls == [0, 0]
