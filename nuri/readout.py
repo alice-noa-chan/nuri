@@ -21,6 +21,42 @@ class MemoryCache:
     mask: torch.Tensor  # [B, N + K], True where the memory may be attended
 
 
+class MemoryPositions(nn.Module):
+    """Learned absolute positions for the input part of the readout memory.
+
+    X carries only relative (RoPE) position information and memory
+    cross-attention has none, so without this a canvas position can find a
+    token by its content but cannot read the input in order (see
+    docs/GENERATION_DIAGNOSTICS.md). Each valid input token gets one vector
+    for its index from the first token and one for its index back from the
+    last token, so both copying and continuing from the end are direct
+    lookups. Inputs are right-padded; padding gets no vector. Both tables
+    start at zero, so a newly enabled model computes exactly what it did
+    before until training changes them.
+    """
+
+    def __init__(self, max_input_len: int, hidden_size: int):
+        super().__init__()
+        self.from_start = nn.Embedding(max_input_len, hidden_size)
+        self.from_end = nn.Embedding(max_input_len, hidden_size)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.from_start.weight)
+        nn.init.zeros_(self.from_end.weight)
+
+    def forward(self, x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        """x: [B, N, D] input memory, valid: [B, N] real tokens (right-padded)."""
+        if x.shape[1] > self.from_start.num_embeddings:
+            raise ValueError("the input is longer than the memory position table")
+        positions = torch.arange(x.shape[1], device=x.device)[None, :]
+        from_end = valid.sum(dim=1, keepdim=True) - 1 - positions
+        start_ids = positions.expand_as(valid) * valid
+        end_ids = from_end.clamp(min=0) * valid
+        vectors = self.from_start(start_ids) + self.from_end(end_ids)
+        return x + vectors.to(x.dtype) * valid.unsqueeze(-1).to(x.dtype)
+
+
 class ReadoutBlock(nn.Module):
     def __init__(self, config: NuriConfig, layer_number: int):
         super().__init__()
@@ -51,11 +87,15 @@ class BidirectionalReadout(nn.Module):
         self.max_response_len = config.max_response_len
         self.position_embedding = (nn.Embedding(config.max_response_len, config.hidden_size)
                                    if config.canvas_position_encoding == "learned" else None)
+        self.memory_positions = (MemoryPositions(config.max_input_len, config.hidden_size)
+                                 if config.memory_position_encoding == "learned" else None)
         self.gradient_checkpointing = False  # set by NuriModel.set_gradient_checkpointing
         self.blocks = nn.ModuleList(ReadoutBlock(config, i + 1) for i in range(config.readout_layers))
         self.final_norm = RMSNorm(config.hidden_size, config.norm_eps)
 
     def prepare_memory(self, x: torch.Tensor, valid: torch.Tensor, r: torch.Tensor) -> MemoryCache:
+        if self.memory_positions is not None:
+            x = self.memory_positions(x, valid)
         memory = torch.cat([x, r], dim=1)
         slot_mask = torch.ones(r.shape[:2], dtype=torch.bool, device=r.device)
         mask = torch.cat([valid, slot_mask], dim=1)

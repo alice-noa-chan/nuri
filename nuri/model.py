@@ -59,6 +59,10 @@ class NuriModel(nn.Module):
             nn.Linear(d, config.num_labels, bias=False) if config.num_labels else None
         )
         self.apply(self._init_weights)
+        if self.readout.memory_positions is not None:
+            # The generic init above draws every embedding at random; memory
+            # positions must start at zero (see MemoryPositions).
+            self.readout.memory_positions.reset_parameters()
 
     def _init_weights(self, module: nn.Module) -> None:
         std = self.config.initializer_range

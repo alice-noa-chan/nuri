@@ -28,6 +28,7 @@ from safetensors.torch import load_file, save_file
 
 from .config import NuriConfig
 from .model import NuriModel
+from .readout import MemoryPositions
 from .tokenizer import copy_tokenizer_files
 
 
@@ -113,6 +114,7 @@ def load_training_state(path: str | Path, model, optimizer) -> dict:
     # This field did not exist in the original topology. Its only legitimate
     # resume default is the unchanged legacy behavior, never learned positions.
     saved.setdefault("canvas_position_encoding", "none")
+    saved.setdefault("memory_position_encoding", "none")
     if saved != current:
         changed = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
         raise ValueError(f"training state config differs from the model config in: {changed}")
@@ -140,4 +142,21 @@ def add_canvas_positions(model: NuriModel, seed: int = 0) -> NuriModel:
     weights = weights.to(device=model.embedding.weight.device, dtype=model.embedding.weight.dtype)
     model.readout.position_embedding = nn.Embedding.from_pretrained(weights, freeze=False)
     model.config.canvas_position_encoding = "learned"
+    return model
+
+
+def add_memory_positions(model: NuriModel) -> NuriModel:
+    """Enable readout memory positions on a model that lacks them, in place.
+
+    The new tables start at zero, so the model computes exactly what it did
+    before; every existing weight stays unchanged. Train with a fresh
+    optimizer and schedule (a warm start). An old training state cannot
+    resume this changed configuration.
+    """
+    if model.config.memory_position_encoding != "none" or model.readout.memory_positions is not None:
+        raise ValueError("This model already has readout memory positions.")
+    tables = MemoryPositions(model.config.max_input_len, model.config.hidden_size)
+    weight = model.embedding.weight
+    model.readout.memory_positions = tables.to(device=weight.device, dtype=weight.dtype)
+    model.config.memory_position_encoding = "learned"
     return model

@@ -49,6 +49,12 @@ class NuriConfig:
     # Legacy configs omit this field and retain "none". New presets use
     # "learned" so identical MASK tokens can represent different positions.
     canvas_position_encoding: str = "none"
+    # Experimental (OFF = "none"): "learned" adds start- and end-relative
+    # position vectors to X inside the readout memory only, so a canvas
+    # position can read "input token i" in order. The encoder, MLM and
+    # embeddings are unchanged. The tables start at zero, so enabling it on a
+    # trained model keeps its outputs until training moves them.
+    memory_position_encoding: str = "none"
     embed_dim: int = 256
     rope_theta: float = 10000.0
     norm_eps: float = 1e-6
@@ -167,6 +173,8 @@ class NuriConfig:
             raise ValueError("refine_rounds must be positive")
         if self.canvas_position_encoding not in ("none", "learned"):
             raise ValueError('canvas_position_encoding must be "none" or "learned"')
+        if self.memory_position_encoding not in ("none", "learned"):
+            raise ValueError('memory_position_encoding must be "none" or "learned"')
         if not 0.0 < self.gate_init < 1.0:
             raise ValueError("gate_init is a sigmoid output and must be in (0, 1)")
         if self.norm_eps <= 0 or self.rope_theta <= 0 or self.initializer_range <= 0:
