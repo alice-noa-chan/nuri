@@ -75,13 +75,18 @@ def describe(old, new, max_lines):
             lines.append(f"[watch] DELETED {rel}")
             continue
         changed = [
-            l for l in difflib.unified_diff(before.split("\n"), after.split("\n"), lineterm="", n=0)
-            if l[:1] in "+-" and not l.startswith(("+++", "---"))
+            line
+            for line in difflib.unified_diff(
+                before.split("\n"), after.split("\n"), lineterm="", n=0
+            )
+            if line[:1] in "+-" and not line.startswith(("+++", "---"))
         ]
-        added = sum(l.startswith("+") for l in changed)
+        added = sum(line.startswith("+") for line in changed)
         lines.append(f"[watch] CHANGED {rel} (+{added} -{len(changed) - added})")
-        for l in changed[:max_lines]:
-            lines.append("    " + (l if len(l) <= LINE_WIDTH else l[:LINE_WIDTH] + "…"))
+        for line in changed[:max_lines]:
+            lines.append(
+                "    " + (line if len(line) <= LINE_WIDTH else line[:LINE_WIDTH] + "…")
+            )
         if len(changed) > max_lines:
             lines.append(f"    … {len(changed) - max_lines} more changed lines")
     return lines
@@ -123,27 +128,53 @@ def watch(agent, interval, settle, max_lines, once=False, timeout=None):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("mode", choices=["watch", "wait", "check", "ack"])
     parser.add_argument("--agent", required=True)
     parser.add_argument("--interval", type=float, default=1.0)
-    parser.add_argument("--settle", type=float, default=3.0, help="seconds a change must stay stable before reporting")
-    parser.add_argument("--max-lines", type=int, default=DIFF_LINES, help="diff lines shown per file")
-    parser.add_argument("--timeout", type=float, default=1800.0, help="wait mode: give up after this many seconds")
+    parser.add_argument(
+        "--settle",
+        type=float,
+        default=3.0,
+        help="seconds a change must stay stable before reporting",
+    )
+    parser.add_argument(
+        "--max-lines", type=int, default=DIFF_LINES, help="diff lines shown per file"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+        help="wait mode: give up after this many seconds",
+    )
     args = parser.parse_args()
 
     if args.mode in ("watch", "wait"):
         once = args.mode == "wait"
-        watch(args.agent, args.interval, args.settle, args.max_lines, once, args.timeout if once else None)
+        watch(
+            args.agent,
+            args.interval,
+            args.settle,
+            args.max_lines,
+            once,
+            args.timeout if once else None,
+        )
         return
 
     current = scan()
     previous = load(args.agent)
     if args.mode == "check":
         if previous is None:
-            print(f"[watch] first check for '{args.agent}': snapshot created, read the shared files directly")
+            print(
+                f"[watch] first check for '{args.agent}': snapshot created, read the shared files directly"
+            )
         else:
-            emit(describe(previous, current, args.max_lines) or ["[watch] no changes since last check"])
+            emit(
+                describe(previous, current, args.max_lines)
+                or ["[watch] no changes since last check"]
+            )
     save(args.agent, current)
 
 
