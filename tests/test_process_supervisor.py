@@ -1,8 +1,6 @@
 """Exercise deadline and failure paths without a GPU or rented resources."""
 
 import json
-import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -42,12 +40,22 @@ def execute(tmp_path, *, deadline=105, finish=110, stall=100, grace=2):
         options.append(kwargs)
         return child
 
-    code = run_supervised(["fake"], status=tmp_path / "status.json", output=tmp_path / "stdout.log",
-                          deadline=deadline, progress=tmp_path / "runs", grace_seconds=grace,
-                          stall_seconds=stall, poll_seconds=1, clock=clock.now,
-                          monotonic=clock.now, sleep=clock.sleep, popen=launch,
-                          send=lambda proc, force=False: calls.append(force),
-                          group_alive=lambda proc: proc.poll() is None)
+    code = run_supervised(
+        ["fake"],
+        status=tmp_path / "status.json",
+        output=tmp_path / "stdout.log",
+        deadline=deadline,
+        progress=tmp_path / "runs",
+        grace_seconds=grace,
+        stall_seconds=stall,
+        poll_seconds=1,
+        clock=clock.now,
+        monotonic=clock.now,
+        sleep=clock.sleep,
+        popen=launch,
+        send=lambda proc, force=False: calls.append(force),
+        group_alive=lambda proc: proc.poll() is None,
+    )
     return code, json.loads((tmp_path / "status.json").read_text()), calls, options
 
 
@@ -109,9 +117,13 @@ def test_real_short_child_output_and_status(tmp_path):
     import sys
     import time
 
-    code = run_supervised([sys.executable, "-c", "print('done', flush=True)"],
-                          status=tmp_path / "status.json", output=tmp_path / "stdout.log",
-                          deadline=time.time() + 20, poll_seconds=0.05)
+    code = run_supervised(
+        [sys.executable, "-c", "print('done', flush=True)"],
+        status=tmp_path / "status.json",
+        output=tmp_path / "stdout.log",
+        deadline=time.time() + 20,
+        poll_seconds=0.05,
+    )
     assert code == 0
     assert b"done" in (tmp_path / "stdout.log").read_bytes()
     assert json.loads((tmp_path / "status.json").read_text())["state"] == "finished"
@@ -137,10 +149,23 @@ def test_parent_exit_does_not_skip_group_grace(tmp_path):
         if force:
             group["alive"] = False
 
-    code = run_supervised(["fake"], status=tmp_path / "status.json", output=tmp_path / "stdout.log",
-                          deadline=120, grace_seconds=3, poll_seconds=1, clock=clock.now,
-                          monotonic=clock.now, sleep=clock.sleep, popen=lambda *a, **k: child,
-                          send=stop, group_alive=lambda process: group["alive"])
+    code = run_supervised(
+        ["fake"],
+        status=tmp_path / "status.json",
+        output=tmp_path / "stdout.log",
+        deadline=120,
+        grace_seconds=3,
+        poll_seconds=1,
+        clock=clock.now,
+        monotonic=clock.now,
+        sleep=clock.sleep,
+        popen=lambda *a, **k: child,
+        send=stop,
+        group_alive=lambda process: group["alive"],
+    )
     assert code == 75
     assert calls == [(102, False), (105, True)]
-    assert json.loads((tmp_path / "status.json").read_text())["reason"] == "orphaned_children"
+    assert (
+        json.loads((tmp_path / "status.json").read_text())["reason"]
+        == "orphaned_children"
+    )
