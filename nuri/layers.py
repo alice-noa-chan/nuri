@@ -7,8 +7,10 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from . import liger_backend
 from .attention_backend import flash_attention, validate_attention_backend
+from .liger_backend import rms_norm as liger_rms_norm
+from .liger_backend import swiglu as liger_swiglu
+from .liger_backend import validate_liger
 
 
 class RMSNorm(nn.Module):
@@ -20,7 +22,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.liger_enabled:
-            return liger_backend.rms_norm(x, self.weight, self.eps)
+            return liger_rms_norm(x, self.weight, self.eps)
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -175,7 +177,7 @@ def configure_attention_backend(module: nn.Module, backend: str = "sdpa") -> Non
 def configure_liger_kernels(module: nn.Module, enabled: bool = True) -> None:
     """Select fused RMSNorm/SwiGLU without replacing modules or checkpoint weights."""
     if enabled:
-        liger_backend.validate_liger(next(module.parameters()).device)
+        validate_liger(next(module.parameters()).device)
     for layer in module.modules():
         if isinstance(layer, (RMSNorm, SwiGLU)):
             layer.liger_enabled = bool(enabled)
@@ -248,7 +250,5 @@ class SwiGLU(nn.Module):
     ) -> torch.Tensor:
         # `valid` is accepted so dense and MoE FFNs share one call signature.
         if self.liger_enabled:
-            return self.down_proj(
-                liger_backend.swiglu(self.gate_proj(x), self.up_proj(x))
-            )
+            return self.down_proj(liger_swiglu(self.gate_proj(x), self.up_proj(x)))
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
