@@ -15,9 +15,9 @@ def main_weight_count(config) -> int:
 
 
 def test_parameter_counts_match_architecture_doc():
-    assert main_weight_count(reference_config()) == 49_258_496
-    assert main_weight_count(release_dense_config()) == 150_429_696
-    assert main_weight_count(release_moe_config()) == 242_515_968
+    assert main_weight_count(reference_config()) == 49_782_784
+    assert main_weight_count(release_dense_config()) == 152_002_560
+    assert main_weight_count(release_moe_config()) == 244_088_832
 
 
 def make_model(**overrides):

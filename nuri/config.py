@@ -49,11 +49,12 @@ class NuriConfig:
     # Legacy configs omit this field and retain "none". New presets use
     # "learned" so identical MASK tokens can represent different positions.
     canvas_position_encoding: str = "none"
-    # Experimental (OFF = "none"): "learned" adds start- and end-relative
-    # position vectors to X inside the readout memory only, so a canvas
-    # position can read "input token i" in order. The encoder, MLM and
-    # embeddings are unchanged. The tables start at zero, so enabling it on a
-    # trained model keeps its outputs until training moves them.
+    # "learned" (D-024) adds start- and end-relative position vectors to X
+    # inside the readout memory only, so a canvas position can read "input
+    # token i" in order. The encoder, MLM and embeddings are unchanged. The
+    # tables start at zero, so enabling it on a trained model keeps its
+    # outputs until training moves them. Legacy configs omit this field and
+    # keep "none"; new release presets use "learned".
     memory_position_encoding: str = "none"
     embed_dim: int = 256
     rope_theta: float = 10000.0
@@ -257,8 +258,9 @@ class NuriConfig:
 
 
 def reference_config(**overrides) -> NuriConfig:
-    """49.3M structure-validation model (§3 table)."""
+    """49.8M structure-validation model (§3 table)."""
     overrides.setdefault("canvas_position_encoding", "learned")
+    overrides.setdefault("memory_position_encoding", "learned")
     return NuriConfig(**overrides)
 
 
@@ -275,6 +277,7 @@ def release_dense_config(**overrides) -> NuriConfig:
         max_input_len=1024,
         max_response_len=256,
         canvas_position_encoding="learned",
+        memory_position_encoding="learned",
         qk_norm=True,
         train_depths=(2, 4, 8),
     )

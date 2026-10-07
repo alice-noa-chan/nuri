@@ -8,7 +8,13 @@ from nuri.checkpoint import (
     save_training_state,
     load_training_state,
 )
-from nuri.config import NuriConfig, release_dense_config, tiny_config
+from nuri.config import (
+    NuriConfig,
+    reference_config,
+    release_dense_config,
+    release_moe_config,
+    tiny_config,
+)
 from nuri.generation import generate
 from nuri.model import NuriModel
 from nuri.readout import MemoryPositions
@@ -26,9 +32,11 @@ def prompts():
     return ids
 
 
-def test_option_is_off_by_default_and_validated():
-    assert NuriConfig().memory_position_encoding == "none"
-    assert release_dense_config().memory_position_encoding == "none"
+def test_legacy_default_is_off_and_release_presets_turn_it_on():
+    assert NuriConfig().memory_position_encoding == "none"  # legacy default
+    assert release_dense_config().memory_position_encoding == "learned"  # D-024
+    assert release_moe_config().memory_position_encoding == "learned"
+    assert reference_config().memory_position_encoding == "learned"
     assert make_model().readout.memory_positions is None
     legacy = NuriConfig().to_dict()
     del legacy["memory_position_encoding"]
