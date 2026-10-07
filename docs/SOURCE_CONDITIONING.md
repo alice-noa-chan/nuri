@@ -52,6 +52,16 @@ Truncated eligible prompts are counted. Unpaired selected rows, distinct
 partners and reused partner presentations are explicit. A file can have no
 usable pairs: that result is **unassessed**, with null quality metrics.
 
+Freeze tokenizer eligibility and partner coverage before scoring. A file with
+128 rows can contain far fewer assessable pairs: references must fit the
+response limit including EOS, and selected rows need distinct visible prompts
+and distinct equal-length reference answers. Report the supplied, eligible and
+paired counts separately. When preparing a supplementary packet, retain full
+reference answers, record prompt truncation or exclude it explicitly, preserve
+the original packet, and publish a new private selection receipt. Selecting
+equal-length partners changes the answer-length distribution; this diagnostic
+does not establish representative instruction quality.
+
 The selection digest binds selected indices and both effective token sequences.
 Partners can repeat, so pair observations are not independent statistical
 samples. Freeze file content/order, checkpoint, tokenizer, selection budget,
