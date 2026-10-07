@@ -63,7 +63,7 @@ def test_probe_trains_every_arm_and_reports_both_eval_sets(tmp_path):
             assert entry["training"]["final_loss"] > 0
     saved = json.loads((tmp_path / "out" / "results.json").read_text(encoding="utf-8"))
     assert "init" not in saved["settings"] and "train" not in saved["settings"]
-    assert "seconds" in saved
+    assert "seconds" in saved and saved["device"] == "cpu"
 
 
 def test_only_the_readout_is_trained(tmp_path):

@@ -1,4 +1,4 @@
-"""CPU A/B test of readout repairs on real text, starting from a trained checkpoint (Q-17).
+"""A/B test of readout repairs on real text, starting from a trained checkpoint (Q-17).
 
 Usage
   python scripts/readout_probe.py --init <model folder> --train <corpus> [<corpus>=<weight> ...] \
@@ -7,7 +7,8 @@ Usage
 The synthetic diagnostics (docs/GENERATION_DIAGNOSTICS.md) showed that the
 readout cannot read the input in order without a position signal, and that
 EOS is rarely trained. This script checks whether the package fixes help a
-real trained model on real text, without a GPU:
+real trained model on real text, cheaply (CPU, or one small GPU with
+--device cuda; "auto", the default, uses CUDA when available):
 
 - The encoder, reasoning core and tied token embedding stay frozen. Their
   outputs (X and R, at depth T=4) are computed once per example and cached,
@@ -78,14 +79,19 @@ def make_pairs(
     ]
 
 
+def device_of(model: NuriModel) -> torch.device:
+    return next(model.parameters()).device
+
+
 @torch.no_grad()
 def encode_pairs(model: NuriModel, pairs: list, batch_size: int = 16) -> list:
-    """Cache (X, R) per example in bfloat16, without padding."""
+    """Cache (X, R) per example in bfloat16, without padding, on the model's device."""
+    device = device_of(model)
     cached = []
     for start in range(0, len(pairs), batch_size):
         prefixes = [prefix for prefix, _ in pairs[start : start + batch_size]]
         ids, valid = pad_batch(prefixes, model.config.pad_id)
-        x, valid = model.encode(ids, valid)
+        x, valid = model.encode(ids.to(device), valid.to(device))
         r = model.reason(x, valid, DEPTH)
         for row, prefix in enumerate(prefixes):
             cached.append((x[row, : len(prefix)].bfloat16(), r[row].bfloat16()))
@@ -96,8 +102,9 @@ def memory_batch(model: NuriModel, cached: list, rows: list[int]):
     """Readout memory for some cached examples, padded on the right."""
     width = max(cached[i][0].shape[0] for i in rows)
     hidden = model.config.hidden_size
-    x = torch.zeros(len(rows), width, hidden)
-    valid = torch.zeros(len(rows), width, dtype=torch.bool)
+    device = device_of(model)
+    x = torch.zeros(len(rows), width, hidden, device=device)
+    valid = torch.zeros(len(rows), width, dtype=torch.bool, device=device)
     for slot, i in enumerate(rows):
         length = cached[i][0].shape[0]
         x[slot, :length] = cached[i][0].float()
@@ -108,10 +115,13 @@ def memory_batch(model: NuriModel, cached: list, rows: list[int]):
 
 def canvas_cross_entropy(model, cached, targets, rows, canvas, loss_mask):
     """Sample-mean canvas CE for the given rows (same loss as base training)."""
+    device = device_of(model)
     cache = memory_batch(model, cached, rows)
     target_ids, canvas_valid = pad_batch(
         [targets[i] for i in rows], model.config.pad_id
     )
+    target_ids, canvas_valid = target_ids.to(device), canvas_valid.to(device)
+    canvas, loss_mask = canvas.to(device), loss_mask.to(device)
     hidden = model.readout_hidden(canvas, canvas_valid, cache)
     return vocab_sample_mean_ce(
         hidden[loss_mask], model.embedding.weight, target_ids, loss_mask
@@ -206,9 +216,15 @@ def generation_scores(model: NuriModel, pairs: list, rounds: int) -> dict:
         chunk = pairs[start : start + 16]
         ids, valid = pad_batch([prefix for prefix, _ in chunk], model.config.pad_id)
         lengths = torch.tensor([len(target) for _, target in chunk])
+        device = device_of(model)
         canvas = generate(
-            model, ids, valid, steps=DEPTH, rounds=rounds, canvas_len=lengths
-        ).canvas
+            model,
+            ids.to(device),
+            valid.to(device),
+            steps=DEPTH,
+            rounds=rounds,
+            canvas_len=lengths.to(device),
+        ).canvas.cpu()
         for row, (_, target) in enumerate(chunk):
             predicted = canvas[row, : len(target)].tolist()
             content = [t for t in target if t != eos]
@@ -261,6 +277,9 @@ def parse_args(argv=None):
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument(
+        "--device", default="auto", help='"cpu", "cuda" or "auto" (cuda when available)'
+    )
     args = parser.parse_args(argv)
     for name in (
         "steps",
@@ -283,7 +302,11 @@ def main(argv=None) -> dict:
         torch.set_num_threads(args.threads)
     args.out.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    model = load_pretrained(args.init).eval()
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}", flush=True)
+    model = load_pretrained(args.init, device=device).eval()
     eos_id = model.config.eos_id
     if (
         args.input_len > model.config.max_input_len
@@ -307,6 +330,7 @@ def main(argv=None) -> dict:
             for k, v in vars(args).items()
             if k not in ("init", "train", "valid", "out")
         },
+        "device": str(device),
         "depth": DEPTH,
         "arms": {"initial": {"evaluation": evaluate(model, eval_sets)}},
     }
@@ -328,7 +352,7 @@ def main(argv=None) -> dict:
             pools[end_prob] = (pairs, encode_pairs(model, pairs))
         pairs, cached = pools[end_prob]
         print(f"training arm {arm}", flush=True)
-        arm_model = load_pretrained(args.init)
+        arm_model = load_pretrained(args.init, device=device)
         if ARMS[arm]["memory_positions"]:
             add_memory_positions(arm_model)
         arm_started = time.perf_counter()
