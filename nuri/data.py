@@ -313,6 +313,7 @@ def build_span_batch(
     *,
     full_mask_prob: float = 0.1,
     span_end_prob: float = 0.0,
+    r_dropout_prob: float = 0.0,
     return_indices: bool = False,
 ) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
@@ -322,6 +323,8 @@ def build_span_batch(
     full_mask_prob controls the existing whole-canvas corruption branch.
     span_end_prob is the share of spans forced to end at the document end
     with EOS (see split_span); 0 keeps the original sampling exactly.
+    r_dropout_prob is the share of samples whose readout may not read R
+    during training (see _canvas_batch); 0 keeps the original batches.
     return_indices adds selected original document indices for exposure audits.
     """
     pairs = [
@@ -345,7 +348,12 @@ def build_span_batch(
         pairs = [pairs[index] for index in selected]
         indices = [indices[index] for index in selected]
     batch = _canvas_batch(
-        [p[0] for p in pairs], [p[1] for p in pairs], config, generator, full_mask_prob
+        [p[0] for p in pairs],
+        [p[1] for p in pairs],
+        config,
+        generator,
+        full_mask_prob,
+        r_dropout_prob,
     )
     if return_indices:
         batch["source_indices"] = torch.tensor(indices, dtype=torch.long)
@@ -426,8 +434,22 @@ def build_pair_batch(
 
 
 def _canvas_batch(
-    sources, targets, config: NuriConfig, generator, full_mask_prob: float = 0.1
+    sources,
+    targets,
+    config: NuriConfig,
+    generator,
+    full_mask_prob: float = 0.1,
+    r_dropout_prob: float = 0.0,
 ) -> dict:
+    """Pad, corrupt the canvas and, optionally, mark samples that hide R.
+
+    With r_dropout_prob > 0, "hide_r" marks each sample with that
+    probability; trainer.canvas_loss then removes the R slots from that
+    sample's readout memory, so the readout must learn to read X (the R-slot
+    bottleneck in docs/GENERATION_DIAGNOSTICS.md). The draw comes after the
+    canvas corruption and only when enabled, so default batches and exact
+    resumes are unchanged.
+    """
     input_ids, input_valid = pad_batch(sources, config.pad_id)
     target_ids, canvas_valid = pad_batch(targets, config.pad_id)
     canvas, loss_mask = corrupt_canvas(
@@ -437,7 +459,7 @@ def _canvas_batch(
         full_mask_prob=full_mask_prob,
         generator=generator,
     )
-    return {
+    batch = {
         "input_ids": input_ids,
         "input_valid": input_valid,
         "canvas": canvas,
@@ -445,3 +467,9 @@ def _canvas_batch(
         "targets": target_ids,
         "loss_mask": loss_mask,
     }
+    if r_dropout_prob:
+        if not 0 < r_dropout_prob <= 1:
+            raise ValueError("r_dropout_prob must be in [0, 1]")
+        draws = torch.rand(len(sources), generator=generator)
+        batch["hide_r"] = draws < r_dropout_prob
+    return batch

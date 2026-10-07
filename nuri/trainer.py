@@ -90,6 +90,11 @@ def canvas_loss(
     )
     r = model.reason(x, valid, depth, draft=draft)
     cache = model.generation_memory(x, valid, r)
+    if model.training and "hide_r" in batch:
+        # R dropout (recipe r_dropout_prob): these samples read only X, so the
+        # readout cannot rely on the 32-slot R summary alone. Evaluation and
+        # generation always see the full memory.
+        cache.mask[batch["hide_r"], x.shape[1] :] = False
     hidden = model.readout_hidden(batch["canvas"], batch["canvas_valid"], cache)
     mask = batch["loss_mask"]
     loss = vocab_sample_mean_ce(
