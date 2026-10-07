@@ -30,9 +30,9 @@ from safetensors.torch import save_file
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from nuri.checkpoint import load_pretrained
-from nuri.model import NuriModel
-from nuri.tokenizer import copy_tokenizer_files
+from nuri.checkpoint import load_pretrained  # noqa: E402
+from nuri.model import NuriModel  # noqa: E402
+from nuri.tokenizer import copy_tokenizer_files  # noqa: E402
 
 # The model code a release needs; they import each other with relative imports.
 CODE_FILES = (
