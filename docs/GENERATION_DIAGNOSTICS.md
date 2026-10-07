@@ -215,6 +215,45 @@ difference may be run-to-run noise. The evidence is weak but consistent
 with the synthetic result and shows no harm; D-024 enables the tables in
 new release presets.
 
+## The readout bypasses X through R (and R dropout)
+
+Checks on the corrected Dense initializer (CPU, 30-64 validation spans,
+full-mask single fill) found a further cause. Readout cross-attention puts
+91% (layer 1) and 40% (layer 2) of its weight on the 32 R slots and 1.4% /
+5.7% on the last 8 input tokens. Hiding X from the readout memory barely
+changes full-mask accuracy (0.059 -> 0.052) and pushes predictions of the
+three most frequent tokens ('.', newline, ',') to 97% (68% normally, 8% in
+the references). The readout reads a 32-slot summary, so it can name the
+topic but not copy specifics; the first token after the prompt is right
+3.3% of the time although the same encoder reaches 65% MLM accuracy.
+
+R dropout (recipe `r_dropout_prob`) hides R from the readout memory for a
+share of span samples during training. A from-scratch A/B on a Colab T4
+used the 66M model of the D-024 test with memory positions and
+span_end_prob 0.5 in both arms (2,000 steps, batch 32, one seed):
+
+| Metric | r_dropout 0 | r_dropout 0.5 |
+|---|---:|---:|
+| attention on R, layer 1 / 2 | 0.23 / 0.32 | **0.12 / 0.10** |
+| full-mask accuracy, normal -> X hidden | 0.059 -> 0.033 | 0.066 -> 0.031 |
+| span training loss, last quarter | 6.949 | 6.948 |
+| mid: full-mask CE | 8.130 | **8.090** |
+| mid: S=4 token accuracy | 0.048 | **0.054** |
+| mid: S=4 repeat rate | 0.458 | **0.443** |
+| end: full-mask CE | 7.469 | **7.421** |
+| end: S=4 token accuracy | 0.120 | **0.123** |
+| end: S=4 token F1 | 0.165 | 0.161 |
+| correct EOS, S=4 | 1.000 | 1.000 |
+
+R dropout halves the attention on R and gives small gains in
+cross-entropy and accuracy, with a slightly lower document-end F1. The
+evidence is weak (one seed) but matches the intended mechanism; D-025
+adopts it for base span training. Both arms also show that a readout
+trained from scratch with memory positions already reads X (accuracy
+falls by about half when X is hidden), unlike the retained Dense readout;
+the runs differ in many ways, so this supports D-024 without being a
+controlled comparison.
+
 ## Limits
 
 - Small synthetic models, 2,000 updates and three seeds. Large effects

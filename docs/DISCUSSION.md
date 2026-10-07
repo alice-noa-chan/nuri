@@ -3704,3 +3704,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
   5. Unverified hypotheses: corpus documents are chunks, so a "document end" EOS may mark a chunk boundary rather than a natural ending; Japanese is 1% of sampling.
 - Proposal (not implemented): test "R dropout" in the readout memory during span training (hide R from the readout for a random share of samples) so the readout must learn to read X, together with D-024 memory positions; A/B from scratch on a Colab T4 like D-024.
 - Status: open
+
+🔒 Claude editing docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-07T15:30Z)
+
+### [2026-10-07] Claude — D-025 R dropout for base span training
+- Scope: Q-17, D-024, D-025, §7, §14
+- Type: review
+- Details: The user approved the R-dropout A/B proposed above. Implemented as the base recipe option r_dropout_prob (8e529d0; training only, no model or inference change). From-scratch Colab T4 A/B with D-023 and D-024 in both arms (66M model, 2,000 steps, one seed): attention on R 0.23/0.32 -> 0.12/0.10; full-mask CE 8.130 -> 8.090 (mid) and 7.469 -> 7.421 (end); S=4 accuracy 0.048 -> 0.054 and 0.120 -> 0.123; mid repeat 0.458 -> 0.443; end F1 0.165 -> 0.161; EOS 1.000 in both. Weak but mechanism-consistent, no clear harm, so D-025 adopts r_dropout_prob 0.5 for base spans; the easy_run example and the private run config carry it. Both arms read X (accuracy roughly halves when X is hidden), unlike the retained Dense readout, which supports D-024 (not a controlled comparison).
+- Evidence: GENERATION_DIAGNOSTICS.md section "The readout bypasses X through R (and R dropout)".
+- Status: accepted (user's A/B rule; D-025)
+
+🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-07T15:40Z; D-025)
