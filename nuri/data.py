@@ -14,6 +14,7 @@ environment variables); this module never names a dataset.
 
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -33,7 +34,9 @@ class _DocumentSampler:
     def random_document(self, rng: random.Random) -> list[int]:
         raise NotImplementedError
 
-    def sample(self, count: int, rng: random.Random, usable=None, max_draws_per_doc: int = 100) -> list[list[int]]:
+    def sample(
+        self, count: int, rng: random.Random, usable=None, max_draws_per_doc: int = 100
+    ) -> list[list[int]]:
         """Draw `count` random documents (with replacement).
 
         usable: optional test `document -> bool`. Documents that fail it are
@@ -55,13 +58,40 @@ class TokenCorpus(_DocumentSampler):
 
     def __init__(self, folder: str | Path):
         folder = Path(folder)
-        self.tokens = np.memmap(folder / "tokens.bin", dtype=np.uint32, mode="r")
-        self.offsets = np.load(folder / "offsets.npy")
+        token_file = folder / "tokens.bin"
+        token_bytes = token_file.stat().st_size
+        if token_bytes % np.dtype(np.uint32).itemsize:
+            raise ValueError("tokens.bin must contain complete uint32 token IDs")
+        offsets = np.load(folder / "offsets.npy", allow_pickle=False)
+        if offsets.dtype != np.int64 or offsets.ndim != 1 or offsets.size < 1:
+            raise ValueError(
+                "offsets.npy must be a nonempty one-dimensional int64 array"
+            )
+        token_count = token_bytes // np.dtype(np.uint32).itemsize
+        if offsets[0] != 0 or offsets[-1] != token_count:
+            raise ValueError(
+                "corpus offsets must cover tokens.bin exactly, starting at zero"
+            )
+        # Bound temporary comparisons even for a very large document index.
+        for start in range(0, offsets.size - 1, 1024 * 1024):
+            chunk = offsets[start : start + 1024 * 1024 + 1]
+            if np.any(chunk[1:] <= chunk[:-1]):
+                raise ValueError(
+                    "corpus offsets must increase strictly for nonempty documents"
+                )
+        self.offsets = offsets
+        self.tokens = (
+            np.memmap(token_file, dtype=np.uint32, mode="r")
+            if token_count
+            else np.empty(0, dtype=np.uint32)
+        )
 
     def __len__(self) -> int:
         return len(self.offsets) - 1
 
     def document(self, index: int) -> list[int]:
+        if type(index) is not int or not 0 <= index < len(self):
+            raise IndexError("document index must be an integer within the corpus")
         start, end = self.offsets[index], self.offsets[index + 1]
         return self.tokens[start:end].astype(np.int64).tolist()
 
@@ -78,8 +108,17 @@ class MixedCorpus(_DocumentSampler):
     """
 
     def __init__(self, sources: list[tuple[TokenCorpus, float]]):
-        if not sources or any(weight <= 0 for _, weight in sources):
-            raise ValueError("MixedCorpus needs at least one source and positive weights")
+        if not sources or any(
+            type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0
+            for _, weight in sources
+        ):
+            raise ValueError(
+                "MixedCorpus needs at least one source and finite positive weights"
+            )
+        if not math.isfinite(sum(weight for _, weight in sources)):
+            raise ValueError("MixedCorpus weight total must be finite")
+        if any(len(corpus) == 0 for corpus, _ in sources):
+            raise ValueError("MixedCorpus sources must contain at least one document")
         self.corpora = [corpus for corpus, _ in sources]
         self.weights = [weight for _, weight in sources]
 
@@ -135,32 +174,53 @@ def chat_prompt_text(messages: list[dict]) -> str:
 # Each returns a dict of tensors ready for the training step functions.
 
 
-def build_mlm_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
-                    generator: torch.Generator | None = None, rate: float = 0.3) -> dict:
+def build_mlm_batch(
+    documents: list[list[int]],
+    config: NuriConfig,
+    rng: random.Random,
+    generator: torch.Generator | None = None,
+    rate: float = 0.3,
+) -> dict:
     """Random windows of at most N tokens, masked for MLM."""
     special = (config.pad_id, config.mask_id, config.eos_id)
-    windows = [_mlm_window(doc, config.max_input_len, special, rng) for doc in documents]
+    windows = [
+        _mlm_window(doc, config.max_input_len, special, rng) for doc in documents
+    ]
     ids, valid = pad_batch(windows, config.pad_id)
-    corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
+    corrupted, targets = mask_for_mlm(
+        ids, valid, config.mask_id, config.vocab_size, special, rate, generator
+    )
     # A window made only of special tokens has nothing to predict; drop it.
     keep = targets.any(dim=1)
-    return {"input_ids": corrupted[keep], "input_valid": valid[keep], "labels": ids[keep],
-            "target_mask": targets[keep]}
+    return {
+        "input_ids": corrupted[keep],
+        "input_valid": valid[keep],
+        "labels": ids[keep],
+        "target_mask": targets[keep],
+    }
 
 
-def _mlm_window(doc: list[int], length: int, special: tuple[int, ...], rng: random.Random) -> list[int]:
+def _mlm_window(
+    doc: list[int], length: int, special: tuple[int, ...], rng: random.Random
+) -> list[int]:
     """At most `length` tokens of doc, anchored on a random maskable token so there is a target."""
     maskable = [i for i, t in enumerate(doc) if t not in special]
     anchor = rng.choice(maskable) if maskable else 0
     lowest = max(0, anchor - length + 1)
     highest = max(lowest, min(anchor, len(doc) - length))
     start = rng.randint(lowest, highest)
-    return doc[start:start + length]
+    return doc[start : start + length]
 
 
-def build_packed_mlm_batch(draw_document, rows: int, config: NuriConfig, rng: random.Random,
-                           generator: torch.Generator | None = None, rate: float = 0.3,
-                           min_piece: int = 16) -> dict:
+def build_packed_mlm_batch(
+    draw_document,
+    rows: int,
+    config: NuriConfig,
+    rng: random.Random,
+    generator: torch.Generator | None = None,
+    rate: float = 0.3,
+    min_piece: int = 16,
+) -> dict:
     """MLM rows filled with several documents, so short documents waste no padding.
 
     draw_document() returns one usable document. Each row takes document
@@ -172,32 +232,53 @@ def build_packed_mlm_batch(draw_document, rows: int, config: NuriConfig, rng: ra
     sequences, segment_rows = [], []
     for _ in range(rows):
         tokens, segments = [], []
-        while config.max_input_len - len(tokens) >= min(min_piece, config.max_input_len):
-            piece = _mlm_window(draw_document(), config.max_input_len - len(tokens), special, rng)
+        while config.max_input_len - len(tokens) >= min(
+            min_piece, config.max_input_len
+        ):
+            piece = _mlm_window(
+                draw_document(), config.max_input_len - len(tokens), special, rng
+            )
             segments += [segments[-1] + 1 if segments else 1] * len(piece)
             tokens += piece
         sequences.append(tokens)
         segment_rows.append(segments)
     ids, valid = pad_batch(sequences, config.pad_id)
     segment_ids, _ = pad_batch(segment_rows, 0)
-    corrupted, targets = mask_for_mlm(ids, valid, config.mask_id, config.vocab_size, special, rate, generator)
-    return {"input_ids": corrupted, "input_valid": valid, "labels": ids, "target_mask": targets,
-            "segments": segment_ids}
+    corrupted, targets = mask_for_mlm(
+        ids, valid, config.mask_id, config.vocab_size, special, rate, generator
+    )
+    return {
+        "input_ids": corrupted,
+        "input_valid": valid,
+        "labels": ids,
+        "target_mask": targets,
+        "segments": segment_ids,
+    }
 
 
 def has_mlm_target(document: list[int], config: NuriConfig) -> bool:
     """True if the document has at least one token that MLM may mask."""
-    return any(t not in (config.pad_id, config.mask_id, config.eos_id) for t in document)
+    return any(
+        t not in (config.pad_id, config.mask_id, config.eos_id) for t in document
+    )
 
 
-def usable_instruction(example: tuple[list[int], list[int]], config: NuriConfig) -> bool:
+def usable_instruction(
+    example: tuple[list[int], list[int]], config: NuriConfig
+) -> bool:
     """Instruction examples need a prompt and an answer that fits M with EOS."""
     prompt, answer = example
     return bool(prompt) and len(answer) + 1 <= config.max_response_len
 
 
-def length_window(items: list, sizes: list[tuple[int, int]], input_budget: int, canvas_budget: int,
-                  max_rows: int, rng: random.Random) -> list:
+def length_window(
+    items: list,
+    sizes: list[tuple[int, int]],
+    input_budget: int,
+    canvas_budget: int,
+    max_rows: int,
+    rng: random.Random,
+) -> list:
     """A run of similar-length items whose padded batch stays within every limit.
 
     Items are sorted by total length; from a random start, items are taken in
@@ -210,36 +291,62 @@ def length_window(items: list, sizes: list[tuple[int, int]], input_budget: int, 
     """
     order = sorted(range(len(items)), key=lambda i: sum(sizes[i]))
     chosen, longest_a, longest_b = [], 0, 0
-    for i in order[rng.randrange(len(order)):]:
+    for i in order[rng.randrange(len(order)) :]:
         a, b = max(longest_a, sizes[i][0]), max(longest_b, sizes[i][1])
         rows = len(chosen) + 1
-        if chosen and (rows * a > input_budget or rows * b > canvas_budget or rows > max_rows):
+        if chosen and (
+            rows * a > input_budget or rows * b > canvas_budget or rows > max_rows
+        ):
             break
         chosen.append(i)
         longest_a, longest_b = a, b
     return [items[i] for i in chosen]
 
 
-def build_span_batch(documents: list[list[int]], config: NuriConfig, rng: random.Random,
-                     generator: torch.Generator | None = None, min_span: int = 16,
-                     bucket: tuple[int, int, int] | None = None, *, full_mask_prob: float = 0.1) -> dict:
+def build_span_batch(
+    documents: list[list[int]],
+    config: NuriConfig,
+    rng: random.Random,
+    generator: torch.Generator | None = None,
+    min_span: int = 16,
+    bucket: tuple[int, int, int] | None = None,
+    *,
+    full_mask_prob: float = 0.1,
+) -> dict:
     """Text span denoising: encode a prefix, rebuild the following span on the canvas.
 
     bucket=(input budget, canvas budget, max rows): pass more documents than one batch needs;
     a run of similar-length samples is kept (see length_window).
     full_mask_prob controls the existing whole-canvas corruption branch.
     """
-    pairs = [split_span(doc, config.max_input_len, config.max_response_len, config.eos_id, min_span, rng)
-             for doc in documents if len(doc) >= 2]
+    pairs = [
+        split_span(
+            doc,
+            config.max_input_len,
+            config.max_response_len,
+            config.eos_id,
+            min_span,
+            rng,
+        )
+        for doc in documents
+        if len(doc) >= 2
+    ]
     if bucket is not None:
         pairs = length_window(pairs, [(len(s), len(t)) for s, t in pairs], *bucket, rng)
-    return _canvas_batch([p[0] for p in pairs], [p[1] for p in pairs], config, generator, full_mask_prob)
+    return _canvas_batch(
+        [p[0] for p in pairs], [p[1] for p in pairs], config, generator, full_mask_prob
+    )
 
 
-def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config: NuriConfig,
-                            generator: torch.Generator | None = None,
-                            bucket: tuple[int, int, int] | None = None, rng: random.Random | None = None, *,
-                            full_mask_prob: float = 0.1) -> dict:
+def build_instruction_batch(
+    examples: list[tuple[list[int], list[int]]],
+    config: NuriConfig,
+    generator: torch.Generator | None = None,
+    bucket: tuple[int, int, int] | None = None,
+    rng: random.Random | None = None,
+    *,
+    full_mask_prob: float = 0.1,
+) -> dict:
     """examples: (prompt ids, answer ids without EOS).
 
     EOS is appended to every answer (a real ending). Answers longer than M
@@ -258,37 +365,69 @@ def build_instruction_batch(examples: list[tuple[list[int], list[int]]], config:
         if not usable_instruction((prompt, answer), config):
             continue
         target = list(answer) + [config.eos_id]
-        prompts.append(list(prompt)[-config.max_input_len:])
+        prompts.append(list(prompt)[-config.max_input_len :])
         targets.append(target)
-    batch = _canvas_batch(prompts, targets, config, generator, full_mask_prob) if prompts else {}
+    batch = (
+        _canvas_batch(prompts, targets, config, generator, full_mask_prob)
+        if prompts
+        else {}
+    )
     if prompts:
         batch["lengths"] = torch.tensor([len(t) for t in targets])
     batch["dropped"] = len(examples) - len(prompts)
     return batch
 
 
-def build_pair_batch(pairs: list[tuple[list[int], list[int]]], config: NuriConfig) -> dict:
+def build_pair_batch(
+    pairs: list[tuple[list[int], list[int]]], config: NuriConfig
+) -> dict:
     """Query/document pairs for contrastive training; row i of each side is a positive pair.
 
     "false_negatives"[i, j] marks rows j != i that must not count as negatives
     for row i: the same document text, or the same query text (whose
     document is then also a valid answer for query i).
     """
-    queries = [list(q[:config.max_input_len]) for q, _ in pairs]
-    documents = [list(d[:config.max_input_len]) for _, d in pairs]
+    queries = [list(q[: config.max_input_len]) for q, _ in pairs]
+    documents = [list(d[: config.max_input_len]) for _, d in pairs]
     n = len(pairs)
-    false_negatives = torch.tensor([[i != j and (documents[i] == documents[j] or queries[i] == queries[j])
-                                     for j in range(n)] for i in range(n)], dtype=torch.bool)
+    false_negatives = torch.tensor(
+        [
+            [
+                i != j and (documents[i] == documents[j] or queries[i] == queries[j])
+                for j in range(n)
+            ]
+            for i in range(n)
+        ],
+        dtype=torch.bool,
+    )
     query_ids, q_valid = pad_batch(queries, config.pad_id)
     doc_ids, d_valid = pad_batch(documents, config.pad_id)
-    return {"query_ids": query_ids, "query_valid": q_valid, "doc_ids": doc_ids, "doc_valid": d_valid,
-            "false_negatives": false_negatives}
+    return {
+        "query_ids": query_ids,
+        "query_valid": q_valid,
+        "doc_ids": doc_ids,
+        "doc_valid": d_valid,
+        "false_negatives": false_negatives,
+    }
 
 
-def _canvas_batch(sources, targets, config: NuriConfig, generator, full_mask_prob: float = 0.1) -> dict:
+def _canvas_batch(
+    sources, targets, config: NuriConfig, generator, full_mask_prob: float = 0.1
+) -> dict:
     input_ids, input_valid = pad_batch(sources, config.pad_id)
     target_ids, canvas_valid = pad_batch(targets, config.pad_id)
-    canvas, loss_mask = corrupt_canvas(target_ids, canvas_valid, config.mask_id,
-                                       full_mask_prob=full_mask_prob, generator=generator)
-    return {"input_ids": input_ids, "input_valid": input_valid, "canvas": canvas,
-            "canvas_valid": canvas_valid, "targets": target_ids, "loss_mask": loss_mask}
+    canvas, loss_mask = corrupt_canvas(
+        target_ids,
+        canvas_valid,
+        config.mask_id,
+        full_mask_prob=full_mask_prob,
+        generator=generator,
+    )
+    return {
+        "input_ids": input_ids,
+        "input_valid": input_valid,
+        "canvas": canvas,
+        "canvas_valid": canvas_valid,
+        "targets": target_ids,
+        "loss_mask": loss_mask,
+    }
