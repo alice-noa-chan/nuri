@@ -3692,3 +3692,15 @@ Corrected only the architecture status line to link the newly measured diagnosti
 - Status: accepted (user's A/B rule; D-024)
 
 🔓 Claude done docs/ARCHITECTURE.md §7 §10 §14, configs/nuri_v0.design.json (2026-10-07T12:10Z; D-024)
+
+### [2026-10-07] Claude — Further Q-17 causes: the readout bypasses X through the R slots
+- Scope: Q-17, §5, §7, D-024
+- Type: review
+- Details: Data and model checks beyond the first cause list (corrected Dense initializer, CPU, validation spans, full-mask single fill, 30-64 examples; one checkpoint, so treat as diagnostics):
+  1. R-slot bottleneck (new, strongest). Readout cross-attention puts 91% (layer 1) and 40% (layer 2) of its weight on the 32 R slots and 1.4% / 5.7% on the last 8 input tokens. Hiding X from the readout memory barely changes full-mask accuracy (0.059 -> 0.052) and pushes frequent-token predictions to 97%; hiding R lowers accuracy (0.034, off-distribution) but cuts frequent-token predictions to 30%. The readout gets almost all its information from the 32-slot summary, so it can name the topic but not copy specifics. Accuracy of the very first token after the prompt is 3.3%, against 65% MLM accuracy for the same encoder.
+  2. Collapse to frequent tokens (symptom, measured). 68% of full-mask predictions are '.', newline or ',' (8% of references); 44% of predictions are unchanged when the input is swapped with another example.
+  3. Byte-level BPE fragments (new, minor). 1,758 vocabulary entries are not complete UTF-8; 1.2% of Korean and 3.5% of Japanese corpus tokens; 8% of Korean and 18% of Japanese 32-token spans contain one. Independent parallel predictions can combine fragments into invalid characters, matching the "invalid decoded text" seen in evaluation.
+  4. Checked and ruled out: no PAD/MASK/EOS/role tokens inside the corpora.
+  5. Unverified hypotheses: corpus documents are chunks, so a "document end" EOS may mark a chunk boundary rather than a natural ending; Japanese is 1% of sampling.
+- Proposal (not implemented): test "R dropout" in the readout memory during span training (hide R from the readout for a random share of samples) so the readout must learn to read X, together with D-024 memory positions; A/B from scratch on a Colab T4 like D-024.
+- Status: open
