@@ -36,11 +36,13 @@ That is all. The script checks the host, installs the package, downloads
 and verifies the data, measures each stage on the real data, plans the
 steps, trains, evaluates and exports all five models, and packs the
 result. The stages run in the order base-dense, it-dense, embed,
-base-moe, it-moe, so the main (dense) family is finished first. If the process or the machine stops, run `python easy_run.py`
-again in the same folder: finished steps are skipped, the download
-resumes, and training resumes from the newest saved state (saved every
-30 minutes). The budget clock starts at the first run, so a restart does
-not add time.
+base-moe, it-moe, so the main (dense) family is finished first.
+
+If the process or the machine stops, run `python easy_run.py` again in
+the same folder: finished steps are skipped, the download resumes, and
+training resumes from the newest saved state (saved every 30 minutes).
+The budget clock starts at the first run, so a restart does not add
+time.
 
 Requirements: Linux, Python 3.10 or newer, an NVIDIA driver with a CUDA
 build of PyTorch (or network access so pip can install one), `zstd` only
