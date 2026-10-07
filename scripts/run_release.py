@@ -43,15 +43,45 @@ ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 
 # Plan keys passed straight through to scripts/train.py as --flags.
-TRAIN_FLAGS = ("preset", "steps", "batch_size", "lr", "warmup", "save_every", "seed", "reasoning_examples",
-               "grad_accum", "log_every", "tensorboard_dir", "cross_mode_weight", "save_every_minutes",
-               "holdout_config", "valid_every", "stop_after_completed_steps", "recipe_config", "assessment_recipe_config")
+TRAIN_FLAGS = (
+    "preset",
+    "steps",
+    "batch_size",
+    "lr",
+    "warmup",
+    "save_every",
+    "seed",
+    "reasoning_examples",
+    "grad_accum",
+    "log_every",
+    "tensorboard_dir",
+    "cross_mode_weight",
+    "save_every_minutes",
+    "holdout_config",
+    "valid_every",
+    "stop_after_completed_steps",
+    "recipe_config",
+    "assessment_recipe_config",
+)
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
 # Plan keys that become bare switches when true (e.g. "compile": true -> --compile).
-TRAIN_SWITCHES = ("gradient_checkpointing", "compile", "tensorboard", "no_progress", "pack_mlm", "bucket", "native_gqa")
-DATA_FLAGS = {"base": ("corpus", "tokenizer"), "it": ("corpus", "tokenizer", "instructions"),
-              "embed": ("tokenizer", "pairs")}
+TRAIN_SWITCHES = (
+    "gradient_checkpointing",
+    "compile",
+    "tensorboard",
+    "no_progress",
+    "pack_mlm",
+    "bucket",
+    "native_gqa",
+    "liger_kernels",
+)
+KERNEL_FLAGS = ("attention_backend", "vocab_loss_backend", "vocab_chunk_size")
+DATA_FLAGS = {
+    "base": ("corpus", "tokenizer"),
+    "it": ("corpus", "tokenizer", "instructions"),
+    "embed": ("tokenizer", "pairs"),
+}
 
 
 def flag(name: str) -> str:
@@ -65,27 +95,44 @@ def validate_holdout_settings(plan: dict) -> None:
     Here we reject malformed plan values before any subprocess or output is
     created. Zero is a valid completion-only validation interval.
     """
-    if any(key in plan.get("train", {}) for key in ("holdout_config", "valid_every", "stop_after_completed_steps")):
-        raise ValueError("holdout_config, valid_every and stop_after_completed_steps must be set per stage")
+    if any(
+        key in plan.get("train", {})
+        for key in ("holdout_config", "valid_every", "stop_after_completed_steps")
+    ):
+        raise ValueError(
+            "holdout_config, valid_every and stop_after_completed_steps must be set per stage"
+        )
     for name, spec in plan["stages"].items():
         if "holdout_config" in spec:
             config = spec["holdout_config"]
             if not isinstance(config, str) or not config.strip():
-                raise ValueError(f"{name}: holdout_config must be a nonempty path string")
+                raise ValueError(
+                    f"{name}: holdout_config must be a nonempty path string"
+                )
         if "valid_every" in spec:
             interval = spec["valid_every"]
             if type(interval) is not int or interval < 0:
                 raise ValueError(f"{name}: valid_every must be an integer >= 0")
             if not spec.get("holdout_config"):
-                raise ValueError(f"{name}: valid_every requires an explicit holdout_config")
+                raise ValueError(
+                    f"{name}: valid_every requires an explicit holdout_config"
+                )
         if "stop_after_completed_steps" in spec:
             boundary, steps = spec["stop_after_completed_steps"], spec.get("steps")
-            if type(boundary) is not int or type(steps) is not int or not 0 < boundary < steps:
-                raise ValueError(f"{name}: stop_after_completed_steps must be an integer between 1 and steps - 1")
+            if (
+                type(boundary) is not int
+                or type(steps) is not int
+                or not 0 < boundary < steps
+            ):
+                raise ValueError(
+                    f"{name}: stop_after_completed_steps must be an integer between 1 and steps - 1"
+                )
 
 
 def newest_state(stage_dir: Path) -> Path | None:
-    states = sorted((stage_dir / "training_state").glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    states = sorted(
+        (stage_dir / "training_state").glob("*.pt"), key=lambda p: p.stat().st_mtime
+    )
     return states[-1] if states else None
 
 
@@ -95,8 +142,13 @@ def validate_recipe_settings(plan: dict) -> None:
     Recipes describe one stage, so a plan-wide recipe would be ambiguous.
     The training CLI checks the actual private JSON and model geometry.
     """
-    if any(key in plan.get("train", {}) for key in ("recipe_config", "assessment_recipe_config")):
-        raise ValueError("recipe_config and assessment_recipe_config must be set per stage")
+    if any(
+        key in plan.get("train", {})
+        for key in ("recipe_config", "assessment_recipe_config")
+    ):
+        raise ValueError(
+            "recipe_config and assessment_recipe_config must be set per stage"
+        )
     for name, spec in plan["stages"].items():
         for key in ("recipe_config", "assessment_recipe_config"):
             if key not in spec:
@@ -105,14 +157,45 @@ def validate_recipe_settings(plan: dict) -> None:
             if not isinstance(path, str) or not path.strip():
                 raise ValueError(f"{name}: {key} must be a nonempty path string")
             if key == "assessment_recipe_config" and not spec.get("holdout_config"):
-                raise ValueError(f"{name}: assessment_recipe_config requires holdout_config")
+                raise ValueError(
+                    f"{name}: assessment_recipe_config requires holdout_config"
+                )
+
+
+def validate_kernel_settings(plan: dict) -> None:
+    """Validate runtime kernel values without importing optional GPU packages."""
+    for label, options in [("train", plan.get("train", {})), *plan["stages"].items()]:
+        for key, choices in (
+            ("attention_backend", ("sdpa", "flash2", "flash3")),
+            ("vocab_loss_backend", ("torch", "chunked", "liger")),
+        ):
+            if key in options and options[key] not in choices:
+                raise ValueError(f"{label}: {key} must be one of {choices}")
+        if "vocab_chunk_size" in options and (
+            type(options["vocab_chunk_size"]) is not int
+            or options["vocab_chunk_size"] < 1
+        ):
+            raise ValueError(f"{label}: vocab_chunk_size must be a positive integer")
+        if "liger_kernels" in options and type(options["liger_kernels"]) is not bool:
+            raise ValueError(f"{label}: liger_kernels must be boolean")
 
 
 def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
     stage_dir = out / name
-    command = [PYTHON, str(ROOT / "scripts" / "train.py"), "--stage", spec["stage"], "--out", str(stage_dir)]
+    command = [
+        PYTHON,
+        str(ROOT / "scripts" / "train.py"),
+        "--stage",
+        spec["stage"],
+        "--out",
+        str(stage_dir),
+    ]
     if "init" in spec:  # the name of an earlier stage, or a checkpoint folder
-        init = out / spec["init"] / "final" if spec["init"] in plan["stages"] else Path(spec["init"])
+        init = (
+            out / spec["init"] / "final"
+            if spec["init"] in plan["stages"]
+            else Path(spec["init"])
+        )
         command += ["--init", str(init)]
     for key in DATA_FLAGS[spec["stage"]]:
         value = spec.get(key, plan.get("data", {}).get(key))
@@ -123,6 +206,9 @@ def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
     for key in TRAIN_FLAGS:
         if key in spec:
             command += [flag(key), str(spec[key])]
+    for key in KERNEL_FLAGS:
+        if key in spec or key in plan.get("train", {}):
+            command += [flag(key), str(spec.get(key, plan.get("train", {}).get(key)))]
     for key in TRAIN_SWITCHES:
         if spec.get(key, plan.get("train", {}).get(key)):
             command.append(flag(key))
@@ -134,8 +220,16 @@ def train_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
 
 def evaluate_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
     data = plan.get("data", {})
-    command = [PYTHON, str(ROOT / "scripts" / "evaluate.py"), "--checkpoint", str(out / name / "final"),
-               "--suites", *spec["evaluate"], "--output", str(out / "eval" / f"{name}.json")]
+    command = [
+        PYTHON,
+        str(ROOT / "scripts" / "evaluate.py"),
+        "--checkpoint",
+        str(out / name / "final"),
+        "--suites",
+        *spec["evaluate"],
+        "--output",
+        str(out / "eval" / f"{name}.json"),
+    ]
     if data.get("eval_corpus"):
         command += ["--corpus", str(data["eval_corpus"])]
     if data.get("eval_pairs"):
@@ -163,32 +257,61 @@ def evaluation_source_sha256() -> str:
 def evaluation_input_hashes(command: list[str]) -> dict:
     """Stream only the resource bytes consumed by the requested suites."""
     start = command.index("--suites") + 1
-    end = next((i for i in range(start, len(command)) if command[i].startswith("--")), len(command))
+    end = next(
+        (i for i in range(start, len(command)) if command[i].startswith("--")),
+        len(command),
+    )
     suites = set(command[start:end])
     inputs = {}
     for option, environment, selected in (
-            ("corpus", "NURI_EVAL_CORPUS", bool(suites & {"mlm", "denoise", "diagnostics"})),
-            ("pairs", "NURI_EVAL_PAIRS", "retrieval" in suites),
-            ("instructions", "NURI_EVAL_INSTRUCTIONS", bool(suites & {"instructions", "conditioning"}))):
+        (
+            "corpus",
+            "NURI_EVAL_CORPUS",
+            bool(suites & {"mlm", "denoise", "diagnostics"}),
+        ),
+        ("pairs", "NURI_EVAL_PAIRS", "retrieval" in suites),
+        (
+            "instructions",
+            "NURI_EVAL_INSTRUCTIONS",
+            bool(suites & {"instructions", "conditioning"}),
+        ),
+    ):
         if not selected:
             continue
-        value = command[command.index(flag(option)) + 1] if flag(option) in command else os.environ.get(environment)
+        value = (
+            command[command.index(flag(option)) + 1]
+            if flag(option) in command
+            else os.environ.get(environment)
+        )
         if not value:
             raise ValueError(f"selected evaluation needs explicit {option} input")
         path = Path(value).resolve()
-        paths = [path / "tokens.bin", path / "offsets.npy"] if option == "corpus" else [path]
-        inputs[option] = [{"path": str(item), "sha256": file_sha256(item)} for item in paths]
+        paths = (
+            [path / "tokens.bin", path / "offsets.npy"]
+            if option == "corpus"
+            else [path]
+        )
+        inputs[option] = [
+            {"path": str(item), "sha256": file_sha256(item)} for item in paths
+        ]
     return inputs
 
 
 def evaluation_manifest_hashes(plan: dict, spec: dict) -> dict:
     """Bind explicitly supplied private manifests without hashing training data."""
     manifests = {}
-    for location, block in (("plan", plan), ("data", plan.get("data", {})), ("stage", spec)):
+    for location, block in (
+        ("plan", plan),
+        ("data", plan.get("data", {})),
+        ("stage", spec),
+    ):
         for key in ("input_manifest", "eval_input_manifest"):
             if block.get(key):
                 path = Path(block[key]).resolve()
-                manifests[f"{location}.{key}"] = {"path": str(path), "sha256": file_sha256(path)}
+                manifests[f"{location}.{key}"] = {
+                    "path": str(path),
+                    "sha256": file_sha256(path),
+                }
     # A stage holdout configuration may also identify the reviewed split/input
     # manifest. Its paths follow the training CLI's config-relative convention.
     if spec.get("holdout_config"):
@@ -198,14 +321,26 @@ def evaluation_manifest_hashes(plan: dict, spec: dict) -> dict:
             path = Path(config["input_manifest"])
             if not path.is_absolute():
                 path = config_path.parent / path
-            manifests["holdout.input_manifest"] = {"path": str(path.resolve()), "sha256": file_sha256(path)}
+            manifests["holdout.input_manifest"] = {
+                "path": str(path.resolve()),
+                "sha256": file_sha256(path),
+            }
     return manifests
 
 
-def evaluation_binding(command: list[str], stage_dir: Path, plan: dict, spec: dict) -> dict:
+def evaluation_binding(
+    command: list[str], stage_dir: Path, plan: dict, spec: dict
+) -> dict:
     """Describe the actual final checkpoint and evaluator runtime for reuse."""
     versions = {}
-    for package in ("torch", "numpy", "tokenizers", "safetensors", "transformers", "scikit-learn"):
+    for package in (
+        "torch",
+        "numpy",
+        "tokenizers",
+        "safetensors",
+        "transformers",
+        "scikit-learn",
+    ):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -213,16 +348,33 @@ def evaluation_binding(command: list[str], stage_dir: Path, plan: dict, spec: di
     return {
         "checkpoint_sha256": file_sha256(stage_dir / "final" / "model.safetensors"),
         "config_sha256": file_sha256(stage_dir / "final" / "config.json"),
-        "tokenizer_sha256": {name: file_sha256(stage_dir / "final" / name)
-                             for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json")
-                             if (stage_dir / "final" / name).is_file()},
+        "tokenizer_sha256": {
+            name: file_sha256(stage_dir / "final" / name)
+            for name in (
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+            )
+            if (stage_dir / "final" / name).is_file()
+        },
         "input_sha256": evaluation_input_hashes(command),
         "manifest_sha256": evaluation_manifest_hashes(plan, spec),
         "command": command,
         "runtime_source_sha256": evaluation_source_sha256(),
-        "runtime": {"python": sys.version, "platform": platform.platform(), "packages": versions},
-        "environment": {name: os.environ.get(name) for name in
-                        ("NURI_EVAL_CORPUS", "NURI_EVAL_PAIRS", "NURI_EVAL_INSTRUCTIONS", "CUDA_VISIBLE_DEVICES")},
+        "runtime": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "packages": versions,
+        },
+        "environment": {
+            name: os.environ.get(name)
+            for name in (
+                "NURI_EVAL_CORPUS",
+                "NURI_EVAL_PAIRS",
+                "NURI_EVAL_INSTRUCTIONS",
+                "CUDA_VISIBLE_DEVICES",
+            )
+        },
     }
 
 
@@ -234,10 +386,15 @@ def _valid_evaluation_result(path: Path) -> bool:
 
 
 def _evaluation_matches(receipt: dict | None, binding: dict, output: Path) -> bool:
-    return bool(isinstance(receipt, dict) and receipt.get("schema_version") == 1 and receipt.get("returncode") == 0
-                and receipt.get("binding") == binding and output.is_file()
-                and receipt.get("output_sha256") == file_sha256(output)
-                and _valid_evaluation_result(output))
+    return bool(
+        isinstance(receipt, dict)
+        and receipt.get("schema_version") == 1
+        and receipt.get("returncode") == 0
+        and receipt.get("binding") == binding
+        and output.is_file()
+        and receipt.get("output_sha256") == file_sha256(output)
+        and _valid_evaluation_result(output)
+    )
 
 
 def _preserve_evaluation(output: Path, receipt: dict | None) -> None:
@@ -249,11 +406,21 @@ def _preserve_evaluation(output: Path, receipt: dict | None) -> None:
     if output.is_file():
         shutil.copy2(output, history / output.name)
     if receipt is not None:
-        (history / "receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        (history / "receipt.json").write_text(
+            json.dumps(receipt, indent=2), encoding="utf-8"
+        )
 
 
-def evaluate_stage(name: str, spec: dict, plan: dict, out: Path, record: dict,
-                   summary: dict, summary_path: Path, dry_run: bool) -> int:
+def evaluate_stage(
+    name: str,
+    spec: dict,
+    plan: dict,
+    out: Path,
+    record: dict,
+    summary: dict,
+    summary_path: Path,
+    dry_run: bool,
+) -> int:
     """Run or reuse a verified evaluation without discarding previous evidence."""
     command = evaluate_command(name, spec, plan, out)
     if dry_run:
@@ -279,18 +446,33 @@ def evaluate_stage(name: str, spec: dict, plan: dict, out: Path, record: dict,
     if evaluation_binding(command, out / name, plan, spec) != binding:
         raise ValueError(f"{name}: evaluation binding changed while the evaluator ran")
     record["evaluation_receipt"] = {
-        "schema_version": 1, "returncode": 0, "binding": binding,
+        "schema_version": 1,
+        "returncode": 0,
+        "binding": binding,
         "output_sha256": file_sha256(output),
     }
     write_summary(summary_path, summary)
     return 0
 
 
-def export_command(name: str, spec: dict, plan: dict, out: Path, hours: float) -> list[str]:
+def export_command(
+    name: str, spec: dict, plan: dict, out: Path, hours: float
+) -> list[str]:
     release = plan.get("release", {})
-    command = [PYTHON, str(ROOT / "scripts" / "export_release.py"), "--checkpoint", str(out / name / "final"),
-               "--out", str(out / "release" / spec["release_name"]), "--name", spec["release_name"],
-               "--stage", spec["stage"], "--gpu-hours", f"{hours:.2f}"]
+    command = [
+        PYTHON,
+        str(ROOT / "scripts" / "export_release.py"),
+        "--checkpoint",
+        str(out / name / "final"),
+        "--out",
+        str(out / "release" / spec["release_name"]),
+        "--name",
+        spec["release_name"],
+        "--stage",
+        spec["stage"],
+        "--gpu-hours",
+        f"{hours:.2f}",
+    ]
     if release.get("gpu"):
         command += ["--gpu", release["gpu"]]
     tokens = _trained_tokens(out / name)
@@ -304,7 +486,9 @@ def _trained_tokens(stage_dir: Path) -> int | None:
     log = stage_dir / "train_log.jsonl"
     if not log.exists():
         return None
-    lines = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
     return json.loads(lines[-1]).get("tokens") if lines else None
 
 
@@ -322,7 +506,7 @@ class _ForwardSigterm:
         self.child = child
         self.received = False
 
-    def _forward(self, signum, frame):  # noqa: ARG002 - signal handler signature
+    def _forward(self, signum, frame):
         # Lock-free on purpose (a second signal may re-enter this handler):
         # set a flag and signal the child's pid directly, without Popen.poll()
         # or send_signal(), which take Popen's internal lock.
@@ -334,7 +518,10 @@ class _ForwardSigterm:
 
     def __enter__(self):
         self.previous = None
-        if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+        if (
+            hasattr(signal, "SIGTERM")
+            and threading.current_thread() is threading.main_thread()
+        ):
             self.previous = signal.signal(signal.SIGTERM, self._forward)
         return self
 
@@ -380,12 +567,15 @@ def write_summary(path: Path, summary: dict) -> None:
 
 def _finished(stage_dir: Path) -> bool:
     """A stage is done when its final weights and its final full state both exist."""
-    return ((stage_dir / "final" / "model.safetensors").exists()
-            and (stage_dir / "training_state" / "final.pt").exists())
+    return (stage_dir / "final" / "model.safetensors").exists() and (
+        stage_dir / "training_state" / "final.pt"
+    ).exists()
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("plan")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--only", nargs="+", help="run only these stage names")
@@ -394,10 +584,15 @@ def main(argv=None):
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     validate_holdout_settings(plan)
     validate_recipe_settings(plan)
+    validate_kernel_settings(plan)
     out = Path(plan["out"])
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "run_summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    summary = (
+        json.loads(summary_path.read_text(encoding="utf-8"))
+        if summary_path.exists()
+        else {}
+    )
 
     for name, spec in plan["stages"].items():
         if args.only and name not in args.only:
@@ -417,16 +612,32 @@ def main(argv=None):
             if code == INTERRUPTED_EXIT_CODE:
                 # Stop the whole plan; running the same command again resumes
                 # this stage from its newest training state.
-                print(f"[{name}] training was stopped and saved; rerun this plan to resume", flush=True)
+                print(
+                    f"[{name}] training was stopped and saved; rerun this plan to resume",
+                    flush=True,
+                )
                 sys.exit(INTERRUPTED_EXIT_CODE)
-        if spec.get("evaluate"):
-            if evaluate_stage(name, spec, plan, out, record, summary, summary_path, args.dry_run) == INTERRUPTED_EXIT_CODE:
-                print(f"[{name}] stopped during evaluation; rerun this plan to continue", flush=True)
-                sys.exit(INTERRUPTED_EXIT_CODE)
+        if (
+            spec.get("evaluate")
+            and evaluate_stage(
+                name, spec, plan, out, record, summary, summary_path, args.dry_run
+            )
+            == INTERRUPTED_EXIT_CODE
+        ):
+            print(
+                f"[{name}] stopped during evaluation; rerun this plan to continue",
+                flush=True,
+            )
+            sys.exit(INTERRUPTED_EXIT_CODE)
         if spec.get("release_name"):
-            command = export_command(name, spec, plan, out, record["train_seconds"] / 3600)
+            command = export_command(
+                name, spec, plan, out, record["train_seconds"] / 3600
+            )
             if run(command, args.dry_run) == INTERRUPTED_EXIT_CODE:
-                print(f"[{name}] stopped during export; rerun this plan to continue", flush=True)
+                print(
+                    f"[{name}] stopped during export; rerun this plan to continue",
+                    flush=True,
+                )
                 sys.exit(INTERRUPTED_EXIT_CODE)
 
     if not args.dry_run:
