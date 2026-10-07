@@ -3715,3 +3715,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 - Status: accepted (user's A/B rule; D-025)
 
 🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-07T15:40Z; D-025)
+
+### [2026-10-07] Claude — Third round of Q-17 causes: optimizer, clipping and decoding order
+- Scope: Q-17, D-024, §7, training settings
+- Type: review
+- Details:
+  1. Weight decay on the memory position tables (bug, fixed in 663e7a8). make_optimizer exempted only names containing "embedding", so readout.memory_positions.* (D-024) and draft_positions were decayed (0.1) while the canvas position table was not. All position tables are now exempt, as the docstring intended. The D-024 A/B ran with the decay, so its measured gain is, if anything, an underestimate.
+  2. Span gradients are always clipped (hypothesis). In the retained Dense Base log, span-step gradient norms grow from 1.6 to 3.2 while MLM steps stay near 0.8, and grad_clip is 1.0. Every span step is scaled down 2-3x, so the shared encoder receives a weaker generation signal than MLM signal (readout-only parameters are mostly protected by Adam's normalization). Span loss also stalls in the constant-LR middle of training (4.90 at 50% -> 4.86 at 75%). Not yet tested.
+  3. Confidence-ordered unmasking commits punctuation first (amplifier, not a root cause). After round 1, 85% of kept tokens are '.', ',' or newline, with 5% accuracy. All readout hidden states share a direction (mean cosine 0.38 to their average) whose top logits are exactly those three tokens: the unigram prior lives in the hidden state because the tied vocabulary head has no bias. Ordering by PMI (log p - lambda log prior) cut frequent tokens from 0.247 to 0.159 and repetition from 0.121 to about 0.11 but left accuracy and token F1 unchanged (0.054 -> 0.052 mid, 0.051 -> 0.057 end; F1 0.217 -> about 0.213). Not adopted: the predictions themselves are weak.
+  4. Ruled out: tied-embedding norms favoring frequent tokens (frequent tokens have smaller norms, correlation -0.41).
+- Evidence: CPU checks on the corrected Dense initializer (48-160 validation spans) and the retained Dense Base training log; numbers are diagnostics on one checkpoint.
+- Status: open (item 2 can be A/B-tested from scratch like D-024/D-025, e.g. a higher clip threshold or per-task clipping)

@@ -254,6 +254,34 @@ falls by about half when X is hidden), unlike the retained Dense readout;
 the runs differ in many ways, so this supports D-024 without being a
 controlled comparison.
 
+## Further checks: optimizer, clipping and decoding order
+
+- **Weight decay on memory positions (fixed).** The optimizer exempted only
+  parameter names containing "embedding", so the D-024 tables were decayed
+  while the canvas position table was not. All position tables are now
+  exempt. The D-024 A/B ran with the decay.
+- **Span gradients are always clipped (untested hypothesis).** In the
+  retained Dense Base log, span-step gradient norms rise from 1.6 to 3.2
+  while MLM steps stay near 0.8; with grad_clip 1.0 every span step is
+  scaled down 2-3x, weakening the generation signal into the shared
+  encoder. Span loss stalls between 50% and 75% of training (4.90 -> 4.86).
+- **Confidence order commits punctuation first (amplifier).** After round
+  1 of S=4, 85% of kept tokens are '.', ',' or newline, with 5% accuracy;
+  the readout hidden states share a direction whose top logits are exactly
+  those tokens. Choosing kept tokens by PMI instead of confidence:
+
+  | Keep score | Accuracy mid / end | Token F1 mid / end | Repeat mid | Frequent-token share mid |
+  |---|---:|---:|---:|---:|
+  | log p (current) | 0.054 / 0.051 | 0.217 / 0.217 | 0.121 | 0.247 |
+  | log p - 0.5 log prior | 0.052 / 0.057 | 0.213 / 0.214 | 0.109 | 0.159 |
+  | log p - 1.0 log prior | 0.050 / 0.058 | 0.211 / 0.210 | 0.110 | 0.158 |
+
+  Fewer punctuation tokens but no better answers, so the decoder stays as
+  it is; the weak predictions come from the causes above.
+- **Ruled out:** tied-embedding norms do not favor frequent tokens
+  (frequent tokens have smaller norms; correlation with log frequency
+  -0.41).
+
 ## Limits
 
 - Small synthetic models, 2,000 updates and three seeds. Large effects
