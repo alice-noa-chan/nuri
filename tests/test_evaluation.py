@@ -4,7 +4,7 @@ import torch
 from nuri.config import tiny_config
 from nuri.evaluation import (core_diagnostics, depth_curve, generation_accuracy, halting_curve, mlm_accuracy,
                              r_interventions, retrieval_metrics, rounds_curve, sample_examples,
-                             shuffle_r, span_denoising, zero_r)
+                             shuffle_r, span_denoising, zero_r, token_f1, adjacent_repeat_rate)
 from nuri.model import NuriModel
 
 EXAMPLES = [([5, 6, 7], [8, 9]), ([10, 11], [12]), ([13, 14, 15, 16], [17, 18, 19])]
@@ -138,3 +138,26 @@ def test_cross_mode_retrieval_uses_both_modes():
     cross = retrieval_metrics(model, pairs, mode="reasoning", doc_mode="fast")
     assert same["doc_mode"] == "reasoning" and cross["doc_mode"] == "fast"
     assert 0.0 <= cross["mrr"] <= 1.0
+
+
+def test_token_f1_gives_partial_credit():
+    assert token_f1([5, 6, 7], [5, 6, 7]) == 1.0
+    assert token_f1([7, 6, 5], [5, 6, 7]) == 1.0  # bag of tokens ignores order
+    assert token_f1([5, 9], [5, 6]) == pytest.approx(0.5)
+    assert token_f1([5, 5, 5], [5, 6]) == pytest.approx(0.4)  # repeats count once each
+    assert token_f1([9], [5]) == 0.0
+    assert token_f1([], []) == 1.0 and token_f1([], [5]) == 0.0
+
+
+def test_adjacent_repeat_rate():
+    assert adjacent_repeat_rate([4, 4, 4]) == 1.0
+    assert adjacent_repeat_rate([4, 5, 4, 4]) == pytest.approx(1 / 3)
+    assert adjacent_repeat_rate([4]) == 0.0
+
+
+def test_generation_accuracy_reports_partial_credit_and_repeats():
+    model = make_model()
+    result = generation_accuracy(model, EXAMPLES, oracle_length=True)
+    for name in ("token_f1", "repeat_rate", "reference_repeat_rate"):
+        assert 0.0 <= result[name] <= 1.0
+    assert result["token_f1"] >= result["exact_match"]
