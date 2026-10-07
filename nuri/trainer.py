@@ -793,10 +793,16 @@ def default_device() -> torch.device:
 
 
 def make_optimizer(model: NuriModel, settings: TrainSettings) -> torch.optim.AdamW:
-    """AdamW without weight decay on norms, gates, slots and the embedding."""
+    """AdamW without weight decay on norms, gates, slots, embeddings and position tables.
+
+    Position tables are embeddings too: canvas positions match "embedding"
+    by name, while the readout memory positions (D-024) and draft positions
+    are matched by "positions". Decay would keep pulling the zero-initialized
+    memory tables back toward zero.
+    """
     decay, no_decay = [], []
     for name, param in model.named_parameters():
-        if param.ndim < 2 or "embedding" in name or "slots" in name:
+        if param.ndim < 2 or any(part in name for part in ("embedding", "slots", "positions")):
             no_decay.append(param)
         else:
             decay.append(param)
