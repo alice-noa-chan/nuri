@@ -119,9 +119,10 @@ def linear_token_mean_ce(
     Only selected positions are supplied. Checkpointing the loss projection
     bounds its logits to chunk_size x vocabulary_size during both forward and
     backward. This trades recomputation for memory; measure actual GPU speed.
+    The default CE ignore index (-100) is excluded from the token denominator.
     """
-    token_weights = torch.full_like(
-        targets, 1 / max(targets.numel(), 1), dtype=torch.float32
+    token_weights = (
+        torch.ones_like(targets, dtype=torch.float32) / (targets != -100).sum()
     )
     return _chunked_linear_ce(hidden, weight, targets, token_weights, chunk_size)
 

@@ -97,3 +97,22 @@ def test_selected_row_and_mask_contracts():
         linear_sample_mean_ce(
             torch.randn(2, 4), torch.randn(7, 4), torch.zeros(2, 3), torch.ones(2, 3)
         )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2])
+@pytest.mark.parametrize("labels", [[1, -100, 2, -100, 3], [-100] * 5])
+def test_ignored_tokens_match_reference_mean_and_scaled_gradients(chunk_size, labels):
+    torch.manual_seed(9)
+    hidden = torch.randn(5, 8, requires_grad=True)
+    weight = torch.randn(17, 8, requires_grad=True)
+    other_hidden = hidden.detach().clone().requires_grad_()
+    other_weight = weight.detach().clone().requires_grad_()
+    targets = torch.tensor(labels)
+    expected = token_mean_ce(F.linear(hidden, weight), targets)
+    actual = linear_token_mean_ce(other_hidden, other_weight, targets, chunk_size)
+    # PyTorch reports NaN mean for an all-ignored batch, with zero gradients.
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+    (expected * 0.37).backward()
+    (actual * 0.37).backward()
+    torch.testing.assert_close(other_hidden.grad, hidden.grad)
+    torch.testing.assert_close(other_weight.grad, weight.grad)
