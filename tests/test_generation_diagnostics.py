@@ -49,6 +49,7 @@ def test_experiment_grid_has_unique_keys_and_expected_rows():
     assert "readout/copy/mask+readout4" in rows
     assert "readout/copy/mask+pos-from-start" in rows
     assert "readout/reverse/mask+pos-from-end" in rows
+    assert "readout/copy/mask+pos-memory" in rows
     assert len(runs) == 2 * len(rows)
 
 
@@ -255,3 +256,13 @@ def test_invalid_arguments_are_rejected(tmp_path):
         script.parse_args(["--out", str(tmp_path), "--shard", "2", "2"])
     with pytest.raises(SystemExit):
         script.parse_args(["--out", str(tmp_path), "--steps", "0"])
+
+
+def test_memory_variant_uses_the_package_option():
+    run = script.Run("readout", "copy", 0, input_positions="memory")
+    model = small_model(run)
+    assert type(model) is script.NuriModel
+    assert model.config.memory_position_encoding == "learned"
+    assert model.readout.memory_positions is not None
+    baseline = small_model(script.Run("readout", "copy", 0))
+    assert baseline.config.memory_position_encoding == "none"

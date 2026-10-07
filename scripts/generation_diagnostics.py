@@ -21,9 +21,11 @@ Experiment groups (one hypothesis each; see docs/GENERATION_DIAGNOSTICS.md):
            own predictions (SMART-style). Both score every canvas position.
 - eos:     the unchanged recipe on count and branch-single, but EOS appears
            in only 10% of training canvases, as in base span denoising.
-- readout: copy and reverse with readout depth 1 and 4 instead of 2, and
-           with a start- or end-relative absolute position signal added to
-           the input embeddings.
+- readout: copy and reverse with readout depth 1 and 4 instead of 2, with
+           a start- or end-relative absolute position signal added to the
+           input embeddings, and with the package option
+           memory_position_encoding="learned" ("memory"), which adds both
+           signals to the readout memory only.
 
 Two decoders are compared. "standard" is nuri.generation.generate
 (Mask-Predict: kept tokens are never rescored). "revise" re-predicts every
@@ -76,7 +78,7 @@ from nuri.trainer import canvas_loss  # noqa: E402
 
 GROUPS = ("tasks", "draft", "eos", "readout")
 CANVAS_TRAINING = ("mask", "random-noise", "self-draft")
-INPUT_POSITIONS = ("none", "from-start", "from-end")
+INPUT_POSITIONS = ("none", "from-start", "from-end", "memory")
 DECODERS = ("standard", "revise")
 ROUNDS = (1, 4)
 
@@ -159,7 +161,7 @@ def experiment_runs(groups: list[str], seeds: list[int]) -> list[Run]:
             for task in ("copy", "reverse"):
                 runs.append(Run("readout", task, seed, readout_layers=1))
                 runs.append(Run("readout", task, seed, readout_layers=4))
-                for mode in ("from-start", "from-end"):
+                for mode in ("from-start", "from-end", "memory"):
                     runs.append(Run("readout", task, seed, input_positions=mode))
     return runs
 
@@ -214,8 +216,12 @@ def build_model(run: Run, spec: TaskSpec) -> NuriModel:
         readout_layers=run.readout_layers,
         max_input_len=spec.input_len[1],
         max_response_len=spec.max_target_len + 1,
+        # "memory" is the package option: positions only in the readout memory.
+        memory_position_encoding="learned"
+        if run.input_positions == "memory"
+        else "none",
     )
-    if run.input_positions == "none":
+    if run.input_positions in ("none", "memory"):
         return NuriModel(config)
     return InputPositionNuriModel(config, run.input_positions)
 
