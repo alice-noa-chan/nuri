@@ -160,6 +160,31 @@ small differences as noise.
   token accuracy: a short readout-only repair on a frozen encoder does not
   make the Dense Base a good generator.
 
+The same probe was repeated for 3,000 steps on a Colab T4 GPU
+(`--device cuda`; pool of 6,000 cached training prefixes drawn from a
+10,000-document training subset, 192 validation examples per set from a
+1,200-document validation subset; one seed):
+
+| Arm | Set | Full-mask CE | Acc S=1 | Acc S=4 | Token F1 S=4 | Repeat S=1 | Correct EOS S=4 | Final train loss |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| initial | end | 6.913 | 0.064 | 0.060 | 0.214 | 0.763 | 0.141 | - |
+| baseline | end | 6.902 | 0.084 | 0.079 | 0.228 | 0.789 | 0.224 | 3.875 |
+| memory positions | end | 6.906 | 0.086 | 0.076 | 0.232 | 0.800 | 0.177 | 3.875 |
+| memory positions + span_end_prob 0.5 | end | **6.349** | **0.169** | **0.160** | **0.253** | **0.671** | **0.979** | 3.499 |
+| baseline | mid | 7.003 | 0.092 | 0.070 | 0.221 | 0.801 | - | |
+| memory positions | mid | 7.007 | 0.093 | 0.070 | 0.224 | 0.801 | - | |
+| memory positions + span_end_prob 0.5 | mid | 7.075 | 0.097 | 0.074 | 0.239 | 0.744 | - | |
+
+- EOS-bearing spans: correct EOS placement 0.224 -> 0.979 and document-end
+  accuracy doubles; with more steps the mid-document cost seen at 600
+  steps disappears (S=4 accuracy 0.070 -> 0.074). D-023 stands.
+- Memory positions added to an already trained readout show no effect:
+  the final training loss matches the baseline to three decimals. Zero-
+  initialized tables on a readout that learned to work without positions
+  barely train in a short warm start, so this does not test training from
+  scratch, which the release run does. A from-scratch real-text A/B
+  decides (see DISCUSSION).
+
 ## Limits
 
 - Small synthetic models, 2,000 updates and three seeds. Large effects
