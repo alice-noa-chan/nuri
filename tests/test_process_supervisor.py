@@ -30,7 +30,7 @@ class Child:
         return 0
 
 
-def execute(tmp_path, *, deadline=105, finish=110, stall=100, grace=2):
+def execute(tmp_path, *, deadline=105, finish=110, stall=100, grace=2, on_sleep=None):
     clock = Clock()
     child = Child(clock, finish)
     calls = []
@@ -39,6 +39,11 @@ def execute(tmp_path, *, deadline=105, finish=110, stall=100, grace=2):
     def launch(command, **kwargs):
         options.append(kwargs)
         return child
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if on_sleep is not None:
+            on_sleep(clock.now())
 
     code = run_supervised(
         ["fake"],
@@ -51,7 +56,7 @@ def execute(tmp_path, *, deadline=105, finish=110, stall=100, grace=2):
         poll_seconds=1,
         clock=clock.now,
         monotonic=clock.now,
-        sleep=clock.sleep,
+        sleep=sleep,
         popen=launch,
         send=lambda proc, force=False: calls.append(force),
         group_alive=lambda proc: proc.poll() is None,
@@ -99,6 +104,83 @@ def test_incomplete_log_line_keeps_last_complete_record(tmp_path):
     folder.mkdir()
     (folder / "train_log.jsonl").write_text('{"step": 2, "loss": 1.25}\n{"step":')
     assert latest_metrics(tmp_path) == ({"step": 2, "loss": 1.25}, False)
+
+
+def test_direct_training_folder_reports_metrics(tmp_path):
+    (tmp_path / "train_log.jsonl").write_text('{"step": 2, "loss": 1.25}\n')
+    assert latest_metrics(tmp_path) == ({"step": 2, "loss": 1.25}, False)
+
+
+def test_silent_training_steps_prevent_false_idle_stop(tmp_path):
+    folder = tmp_path / "runs" / "base"
+    folder.mkdir(parents=True)
+    log = folder / "train_log.jsonl"
+
+    def advance(now):
+        with log.open("a") as stream:
+            stream.write(json.dumps({"step": int(now - 100), "loss": 1.0}) + "\n")
+
+    code, record, calls, _ = execute(tmp_path, deadline=120, stall=2, on_sleep=advance)
+    assert code == 0 and record["reason"] == "command_finished"
+    assert calls == [] and (tmp_path / "stdout.log").stat().st_size == 0
+
+
+def test_advancing_steps_do_not_extend_the_absolute_deadline(tmp_path):
+    folder = tmp_path / "runs" / "base"
+    folder.mkdir(parents=True)
+    log = folder / "train_log.jsonl"
+
+    def advance(now):
+        with log.open("a") as stream:
+            stream.write(json.dumps({"step": int(now - 100), "loss": 1.0}) + "\n")
+
+    code, record, calls, _ = execute(tmp_path, stall=2, on_sleep=advance)
+    assert code == 75 and record["reason"] == "deadline"
+    assert calls[:2] == [False, True]
+
+
+@pytest.mark.parametrize("mode", ["repeat", "decrease", "partial"])
+def test_unadvanced_logs_do_not_refresh_idle_timer(tmp_path, mode):
+    folder = tmp_path / "runs" / "base"
+    folder.mkdir(parents=True)
+    log = folder / "train_log.jsonl"
+    log.write_text('{"step": 10, "loss": 1.0}\n')
+
+    def unchanged(now):
+        step = 10 if mode == "repeat" else 10 - int(now - 100)
+        with log.open("a") as stream:
+            if mode == "partial":
+                stream.write('{"step":')
+            else:
+                stream.write(json.dumps({"step": step, "loss": now}) + "\n")
+
+    code, record, calls, _ = execute(
+        tmp_path, deadline=120, stall=2, on_sleep=unchanged
+    )
+    assert code == 70 and record["reason"] == "no_progress"
+    assert calls[0] is False
+
+
+def test_new_stage_can_restart_its_step_counter(tmp_path):
+    import os
+
+    folder = tmp_path / "runs" / "base"
+    folder.mkdir(parents=True)
+    old_log = folder / "train_log.jsonl"
+    old_log.write_text('{"step": 1000, "loss": 1.0}\n')
+    os.utime(old_log, (100, 100))
+    new_folder = tmp_path / "runs" / "it"
+    new_folder.mkdir()
+    log = new_folder / "train_log.jsonl"
+
+    def advance(now):
+        with log.open("a") as stream:
+            stream.write(json.dumps({"step": int(now - 101), "loss": 1.0}) + "\n")
+        os.utime(log, (now, now))
+
+    code, record, calls, _ = execute(tmp_path, deadline=120, stall=2, on_sleep=advance)
+    assert code == 0 and record["reason"] == "command_finished"
+    assert record["metrics"]["step"] < 1000 and calls == []
 
 
 def test_missing_process_group_is_already_stopped(monkeypatch):

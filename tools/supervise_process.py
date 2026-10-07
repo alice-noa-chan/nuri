@@ -30,9 +30,18 @@ def write_status(path: Path, record: dict) -> None:
 
 def latest_metrics(folder: Path) -> tuple[dict, bool]:
     """Read numeric metrics only; ignore a last line still being written."""
+    metrics, invalid, _ = _latest_metric_snapshot(folder)
+    return metrics, invalid
+
+
+def _latest_metric_snapshot(folder: Path) -> tuple[dict, bool, Path | None]:
+    """Include the log identity so a new stage can start its own step counter."""
     files = list(folder.glob("*/train_log.jsonl"))
+    direct = folder / "train_log.jsonl"
+    if direct.is_file():
+        files.append(direct)
     if not files:
-        return {}, False
+        return {}, False, None
     path = max(files, key=lambda item: item.stat().st_mtime)
     with path.open("rb") as source:
         source.seek(max(0, path.stat().st_size - 65536))
@@ -43,10 +52,16 @@ def latest_metrics(folder: Path) -> tuple[dict, bool]:
         except (ValueError, UnicodeError):
             continue
         keys = ("step", "loss", "grad_norm", "tokens", "targets", "seconds", "lr")
-        metrics = {key: raw[key] for key in keys if isinstance(raw.get(key), (int, float))}
+        metrics = {
+            key: raw[key] for key in keys if isinstance(raw.get(key), (int, float))
+        }
         invalid = any(not math.isfinite(value) for value in metrics.values())
-        return {key: value for key, value in metrics.items() if math.isfinite(value)}, invalid
-    return {}, False
+        return (
+            {key: value for key, value in metrics.items() if math.isfinite(value)},
+            invalid,
+            path,
+        )
+    return {}, False, path
 
 
 def signal_group(process, force: bool = False) -> None:
@@ -72,8 +87,9 @@ def group_is_alive(process) -> bool:
         return False
 
 
-def run_supervised(command: list[str], *, status: Path, output: Path, deadline: float,
-                   **options) -> int:
+def run_supervised(
+    command: list[str], *, status: Path, output: Path, deadline: float, **options
+) -> int:
     """Refuse concurrent writers; stale locks require an explicit ownership check."""
     owned = []
     try:
@@ -83,18 +99,31 @@ def run_supervised(command: list[str], *, status: Path, output: Path, deadline: 
             with lock.open("x", encoding="utf-8") as owner:
                 owner.write(str(os.getpid()))
             owned.append(lock)
-        return _run_supervised(command, status=status, output=output, deadline=deadline, **options)
+        return _run_supervised(
+            command, status=status, output=output, deadline=deadline, **options
+        )
     finally:
         for lock in owned:
             lock.unlink()
 
 
-def _run_supervised(command: list[str], *, status: Path, output: Path, deadline: float,
-                   progress: Path | None = None, grace_seconds: float = 120,
-                   stall_seconds: float = 1800, poll_seconds: float = 5,
-                   clock=time.time, monotonic=time.monotonic, sleep=time.sleep,
-                   popen=subprocess.Popen, send=signal_group,
-                   group_alive=group_is_alive) -> int:
+def _run_supervised(
+    command: list[str],
+    *,
+    status: Path,
+    output: Path,
+    deadline: float,
+    progress: Path | None = None,
+    grace_seconds: float = 120,
+    stall_seconds: float = 1800,
+    poll_seconds: float = 5,
+    clock=time.time,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+    popen=subprocess.Popen,
+    send=signal_group,
+    group_alive=group_is_alive,
+) -> int:
     values = (deadline, grace_seconds, stall_seconds, poll_seconds)
     if not command or not all(math.isfinite(value) for value in values):
         raise ValueError("A command and finite time limits are required")
@@ -125,10 +154,16 @@ def _run_supervised(command: list[str], *, status: Path, output: Path, deadline:
         try:
             for name in (signal.SIGTERM, signal.SIGINT):
                 handlers[name] = signal.signal(name, on_signal)
-            record = {"state": "running", "pid": process.pid, "started_at_epoch": started,
-                      "deadline_epoch": deadline}
+            record = {
+                "state": "running",
+                "pid": process.pid,
+                "started_at_epoch": started,
+                "deadline_epoch": deadline,
+            }
             last_size = output.stat().st_size
             last_progress = monotonic()
+            last_metric_path = None
+            last_metric_step = -1
             stop_at = None
             reason = None
             forced = False
@@ -137,7 +172,16 @@ def _run_supervised(command: list[str], *, status: Path, output: Path, deadline:
                 size = output.stat().st_size
                 if size != last_size:
                     last_progress, last_size = now, size
-                metrics, invalid = latest_metrics(progress) if progress is not None else ({}, False)
+                metrics, invalid, metric_path = (
+                    _latest_metric_snapshot(progress)
+                    if progress is not None
+                    else ({}, False, None)
+                )
+                step = metrics.get("step")
+                if not invalid and type(step) is int and step >= 0:
+                    if metric_path != last_metric_path or step > last_metric_step:
+                        last_progress = now
+                        last_metric_path, last_metric_step = metric_path, step
                 if reason is None:
                     if process.poll() is not None:
                         reason = "orphaned_children"
@@ -156,17 +200,31 @@ def _run_supervised(command: list[str], *, status: Path, output: Path, deadline:
                     send(process, force=True)
                     forced = True
                 elif forced and now - stop_at >= grace_seconds + 30:
-                    record.update(state="failed", reason="group_did_not_exit", forced=True,
-                                  checked_at_epoch=clock())
+                    record.update(
+                        state="failed",
+                        reason="group_did_not_exit",
+                        forced=True,
+                        checked_at_epoch=clock(),
+                    )
                     write_status(status, record)
                     return 70
-                record.update(state="stopping" if reason else "running", reason=reason,
-                              checked_at_epoch=clock(), metrics=metrics, forced=forced)
+                record.update(
+                    state="stopping" if reason else "running",
+                    reason=reason,
+                    checked_at_epoch=clock(),
+                    metrics=metrics,
+                    forced=forced,
+                )
                 write_status(status, record)
                 sleep(poll_seconds)
             exit_code = process.wait()
-            record.update(state="finished", reason=reason or "command_finished", exit_code=exit_code,
-                          ended_at_epoch=clock(), forced=forced)
+            record.update(
+                state="finished",
+                reason=reason or "command_finished",
+                exit_code=exit_code,
+                ended_at_epoch=clock(),
+                forced=forced,
+            )
             write_status(status, record)
             if reason in ("nonfinite_metrics", "no_progress"):
                 return 70
@@ -183,20 +241,33 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--deadline", required=True, type=float, help="absolute Unix UTC seconds")
-    parser.add_argument("--progress", type=Path, help="private run folder containing stage logs")
+    parser.add_argument(
+        "--deadline", required=True, type=float, help="absolute Unix UTC seconds"
+    )
+    parser.add_argument(
+        "--progress", type=Path, help="private run folder containing stage logs"
+    )
     parser.add_argument("--grace-seconds", type=float, default=120)
     parser.add_argument("--stall-seconds", type=float, default=1800)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     try:
-        return run_supervised(command, status=args.status, output=args.output, deadline=args.deadline,
-                              progress=args.progress, grace_seconds=args.grace_seconds,
-                              stall_seconds=args.stall_seconds)
+        return run_supervised(
+            command,
+            status=args.status,
+            output=args.output,
+            deadline=args.deadline,
+            progress=args.progress,
+            grace_seconds=args.grace_seconds,
+            stall_seconds=args.stall_seconds,
+        )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         # Commands may contain private paths. Do not print a captured argv/traceback.
-        print("Supervisor could not finish safely; inspect the private status.", file=sys.stderr)
+        print(
+            "Supervisor could not finish safely; inspect the private status.",
+            file=sys.stderr,
+        )
         return 70
 
 
