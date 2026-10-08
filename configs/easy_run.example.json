@@ -1,13 +1,11 @@
 {
   "schema_version": 1,
   "data": {
-    "url": "<https download URL of the data archive (.tar, .tar.gz or .tar.zst)>",
-    "sha256": "<SHA256 of that archive>",
     "folder": "data",
-    "delete_archive_after_unpack": true
+    "manifest": "SHA256SUMS"
   },
   "inputs": {
-    "tokenizer": "<tokenizer folder inside the archive>",
+    "tokenizer": "<tokenizer folder inside data/>",
     "corpus": [
       "<training token corpus folder>=<sampling weight>"
     ],
