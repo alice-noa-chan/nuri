@@ -3752,3 +3752,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 
 🔓 Claude done docs/ARCHITECTURE.md §14 (2026-10-08T05:25Z; D-026)
 
+🔒 Claude editing docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-08T08:30Z)
+
+### [2026-10-08] Claude — A100 check of the offline bundle; D-027 planning margins
+- Scope: D-022, D-026, D-027, docs/EASY_RUN.md
+- Type: review
+- Details: With the user's approval, the offline bundle ran on a rented A100 80GB (about 2.3 USD): offline install (all wheels identical to the bundle except one platform variant of tensorboard-data-server), data check, calibration, all five stages trained, evaluated and exported, status "complete", and a rerun that did nothing. Two defects were found and fixed before the handover: (1) the export imports transformers, which the bundled requirements lacked; the run would have failed right after about four days of base-dense training. transformers 5.18.0 is now bundled, and install() imports every release-path module (27a4565). (2) The .sha256 sidecar had a CRLF line ending, so `sha256sum -c` on Linux failed (8b8d5ef). Calibration overestimated step time by about 21% (30 steps, logged every step: base-dense 0.647 s vs 0.513 s real; base-moe 0.847 s vs 0.665 s); 100 steps logged every 10 now (088b316). Evaluation and export of all stages took under 10 minutes, so D-027 lowers reserve_hours from 8 to 1 and raises safety from 0.9 to 0.95 (about 14 more training hours).
+- Evidence: A100 run logs in a private folder; micro-batch 32 x 2 for base stages (64 peaks at 86-88% of memory, above the 85% headroom).
+- Status: accepted (user approved D-027)
+
+🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-08T08:35Z; D-027)
+
