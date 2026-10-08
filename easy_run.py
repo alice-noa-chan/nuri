@@ -373,6 +373,43 @@ def probe_torch(python: str) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+# Every module the release path imports (training, evaluation, export and the
+# runner). They are imported right after installation, so a package missing
+# from the bundle stops the run within minutes instead of after days of
+# training (export needs transformers, for example).
+RELEASE_MODULES = (
+    "torch", "numpy", "safetensors", "tokenizers", "tqdm", "tensorboard",
+    "torch.utils.tensorboard", "transformers", "nuri.model", "nuri.modeling_nuri",
+    "scripts.train", "scripts.evaluate", "scripts.export_release", "scripts.run_release",
+)  # fmt: skip
+IMPORT_CHECK = """
+import importlib, sys
+missing = []
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception as error:
+        missing.append(f"{name}: {type(error).__name__}: {error}")
+print("\\n".join(missing))
+sys.exit(1 if missing else 0)
+"""
+
+
+def check_imports(python: str, modules=RELEASE_MODULES) -> None:
+    """Stop unless the given Python can import every release-path module."""
+    path = os.pathsep.join(filter(None, [str(ROOT), os.environ.get("PYTHONPATH")]))
+    result = subprocess.run(
+        [python, "-c", IMPORT_CHECK, *modules],
+        cwd=ROOT, env={**os.environ, "PYTHONPATH": path},
+        capture_output=True, text=True,
+    )  # fmt: skip
+    if result.returncode != 0:
+        raise SystemExit(
+            "the installed environment cannot import what the release needs:\n"
+            + (result.stdout.strip() or result.stderr[-2000:])
+        )
+
+
 def install(config: dict, state: dict) -> None:
     """Install the bundled Python and the pinned packages without network access.
 
@@ -399,6 +436,7 @@ def install(config: dict, state: dict) -> None:
         check([str(python_home / "bin" / "python3"), "-m", "venv", str(VENV)])
     check([str(venv_python), "-m", "pip", "install", "--no-index",
            "--find-links", str(wheels), "-r", str(requirements)])  # fmt: skip
+    check_imports(str(venv_python))
     found = probe_torch(str(venv_python))
     if not found["cuda"]:
         raise SystemExit(

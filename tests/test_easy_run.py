@@ -458,6 +458,7 @@ def test_install_uses_only_the_bundled_python_and_wheels(easy, monkeypatch):
              "gpu": "NVIDIA A100-SXM4-80GB", "memory_gb": 85.0}  # fmt: skip
     monkeypatch.setattr(easy, "check", check)
     monkeypatch.setattr(easy, "probe_torch", lambda python: found)
+    monkeypatch.setattr(easy, "check_imports", lambda python: None)
     state = {}
     easy.install(make_config("data"), state)
     assert commands[0][:2] == ["tar", "-xzf"]
@@ -495,3 +496,12 @@ def test_preflight_reads_the_gpu_from_nvidia_smi(easy, monkeypatch):
     (easy.OFFLINE / "requirements.txt").unlink()
     with pytest.raises(SystemExit, match="requirements.txt"):
         easy.preflight(make_config("data"), {})
+
+
+def test_install_check_names_every_module_that_does_not_import(easy):
+    easy.check_imports(sys.executable)  # this test environment has the full set
+    with pytest.raises(SystemExit) as stop:
+        easy.check_imports(sys.executable, ("json", "no_such_module_for_nuri"))
+    assert "no_such_module_for_nuri: ModuleNotFoundError" in str(stop.value)
+    assert "json:" not in str(stop.value)
+    assert "transformers" in easy.RELEASE_MODULES  # export needs it
