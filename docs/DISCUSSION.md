@@ -3741,3 +3741,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 - Evidence: commits a416baf..69cb0aa; tests/test_easy_run.py (20 tests); full suite on Colab Linux: 1322 passed, 3 failed before the fixes (two test issues above, one needs a git checkout).
 - Status: merged
 
+🔒 Claude editing docs/ARCHITECTURE.md §14 (2026-10-08T05:20Z)
+
+### [2026-10-08] Claude — D-026 offline bundle for the A100 host
+- Scope: D-022, D-026, docs/EASY_RUN.md
+- Type: review
+- Details: The user reported that the A100 host is on an internal network without internet access and matches the environment of the user's other GPU job (Linux x86_64, CUDA 12.8, PyTorch 2.10.0+cu128), and asked for one zstd file instead of a download URL. easy_run.py now installs a bundled python-build-standalone CPython 3.11 and pinned cp311 wheels with pip --no-index, runs the project from its folder on PYTHONPATH, and checks the bundled data against data/SHA256SUMS; the URL download code was removed. tools/pack_easy_run.py bundle writes nuri-easy-run.tar.zst plus a .sha256 file.
+- Evidence: in WSL (Linux x86_64, no GPU) the unpacked smoke bundle installed all 52 wheels offline, imported torch 2.10.0+cu128 and the project, passed the data check, and stopped at the CUDA check as expected; the full test suite in that venv passed (1245 passed, 20 skipped for missing transformers). A GPU run of the offline bundle is still pending: Colab refused T4 allocation for the rest of the day.
+- Status: accepted (user's environment; D-026)
+
+🔓 Claude done docs/ARCHITECTURE.md §14 (2026-10-08T05:25Z; D-026)
+
