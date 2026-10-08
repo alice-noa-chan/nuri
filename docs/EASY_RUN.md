@@ -17,6 +17,11 @@ page explains the three sides of that flow.
    <offline>/requirements.txt      the pinned top-level packages
    ```
 
+   The top-level packages are torch, numpy, safetensors, tokenizers, tqdm,
+   tensorboard and transformers (the export writes Hugging Face classes).
+   The install step imports every module of the release path
+   (`RELEASE_MODULES` in easy_run.py) and stops at once if one is missing.
+
    The CPython archive is a relocatable python-build-standalone build
    (check it against the release SHA256SUMS). For the wheels, run
    `pip download` with `--platform manylinux_2_28_x86_64 --python-version
