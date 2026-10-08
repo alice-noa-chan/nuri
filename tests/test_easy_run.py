@@ -161,6 +161,7 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
         easy, "EVALUATE", {"base": ["mlm"], "it": [], "embed": ["retrieval"]}
     )
     monkeypatch.setattr(easy, "CALIBRATION_STEPS", 6)
+    monkeypatch.setattr(easy, "CALIBRATION_LOG_EVERY", 1)
     monkeypatch.setattr(easy, "MIN_BASE_STEPS", 2)
     monkeypatch.setattr(
         easy, "STEPS", [s for s in easy.STEPS if s[0] not in ("preflight", "install")]
@@ -254,6 +255,9 @@ def test_calibration_halves_the_micro_batch_on_oom_or_tight_memory(easy, monkeyp
     micro = [c[c.index("--batch-size") + 1] for c in commands]
     accum = [c[c.index("--grad-accum") + 1] for c in commands]
     assert micro == ["64", "32", "16", "64"] and accum == ["2", "4", "8", "1"]
+    # Calibration logs like training (not every step) over enough steps.
+    assert {c[c.index("--log-every") + 1] for c in commands} == {"10"}
+    assert easy.CALIBRATION_STEPS >= 100
     assert state["batches"] == {"embed": {"micro_batch": 16, "grad_accum": 8},
                                 "base-dense": {"micro_batch": 64, "grad_accum": 1}}  # fmt: skip
     assert state["seconds_per_step"]["embed"] == pytest.approx(1.0)

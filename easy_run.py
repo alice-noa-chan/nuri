@@ -94,7 +94,12 @@ EVALUATE = {
     "it": ["reasoning", "curves", "interventions"],
     "embed": ["retrieval"],
 }
-CALIBRATION_STEPS = 30  # measured steps per stage; the first third is warmup
+# Measured steps per stage; the first third is warmup. 30 steps logged every
+# step overestimated the A100 step time by about 21% (0.647 s vs 0.513 s in
+# the real run of base-dense), which would leave about two days of the window
+# unused; 80 steps logged like training measured 0.541 s.
+CALIBRATION_STEPS = 100
+CALIBRATION_LOG_EVERY = 10  # the training default, so logging costs the same
 MAX_MICRO_BATCH = 64  # the fastest measured A100 batch (docs/GPU_CAPACITY.md)
 MIN_MICRO_BATCH = 4
 MEMORY_HEADROOM = 0.85  # calibration peaks above this share of GPU memory are too tight
@@ -568,8 +573,8 @@ def calibration_command(
 ) -> list[str]:
     out = WORK / "calibration" / name
     command = [PYTHON, "scripts/train.py", "--stage", spec["stage"], "--out", str(out),
-               "--steps", str(CALIBRATION_STEPS), "--log-every", "1", "--no-progress",
-               "--batch-size", str(micro), "--grad-accum", str(accum)]  # fmt: skip
+               "--steps", str(CALIBRATION_STEPS), "--log-every", str(CALIBRATION_LOG_EVERY),
+               "--no-progress", "--batch-size", str(micro), "--grad-accum", str(accum)]  # fmt: skip
     if spec["stage"] == "base":
         command += ["--preset", spec["preset"], "--pack-mlm", "--bucket"]
     else:
