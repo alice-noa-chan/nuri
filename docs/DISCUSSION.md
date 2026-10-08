@@ -3726,3 +3726,18 @@ Corrected only the architecture status line to link the newly measured diagnosti
   4. Ruled out: tied-embedding norms favoring frequent tokens (frequent tokens have smaller norms, correlation -0.41).
 - Evidence: CPU checks on the corrected Dense initializer (48-160 validation spans) and the retained Dense Base training log; numbers are diagnostics on one checkpoint.
 - Status: open (item 2 can be A/B-tested from scratch like D-024/D-025, e.g. a higher clip threshold or per-task clipping)
+
+### [2026-10-08] Claude — Span clipping A/B: grad_clip 3.0 not adopted
+- Scope: Q-17, training settings
+- Type: review
+- Details: Tested item 2 of the third-round entry. From-scratch Colab T4 A/B (66M model, 2,000 steps, one seed, D-023/D-024/D-025 and the weight-decay fix in both arms), grad_clip 1.0 vs 3.0 through a wrapper, no code change. Clipped updates 61% -> 2%. Training losses got worse with 3.0 (span 6.908 -> 7.077, MLM 5.890 -> 6.175), held-out full-mask CE improved (8.467 -> 8.039 mid, 7.554 -> 7.436 end), S=4 token F1 fell (0.163 -> 0.147, 0.168 -> 0.150) and repetition rose (0.408 -> 0.483, 0.439 -> 0.464). Mixed, no clear gain: grad_clip stays 1.0. The 1.0 arm repeats the D-025 r50 arm except for the weight-decay fix; held-out CE differs by 0.38 / 0.13 with matching training losses, a rough measure of one-seed noise for these held-out numbers.
+- Evidence: GENERATION_DIAGNOSTICS.md "Further checks"; raw results in a private folder.
+- Status: rejected (item 2 closed)
+
+### [2026-10-08] Claude — easy_run hardening before the 7-day run
+- Scope: D-022, docs/EASY_RUN.md
+- Type: review
+- Details: Before the unattended run: dense products now train first (base-dense, it-dense, embed, then MoE); a deadline (total_hours - package_hours) stops training and packs the finished stages; SIGTERM and any failure still produce easy_run_output.tar with status.json and all logs; the download resumes quiet short transfers and IncompleteRead, finishes on 416, and stops at once on HTTP 4xx; an unpacked-data marker avoids a second 10 GB download. Two test fixes from a full Linux run: the allocation test now freezes the clock, and the canvas full-mask test checks one decoding round only (later rounds are untrained there and fail by seed on Linux; the same failure occurs on pre-D-024 code).
+- Evidence: commits a416baf..69cb0aa; tests/test_easy_run.py (20 tests); full suite on Colab Linux: 1322 passed, 3 failed before the fixes (two test issues above, one needs a git checkout).
+- Status: merged
+
