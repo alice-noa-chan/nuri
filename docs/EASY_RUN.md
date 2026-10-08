@@ -113,11 +113,17 @@ stage stopped at the deadline keeps its training state under
 ## Budget
 
 `budget.total_hours` (168) minus the time already used and
-`budget.reserve_hours` (8, for evaluation, export and packing), times
-`budget.safety` (0.9), is split by the stage shares of D-022
+`budget.reserve_hours` (1, for evaluation, export and packing), times
+`budget.safety` (0.95), is split by the stage shares of D-022
 (50/30/8/6/6). IT and embedding stages stop at `budget.max_epochs` (3)
 passes over their data and their unused time goes to `base-dense`.
 Steps are frozen in `plan.json` once written, because the learning-rate
 schedule depends on the total step count. `budget.package_hours` (1) is
 kept free at the very end: training is stopped at that point even if a
 stage is unfinished, so the output archive is written inside the window.
+
+The margins are small on purpose (D-027). On the A100 check, evaluation
+and export of all five stages took under 10 minutes, and calibration over
+100 steps measures within about 5% of the real step time (30 steps
+overestimated it by about 21%). Measured there: base-dense 0.51 s, base-moe
+0.67 s per optimizer step with micro-batch 32 x 2.
