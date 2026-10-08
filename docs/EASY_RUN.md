@@ -1,61 +1,79 @@
 # Unattended release run with easy_run.py (D-022)
 
-The release run uses about 7 days on one A100 80GB host that nobody watches.
-The project goes over as one archive, the host runs one command, and one
-output archive comes back. This page explains the three sides of that flow.
+The release run uses about 7 days on one A100 80GB host that nobody watches
+and that has **no internet access**. Everything goes over as one zstd
+bundle, the host runs one command, and one output archive comes back. This
+page explains the three sides of that flow.
 
 ## 1. Prepare (this PC)
 
-1. Write a private data spec (`{"entries": {"<name in archive>": "<local path>"}}`)
-   and pack the inputs:
+1. Collect the offline packages in a private folder (once per dependency
+   change). The host matches the environment of our other GPU jobs:
+   Linux x86_64, CUDA 12.8 driver, PyTorch 2.10.0+cu128.
 
    ```text
-   python tools/pack_easy_run.py data --spec <private spec> --out <private folder>/nuri-data.tar
+   <offline>/python/cpython-3.11.*-x86_64-unknown-linux-gnu-install_only.tar.gz
+   <offline>/wheels/*.whl          cp311 manylinux wheels, including the CUDA ones
+   <offline>/requirements.txt      the pinned top-level packages
    ```
 
-   The command prints the archive SHA256. Upload the archive anywhere that
-   serves it over HTTP(S), ideally with resumable (Range) downloads.
-2. Copy `configs/easy_run.example.json` to a private folder, fill in
-   `data.url`, `data.sha256` and the input names inside the archive.
-   Never commit the filled-in file: it names private inputs (D-008).
-3. Commit all code, then pack the code archive. It contains exactly the
-   committed tree plus the private config as `easy_run.json`:
+   The CPython archive is a relocatable python-build-standalone build
+   (check it against the release SHA256SUMS). For the wheels, run
+   `pip download` with `--platform manylinux_2_28_x86_64 --python-version
+   3.11 --only-binary=:all:` and the PyTorch cu128 index. pip skips
+   torch's Linux-only requirements (the `nvidia-*` packages, `triton`,
+   `cuda-bindings`) on a non-Linux PC, so download those explicitly, with
+   the versions from torch's own metadata.
+2. Copy `configs/easy_run.example.json` to a private folder and fill in
+   the input paths inside `data/`. Never commit the filled-in file: it
+   names private inputs (D-008).
+3. Write a private data spec (`{"entries": {"<path inside data/>": "<local
+   file or folder>"}}`), commit all code, then build the bundle:
 
    ```text
-   python tools/pack_easy_run.py code --config <private easy_run.json> --out <private folder>/nuri-easy-run.tar.gz
+   python tools/pack_easy_run.py bundle --config <private easy_run.json> \
+       --data-spec <private spec> --offline <offline folder> \
+       --out <private folder>/nuri-easy-run.tar.zst
    ```
+
+   It contains the committed tree (git archive HEAD), `easy_run.json`,
+   `offline/` and `data/` with `data/SHA256SUMS`, all under one folder
+   `nuri/`. It also writes `nuri-easy-run.tar.zst.sha256`. Hand over both
+   files.
 
 ## 2. Run (GPU host)
 
 ```text
-tar -xzf nuri-easy-run.tar.gz -C nuri && cd nuri
-python easy_run.py
+sha256sum -c nuri-easy-run.tar.zst.sha256
+tar --zstd -xf nuri-easy-run.tar.zst        (or: zstd -dc nuri-easy-run.tar.zst | tar -x)
+cd nuri
+python3 easy_run.py
 ```
 
-That is all. The script checks the host, installs the package, downloads
-and verifies the data, measures each stage on the real data, plans the
-steps, trains, evaluates and exports all five models, and packs the
-result. The stages run in the order base-dense, it-dense, embed,
-base-moe, it-moe, so the main (dense) family is finished first.
+That is all. The script checks the GPU and the bundle, sets up the
+bundled Python 3.11 with the bundled packages (`pip --no-index`), checks
+every data file, measures each stage on the real data, plans the steps,
+trains, evaluates and exports all five models, and packs the result. It
+never uses the network. The stages run in the order base-dense,
+it-dense, embed, base-moe, it-moe, so the main (dense) family is
+finished first.
 
-If the process or the machine stops, run `python easy_run.py` again in
-the same folder: finished steps are skipped, the download resumes, and
-training resumes from the newest saved state (saved every 30 minutes).
-The budget clock starts at the first run, so a restart does not add
-time.
+If the process or the machine stops, run `python3 easy_run.py` again in
+the same folder: finished steps are skipped and training resumes from the
+newest saved state (saved every 30 minutes). The budget clock starts at
+the first run, so a restart does not add time.
 
-Requirements: Linux, Python 3.10 or newer, an NVIDIA driver with a CUDA
-build of PyTorch (or network access so pip can install one), `zstd` only
-for `.tar.zst` data, and about 300 GB of free disk.
+Requirements: Linux x86_64, any `python3` 3.8 or newer to start the
+script, `tar` (and `zstd` or a `tar` with `--zstd` to unpack), an NVIDIA
+driver for CUDA 12.8 (`nvidia-smi` must work), and about 300 GB of free
+disk.
 
 ### What happens without supervision
 
 | Situation | Behavior |
 |---|---|
-| Download breaks | Retried up to 20 times, continuing from the received bytes (also when the connection closes quietly before the end) |
-| Wrong or expired URL | An HTTP 4xx answer stops at once with the code; 5xx answers are retried |
-| Wrong archive | SHA256 mismatch stops before unpacking; the bad file is set aside so a rerun downloads again |
-| Stop right after unpacking | A marker in the data folder records the unpacked archive, so a rerun does not download again |
+| Damaged or incomplete unpacking | The data check names the damaged files and stops; unpack the bundle again |
+| Stop during installation | The next run reuses what is installed and reruns the offline pip install |
 | Batch does not fit | Calibration halves the micro-batch and doubles accumulation (same effective batch) until the peak stays under 85% of GPU memory |
 | Out of memory later | Gradient checkpointing is switched on for unfinished stages and training resumes |
 | Other crash | run_release is restarted up to 4 times; each restart resumes |
@@ -83,7 +101,7 @@ Bring back `easy_run_output.tar`. It contains:
 
 The archive is written whenever easy_run ends, also after a failure or a
 stop. If `status.json` is not `"complete"` and time is left, run
-`python easy_run.py` again: it continues and packs again at the end. A
+`python3 easy_run.py` again: it continues and packs again at the end. A
 stage stopped at the deadline keeps its training state under
 `easy_run_work/runs/<stage>/` but is not exported.
 
