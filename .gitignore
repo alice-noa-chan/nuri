@@ -19,9 +19,11 @@ __pycache__/
 /runs/
 /checkpoints/
 
-# easy_run.py: the real configuration names the data download, so it stays
-# private; the work folder and the output archive are generated on the host.
+# easy_run.py: the real configuration names private inputs, so it stays
+# private; offline/ (bundled Python and wheels) only exists inside the
+# bundle; the work folder and the output archive are generated on the host.
 /easy_run.json
+/offline/
 /easy_run_work/
 /easy_run_output/
 /easy_run_output.tar
