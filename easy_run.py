@@ -268,7 +268,7 @@ def load_config(path: Path | None = None) -> dict:
         raise SystemExit(
             "budget.package_hours must be at least 0 and below total_hours"
         )
-    if not 0 < budget.get("safety", 0.9) <= 1:
+    if not 0 < budget.get("safety", 0.95) <= 1:
         raise SystemExit("budget.safety must be in (0, 1]")
     train = config.get("train", {})
     for key, default in (("batch_size", 64), ("embed_batch_size", 128)):
@@ -648,9 +648,12 @@ def allocate_steps(config: dict, state: dict) -> dict:
     """
     budget = config["budget"]
     elapsed = (now() - state["started_at"]) / 3600
-    reserve = budget.get("reserve_hours", 8)  # evaluation, export and packaging
+    # Evaluation and export of all five stages took under 10 minutes on the
+    # A100 check (their sizes are fixed), and the deadline stop protects the
+    # archive if the run is slower than planned, so the margins are small (D-027).
+    reserve = budget.get("reserve_hours", 1)  # evaluation, export and packaging
     hours = max(0.0, budget["total_hours"] - elapsed - reserve) * budget.get(
-        "safety", 0.9
+        "safety", 0.95
     )
     shares = budget["shares"]
     total_share = sum(shares.values())
