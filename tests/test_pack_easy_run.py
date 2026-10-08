@@ -61,9 +61,9 @@ def test_bundle_holds_code_config_offline_packages_and_checked_data(tmp_path):
     config.write_text(json.dumps(make_config("data")))
     out = tmp_path / "bundle.tar.zst"
     digest = packer.pack_bundle(config, spec, tmp_path / "offline", out)
-    assert (
-        tmp_path / "bundle.tar.zst.sha256"
-    ).read_text() == f"{digest}  bundle.tar.zst\n"
+    # Exact bytes: sha256sum -c on Linux fails on a CRLF line ending.
+    sidecar = (tmp_path / "bundle.tar.zst.sha256").read_bytes()
+    assert sidecar == f"{digest}  bundle.tar.zst\n".encode("ascii")
 
     unpack(out, tmp_path / "host")
     top = tmp_path / "host" / "nuri"

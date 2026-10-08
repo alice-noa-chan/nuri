@@ -172,8 +172,10 @@ def pack_bundle(
             add_bytes(bundle, "".join(sums).encode("utf-8"), "data/SHA256SUMS")
     temporary.replace(out)
     digest = file_sha256(out)
-    out.with_name(out.name + ".sha256").write_text(
-        f"{digest}  {out.name}\n", encoding="utf-8"
+    # Bytes, not text: on Windows write_text would end the line with CRLF,
+    # and `sha256sum -c` on the Linux host would then look for "name\r".
+    out.with_name(out.name + ".sha256").write_bytes(
+        f"{digest}  {out.name}\n".encode("ascii")
     )
     return digest
 
