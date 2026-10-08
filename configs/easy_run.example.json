@@ -35,8 +35,8 @@
   "budget": {
     "total_hours": 168,
     "package_hours": 1,
-    "reserve_hours": 8,
-    "safety": 0.9,
+    "reserve_hours": 1,
+    "safety": 0.95,
     "max_epochs": 3,
     "shares": {
       "base-dense": 50,
