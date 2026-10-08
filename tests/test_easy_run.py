@@ -1,10 +1,8 @@
 import hashlib
 import importlib.util
-import io
 import json
 import sys
 import tarfile
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -38,6 +36,10 @@ def easy(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "OUTPUT", tmp_path / "easy_run_output")
     monkeypatch.setattr(module, "ARCHIVE", tmp_path / "easy_run_output.tar")
     monkeypatch.setattr(module, "CONFIG_PATH", tmp_path / "easy_run.json")
+    monkeypatch.setattr(module, "OFFLINE", tmp_path / "offline")
+    monkeypatch.setattr(module, "VENV", work / "venv")
+    monkeypatch.setattr(module, "DATA_MARKER", work / "data_verified")
+    monkeypatch.setattr(module, "PYTHON", sys.executable)
     return module
 
 
@@ -64,21 +66,20 @@ def make_data(folder: Path) -> None:
             for i in range(12)])  # fmt: skip
 
 
-def make_archive(tmp_path: Path) -> bytes:
-    source = tmp_path / "source"
-    make_data(source)
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as bundle:
-        for item in sorted(source.rglob("*")):
-            bundle.add(item, arcname=str(item.relative_to(source)), recursive=False)
-    return buffer.getvalue()
+def write_manifest(folder: Path) -> None:
+    """data/SHA256SUMS in sha256sum format, as tools/pack_easy_run.py writes it."""
+    lines = [
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(folder).as_posix()}\n"
+        for path in sorted(folder.rglob("*"))
+        if path.is_file() and path.name != "SHA256SUMS"
+    ]
+    (folder / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
 
 
-def make_config(payload: bytes, **budget) -> dict:
+def make_config(data_folder="data", **budget) -> dict:
     return {
         "schema_version": 1,
-        "data": {"url": "https://example.invalid/data.tar",
-                 "sha256": hashlib.sha256(payload).hexdigest()},
+        "data": {"folder": str(data_folder)},
         "inputs": {"tokenizer": "tok", "corpus": ["train/corpus=1"],
                    "instructions": "train/it.jsonl", "pairs": "train/pairs.jsonl"},
         "holdouts": {
@@ -97,95 +98,27 @@ def make_config(payload: bytes, **budget) -> dict:
     }  # fmt: skip
 
 
-class FakeResponse(io.BytesIO):
-    def __init__(self, payload: bytes, status: int):
-        super().__init__(payload)
-        self.status = status
-        self.headers = {"Content-Length": str(len(payload))}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
-
-def serve(monkeypatch, easy, payload: bytes, fail_first_after: int | None = None):
-    """Answer urlopen with the payload, honoring Range; optionally break the first transfer."""
-    calls = []
-
-    def urlopen(request, timeout=None):
-        header = request.headers.get("Range")
-        start = int(header.split("=")[1].rstrip("-")) if header else 0
-        calls.append(start)
-        if fail_first_after is not None and len(calls) == 1:
-            part = easy.WORK / "data.tar.part"
-            part.write_bytes(payload[:fail_first_after])
-            raise OSError("connection reset")
-        return FakeResponse(payload[start:], 206 if start else 200)
-
-    monkeypatch.setattr(easy.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(easy.time, "sleep", lambda seconds: None)
-    return calls
-
-
 def test_config_validation_names_the_problem(easy, tmp_path):
     with pytest.raises(SystemExit, match="easy_run.json is missing"):
         easy.load_config()
-    config = make_config(b"x")
+    config = make_config("data")
     config["budget"]["shares"].pop("embed")
     easy.CONFIG_PATH.write_text(json.dumps(config))
     with pytest.raises(SystemExit, match="budget.shares"):
         easy.load_config()
-    config = make_config(b"x")
-    config["data"]["url"] = "ftp://x"
-    easy.CONFIG_PATH.write_text(json.dumps(config))
-    with pytest.raises(SystemExit, match="data.url"):
-        easy.load_config()
-    config = make_config(b"x", total_hours=1, package_hours=1)
+    config = make_config("data", total_hours=1, package_hours=1)
     easy.CONFIG_PATH.write_text(json.dumps(config))
     with pytest.raises(SystemExit, match="package_hours"):
         easy.load_config()
 
 
 def test_paths_resolve_inside_the_data_folder_and_keep_weights(easy):
-    config = make_config(b"x")
-    base = easy.WORK / "data"
+    config = make_config("data")
+    base = easy.ROOT / "data"
     assert easy.resolve(config, "train/corpus=0.6") == f"{base / 'train/corpus'}=0.6"
     assert easy.resolve(config, ["a", "b=2"]) == [str(base / "a"), f"{base / 'b'}=2"]
     assert easy.strip_weight("folder=0.25") == "folder"
     assert easy.strip_weight("odd=name") == "odd=name"
-
-
-def test_download_resumes_and_extraction_refuses_unsafe_paths(
-    easy, monkeypatch, tmp_path
-):
-    payload = make_archive(tmp_path)
-    calls = serve(monkeypatch, easy, payload, fail_first_after=1000)
-    easy.WORK.mkdir(parents=True)
-    easy.download("https://example.invalid/data.tar", easy.WORK / "data.tar")
-    assert calls == [0, 1000]
-    assert (easy.WORK / "data.tar").read_bytes() == payload
-
-    bad = io.BytesIO()
-    with tarfile.open(fileobj=bad, mode="w") as bundle:
-        info = tarfile.TarInfo("../escape.txt")
-        info.size = 1
-        bundle.addfile(info, io.BytesIO(b"x"))
-    (tmp_path / "bad.tar").write_bytes(bad.getvalue())
-    with pytest.raises(SystemExit, match="unsafe path"):
-        easy.safe_extract(tmp_path / "bad.tar", tmp_path / "out")
-
-
-def test_a_wrong_checksum_stops_before_unpacking(easy, monkeypatch, tmp_path):
-    payload = make_archive(tmp_path)
-    serve(monkeypatch, easy, payload)
-    config = make_config(payload)
-    config["data"]["sha256"] = "0" * 64
-    easy.WORK.mkdir(parents=True)
-    with pytest.raises(SystemExit, match="does not match"):
-        easy.fetch_data(config, {})
-    assert not (easy.WORK / "data").exists()
 
 
 def test_step_time_uses_the_mean_after_warmup(easy, tmp_path):
@@ -202,11 +135,11 @@ def test_step_time_uses_the_mean_after_warmup(easy, tmp_path):
 def test_allocation_caps_small_stages_and_gives_the_rest_to_base_dense(
     easy, monkeypatch, tmp_path
 ):
-    make_data(easy.WORK / "data")
+    make_data(tmp_path / "data")
     # A frozen clock: on a slow machine the real time between the start and
     # the planning call would already cost a step of base-moe.
     monkeypatch.setattr(easy, "now", lambda: 1000.0)
-    config = make_config(b"x", total_hours=10)
+    config = make_config(tmp_path / "data", total_hours=10)
     state = {"started_at": easy.now(),
              "seconds_per_step": dict.fromkeys(easy.STAGES, 1.0)}  # fmt: skip
     steps = easy.allocate_steps(config, state)
@@ -220,7 +153,7 @@ def test_allocation_caps_small_stages_and_gives_the_rest_to_base_dense(
 
 
 def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
-    """Download, calibrate, plan, train every stage, evaluate, export and package."""
+    """Verify data, calibrate, plan, train every stage, evaluate, export and package."""
     stages = {name: dict(spec) for name, spec in easy.STAGES.items()}
     stages["base-dense"]["preset"] = stages["base-moe"]["preset"] = "tiny"
     monkeypatch.setattr(easy, "STAGES", stages)
@@ -232,15 +165,15 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     monkeypatch.setattr(
         easy, "STEPS", [s for s in easy.STEPS if s[0] not in ("preflight", "install")]
     )
-    payload = make_archive(tmp_path)
-    serve(monkeypatch, easy, payload)
+    make_data(tmp_path / "data")
+    write_manifest(tmp_path / "data")
     monkeypatch.setattr(
         easy, "now", lambda: 0.0
     )  # the test's own runtime is not budget
     # The frozen clock never reaches a deadline, but the stop timer runs in
     # real seconds; keep it far away.
     monkeypatch.setattr(easy, "deadline", lambda config, state: 1e5)
-    config = make_config(payload, total_hours=0.01)
+    config = make_config(tmp_path / "data", total_hours=0.01)
     easy.CONFIG_PATH.write_text(json.dumps(config))
 
     easy.main()
@@ -265,7 +198,7 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     assert (output / "logs" / "base-dense" / "holdout_log.jsonl").is_file()
     with tarfile.open(easy.ARCHIVE) as bundle:
         assert "easy_run_output/models/nuri-base/model.safetensors" in bundle.getnames()
-    assert not (easy.WORK / "data.tar").exists()  # deleted after unpacking
+    assert easy.DATA_MARKER.is_file()  # the data is checked only once
 
     # A second run finds every step finished and does nothing.
     easy.main()
@@ -274,8 +207,6 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
 
 def test_example_config_passes_validation_once_filled_in(easy):
     config = json.loads((ROOT / "configs" / "easy_run.example.json").read_text())
-    config["data"]["url"] = "https://example.invalid/data.tar"
-    config["data"]["sha256"] = "a" * 64
     easy.CONFIG_PATH.write_text(json.dumps(config))
     loaded = easy.load_config()
     assert set(loaded["budget"]["shares"]) == set(easy.STAGES)
@@ -307,7 +238,7 @@ def test_calibration_halves_the_micro_batch_on_oom_or_tight_memory(easy, monkeyp
         "STAGES",
         {"embed": easy.STAGES["embed"], "base-dense": easy.STAGES["base-dense"]},
     )
-    config = make_config(b"x")
+    config = make_config("data")
     config["train"]["embed_batch_size"] = 128
     config["train"]["batch_size"] = 64
     gb = 1e9
@@ -332,7 +263,7 @@ def test_calibration_stops_on_other_failures(easy, monkeypatch):
     monkeypatch.setattr(easy, "STAGES", {"base-dense": easy.STAGES["base-dense"]})
     fake_calibration(easy, monkeypatch, [(1, "ValueError: bad corpus", 0)])
     with pytest.raises(SystemExit, match="calibration of base-dense failed"):
-        easy.calibrate(make_config(b"x"), {"host": {}})
+        easy.calibrate(make_config("data"), {"host": {}})
 
 
 def write_plan(easy, finished=("base-dense",)) -> Path:
@@ -356,7 +287,7 @@ def fake_runs(easy, monkeypatch, results):
 def test_training_retries_and_turns_on_checkpointing_after_oom(easy, monkeypatch):
     easy.WORK.mkdir(parents=True)
     plan_path = write_plan(easy)
-    config = make_config(b"x", total_hours=10)
+    config = make_config("data", total_hours=10)
     state = {"plan": str(plan_path), "started_at": easy.now()}
     results = [(1, "CUDA out of memory"), (0, "")]
     fake_runs(easy, monkeypatch, results)
@@ -376,7 +307,7 @@ def test_training_retries_and_turns_on_checkpointing_after_oom(easy, monkeypatch
 def test_training_stops_at_the_deadline_and_moves_on(easy, monkeypatch):
     easy.WORK.mkdir(parents=True)
     plan_path = write_plan(easy)
-    config = make_config(b"x", total_hours=10, package_hours=1)
+    config = make_config("data", total_hours=10, package_hours=1)
     clock = {"now": 0.0}
     monkeypatch.setattr(easy, "now", lambda: clock["now"])
     state = {"plan": str(plan_path), "started_at": 0.0}
@@ -433,7 +364,7 @@ def test_a_failed_run_still_packages_what_is_finished(easy, monkeypatch):
     (model / "model.safetensors").write_bytes(b"weights")
     (easy.WORK / "logs").mkdir()
     (easy.WORK / "logs" / "train.log").write_text("it-dense crashed")
-    easy.CONFIG_PATH.write_text(json.dumps(make_config(b"x")))
+    easy.CONFIG_PATH.write_text(json.dumps(make_config("data")))
 
     def broken(config, state):
         raise SystemExit("training kept failing")
@@ -453,7 +384,7 @@ def test_a_failed_run_still_packages_what_is_finished(easy, monkeypatch):
 
 
 def test_batches_must_be_powers_of_two(easy):
-    config = make_config(b"x")
+    config = make_config("data")
     config["train"]["batch_size"] = 48
     easy.CONFIG_PATH.write_text(json.dumps(config))
     with pytest.raises(SystemExit, match="power of two"):
@@ -468,79 +399,99 @@ def test_dense_products_train_before_the_moe_variants(easy):
             assert order.index(spec["init"]) < order.index(name)
 
 
-class ShortResponse(FakeResponse):
-    """Announces the full length but delivers only the first `keep` bytes, without error."""
+def test_data_is_checked_against_the_bundled_list_once(easy, monkeypatch, tmp_path):
+    folder = tmp_path / "data"
+    make_data(folder)
+    write_manifest(folder)
+    config = make_config(folder)
+    easy.verify_data(config, {})
+    assert easy.DATA_MARKER.is_file()
 
-    def __init__(self, payload: bytes, status: int, keep: int):
-        super().__init__(payload[:keep], status)
-        self.headers = {"Content-Length": str(len(payload))}
-
-
-def test_download_survives_short_and_broken_transfers(easy, monkeypatch, tmp_path):
-    payload = make_archive(tmp_path)
-    calls = []
-
-    def urlopen(request, timeout=None):
-        header = request.headers.get("Range")
-        start = int(header.split("=")[1].rstrip("-")) if header else 0
-        calls.append(start)
-        if len(calls) == 1:  # the connection closes quietly after 700 bytes
-            return ShortResponse(payload, 200, keep=700)
-        if len(calls) == 2:  # the next one breaks with an incomplete read
-            raise easy.http.client.IncompleteRead(b"")
-        return FakeResponse(payload[start:], 206)
-
-    monkeypatch.setattr(easy.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(easy.time, "sleep", lambda seconds: None)
-    easy.WORK.mkdir(parents=True)
-    easy.download("https://example.invalid/data.tar", easy.WORK / "data.tar")
-    assert calls == [0, 700, 700]
-    assert (easy.WORK / "data.tar").read_bytes() == payload
+    hashed = []
+    monkeypatch.setattr(easy, "file_sha256", lambda path: hashed.append(path) or "x")
+    easy.DATA_MARKER.write_text("x")  # the marker matches the (fake) list digest
+    easy.verify_data(config, {})
+    assert len(hashed) == 1  # only the list itself, not every data file
+    monkeypatch.undo()
 
 
-def http_error(code: int) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("https://example.invalid", code, "x", {}, None)
+def test_damaged_or_missing_data_stops_with_a_clear_message(easy, tmp_path):
+    folder = tmp_path / "data"
+    make_data(folder)
+    write_manifest(folder)
+    config = make_config(folder)
+    (folder / "train" / "it.jsonl").write_text("changed in transfer")
+    with pytest.raises(SystemExit, match="1 data files are missing or damaged"):
+        easy.verify_data(config, {})
+    assert not easy.DATA_MARKER.exists()
+    (folder / "SHA256SUMS").unlink()
+    with pytest.raises(SystemExit, match="SHA256SUMS is missing"):
+        easy.verify_data(config, {})
 
 
-def test_download_finishes_on_416_and_stops_on_client_errors(easy, monkeypatch):
-    easy.WORK.mkdir(parents=True)
-    (easy.WORK / "data.tar.part").write_bytes(b"complete")
-
-    def answer(code):
-        def urlopen(request, timeout=None):
-            raise http_error(code)
-
-        monkeypatch.setattr(easy.urllib.request, "urlopen", urlopen)
-
-    monkeypatch.setattr(easy.time, "sleep", lambda seconds: None)
-    answer(416)  # the resume asks for bytes past the end: nothing is missing
-    easy.download("https://example.invalid/data.tar", easy.WORK / "data.tar")
-    assert (easy.WORK / "data.tar").read_bytes() == b"complete"
-
-    answer(404)
-    with pytest.raises(SystemExit, match="HTTP 404"):
-        easy.download("https://example.invalid/x.tar", easy.WORK / "x.tar")
-    answer(503)  # server errors are retried until the attempts run out
-    monkeypatch.setattr(easy, "DOWNLOAD_ATTEMPTS", 3)
-    with pytest.raises(SystemExit, match="failed 3 times"):
-        easy.download("https://example.invalid/x.tar", easy.WORK / "x.tar")
+def make_offline(folder: Path) -> None:
+    (folder / "python").mkdir(parents=True)
+    (
+        folder
+        / "python"
+        / "cpython-3.11.0-x86_64-unknown-linux-gnu-install_only.tar.gz"
+    ).write_bytes(b"")
+    (folder / "wheels").mkdir()
+    (folder / "wheels" / "torch-0-py3-none-any.whl").write_bytes(b"")
+    (folder / "requirements.txt").write_text("torch\n")
 
 
-def test_unpacked_data_is_not_downloaded_again(easy, monkeypatch, tmp_path):
-    payload = make_archive(tmp_path)
-    calls = serve(monkeypatch, easy, payload)
-    config = make_config(payload)
-    easy.WORK.mkdir(parents=True)
-    easy.fetch_data(config, {})
-    assert calls == [0] and not (easy.WORK / "data.tar").exists()
+def test_install_uses_only_the_bundled_python_and_wheels(easy, monkeypatch):
+    make_offline(easy.OFFLINE)
+    commands = []
 
-    # Interrupted after the archive was deleted but before "data" was recorded.
-    easy.fetch_data(config, {})
-    assert calls == [0]
-    assert (easy.WORK / "data" / "tok" / "tokenizer.json").is_file()
+    def check(command):
+        commands.append(command)
+        if command[0] == "tar":  # unpack: python-build-standalone has python/bin
+            (Path(command[-1]) / "python" / "bin").mkdir(parents=True)
+            (Path(command[-1]) / "python" / "bin" / "python3").write_text("")
+        if command[1:3] == ["-m", "venv"]:
+            (Path(command[-1]) / "bin").mkdir(parents=True)
+            (Path(command[-1]) / "bin" / "python").write_text("")
 
-    # A different archive (new SHA256) is fetched again.
-    config["data"]["sha256"] = "0" * 64
-    with pytest.raises(SystemExit, match="does not match"):
-        easy.fetch_data(config, {})
-    assert calls == [0, 0]
+    found = {"cuda": True, "torch": "2.10.0+cu128", "cuda_runtime": "12.8",
+             "gpu": "NVIDIA A100-SXM4-80GB", "memory_gb": 85.0}  # fmt: skip
+    monkeypatch.setattr(easy, "check", check)
+    monkeypatch.setattr(easy, "probe_torch", lambda python: found)
+    state = {}
+    easy.install(make_config("data"), state)
+    assert commands[0][:2] == ["tar", "-xzf"]
+    assert commands[1][1:] == ["-m", "venv", str(easy.VENV)]
+    pip = commands[2]
+    assert pip[1:4] == ["-m", "pip", "install"] and "--no-index" in pip
+    assert pip[pip.index("--find-links") + 1] == str(easy.OFFLINE / "wheels")
+    assert state["python"] == str(easy.VENV / "bin" / "python") == easy.PYTHON
+    assert state["host"]["torch"] == "2.10.0+cu128"
+
+    # A second install (after an interruption) only reruns pip.
+    commands.clear()
+    easy.install(make_config("data"), state)
+    assert len(commands) == 1 and commands[0] == pip
+
+    found["cuda"] = False
+    with pytest.raises(SystemExit, match="does not see a CUDA GPU"):
+        easy.install(make_config("data"), {})
+
+
+def test_preflight_reads_the_gpu_from_nvidia_smi(easy, monkeypatch):
+    make_offline(easy.OFFLINE)
+
+    class Result:
+        returncode, stderr = 0, ""
+        stdout = "NVIDIA A100-SXM4-80GB, 81920, 570.86\n"
+
+    monkeypatch.setattr(easy.subprocess, "run", lambda *a, **k: Result())
+    state = {}
+    easy.preflight(make_config("data"), state)
+    assert state["host"]["gpu"] == "NVIDIA A100-SXM4-80GB"
+    assert state["host"]["memory_gb"] == pytest.approx(85.9, abs=0.1)
+    assert state["host"]["driver"] == "570.86"
+
+    (easy.OFFLINE / "requirements.txt").unlink()
+    with pytest.raises(SystemExit, match="requirements.txt"):
+        easy.preflight(make_config("data"), {})

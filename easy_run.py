@@ -1,20 +1,24 @@
-"""One-command release training on a single A100 80GB host.
+"""One-command release training on a single A100 80GB host without internet.
 
-Usage (on the GPU host, inside the unpacked project folder):
-  python easy_run.py
+Usage (on the GPU host, inside the unpacked bundle folder):
+  python3 easy_run.py
 
 Run the same command again after any interruption; it continues where it
-stopped. Everything is driven by easy_run.json next to this file (copy
-configs/easy_run.example.json and fill it in; keep the real file private,
-because it names the data download). No other arguments are needed.
+stopped. Everything is driven by easy_run.json next to this file (made by
+tools/pack_easy_run.py from a private copy of configs/easy_run.example.json).
+No other arguments are needed and nothing is downloaded: the bundle carries
+its own Python, the pinned packages and the data.
 
 What it does, in order. Each finished step is recorded in
 easy_run_work/state.json and skipped on the next run:
 
-1. preflight   Check Python, CUDA, the GPU and free disk space.
-2. install     pip-install this package and its training extras (once).
-3. data        Download the data archive from the configured URL (resuming
-               a partial download), verify its SHA256 and unpack it.
+1. preflight   Check the launcher Python, the NVIDIA driver and GPU, free
+               disk space and the bundled offline files.
+2. install     Unpack the bundled CPython 3.11 into easy_run_work/python,
+               create easy_run_work/venv and install the pinned wheels from
+               offline/wheels with pip --no-index. Check that PyTorch sees
+               CUDA.
+3. data        Check every data file against data/SHA256SUMS (once).
 4. calibrate   Train each release stage for a few steps on the real data,
                pick a micro-batch that fits in GPU memory (the effective
                batch stays fixed; accumulation makes up the rest) and
@@ -35,7 +39,6 @@ state.json), so a restart does not grant extra time.
 from __future__ import annotations
 
 import hashlib
-import http.client
 import json
 import math
 import os
@@ -47,8 +50,6 @@ import tarfile
 import threading
 import time
 from collections import deque
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,7 +60,10 @@ STATE_PATH = WORK / "state.json"
 LOG_PATH = WORK / "easy_run.log"
 OUTPUT = ROOT / "easy_run_output"
 ARCHIVE = ROOT / "easy_run_output.tar"
-PYTHON = sys.executable
+OFFLINE = ROOT / "offline"  # bundled CPython archive, wheels and requirements.txt
+VENV = WORK / "venv"
+DATA_MARKER = WORK / "data_verified"  # holds the SHA256 of the checked data list
+PYTHON = sys.executable  # replaced by the venv Python once it is installed
 INTERRUPTED_EXIT_CODE = 75  # scripts/train.py and run_release.py after a saved stop
 
 # The release stages (ARCHITECTURE.md D-004, D-005, D-007), in training order.
@@ -98,7 +102,6 @@ TRAIN_ATTEMPTS = 4  # run_release restarts after failures (each resumes)
 OOM_MARKERS = ("out of memory", "outofmemoryerror")
 MIN_BASE_STEPS = 100  # a base stage shorter than this is not worth running
 MIN_FREE_DISK_GB = 300
-UNPACKED_MARKER = ".easy_run_unpacked"  # written into the data folder after unpacking
 STOP_GRACE_SECONDS = 20 * 60  # a stopped child that has not exited by then is killed
 
 
@@ -235,17 +238,12 @@ def load_config(path: Path | None = None) -> dict:
     path = path or CONFIG_PATH
     if not path.exists():
         raise SystemExit(
-            f"{path.name} is missing. Copy configs/easy_run.example.json to {path.name} "
-            "and fill in the data URL, its SHA256 and the input paths."
+            f"{path.name} is missing. Build the bundle with tools/pack_easy_run.py, "
+            "which puts the filled-in config next to this file."
         )
     config = json.loads(path.read_text(encoding="utf-8"))
     if config.get("schema_version") != 1:
         raise SystemExit("easy_run.json needs schema_version 1")
-    data = config.get("data", {})
-    if not data.get("url", "").startswith(("https://", "http://")):
-        raise SystemExit("data.url must be an http(s) download URL")
-    if len(data.get("sha256", "")) != 64:
-        raise SystemExit("data.sha256 must be the 64-character SHA256 of the archive")
     inputs = config.get("inputs", {})
     for key in ("tokenizer", "corpus", "instructions", "pairs"):
         if not inputs.get(key):
@@ -278,7 +276,18 @@ def load_config(path: Path | None = None) -> dict:
 
 
 def data_dir(config: dict) -> Path:
-    return WORK / config["data"].get("folder", "data")
+    """The data folder of the bundle (absolute paths are used as given)."""
+    return ROOT / config.get("data", {}).get("folder", "data")
+
+
+def data_manifest(config: dict) -> Path:
+    return data_dir(config) / config.get("data", {}).get("manifest", "SHA256SUMS")
+
+
+def use_python(state: dict) -> None:
+    """Run every later command with the installed venv Python, once there is one."""
+    global PYTHON
+    PYTHON = state.get("python", PYTHON)
 
 
 def resolve(config: dict, value):
@@ -295,155 +304,146 @@ def resolve(config: dict, value):
 
 def preflight(config: dict, state: dict) -> None:
     """Fail early on a host that cannot run the plan; record what was found."""
-    if sys.version_info < (3, 10):
-        raise SystemExit("Python 3.10 or newer is required")
+    if sys.version_info < (3, 8):
+        raise SystemExit("python3 3.8 or newer is needed to start easy_run.py")
     free_gb = shutil.disk_usage(ROOT).free / 1e9
     if free_gb < MIN_FREE_DISK_GB:
         log(
             f"warning: only {free_gb:.0f} GB free; {MIN_FREE_DISK_GB} GB or more is recommended"
         )
-    probe = (
-        "import json, torch; ok = torch.cuda.is_available(); "
-        "p = torch.cuda.get_device_properties(0) if ok else None; "
-        "print(json.dumps({'cuda': ok, 'torch': torch.__version__, "
-        "'gpu': p.name if p else None, 'memory_gb': p.total_memory / 1e9 if p else 0}))"
-    )
-    result = subprocess.run([PYTHON, "-c", probe], capture_output=True, text=True)
-    if result.returncode != 0:
-        log("PyTorch is not importable yet; it will be installed in the next step")
-        state["host"] = {"free_disk_gb": round(free_gb)}
-        return
-    host = json.loads(result.stdout.strip().splitlines()[-1])
-    if not host["cuda"]:
-        raise SystemExit("CUDA is not available; this job needs an NVIDIA GPU")
-    if "A100" not in host["gpu"] or host["memory_gb"] < 79:
+    offline_files(check_only=True)
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"nvidia-smi failed ({error}); an NVIDIA driver is needed")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise SystemExit(f"nvidia-smi found no GPU: {result.stderr.strip()}")
+    name, memory_mib, driver = [
+        part.strip() for part in result.stdout.strip().splitlines()[0].split(",")
+    ]
+    host = {
+        "gpu": name,
+        "memory_gb": float(memory_mib) * 1024**2 / 1e9,
+        "driver": driver,
+        "free_disk_gb": round(free_gb),
+    }
+    if "A100" not in name or host["memory_gb"] < 79:
         log(
-            f"warning: expected an A100 80GB, found {host['gpu']} ({host['memory_gb']:.0f} GB)"
+            f"warning: expected an A100 80GB, found {name} ({host['memory_gb']:.0f} GB)"
         )
-    host["free_disk_gb"] = round(free_gb)
     state["host"] = host
     log(f"host: {host}")
 
 
-def install(config: dict, state: dict) -> None:
-    """Install the package with TensorBoard support; torch comes from the host image if present."""
-    check([PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
-    check([PYTHON, "-m", "pip", "install", "-e", ".[tensorboard]"])
-    preflight(config, state)  # now that torch is surely installed
-    if not state.get("host", {}).get("cuda"):
-        raise SystemExit("CUDA is not available after installation")
-
-
-DOWNLOAD_ATTEMPTS = 20
-RETRYABLE_HTTP = {408, 425, 429}  # plus every 5xx; other 4xx answers are final
-
-
-def download(url: str, target: Path) -> None:
-    """Download with resume: a partial file continues with an HTTP Range request.
-
-    A transfer that ends early (a dropped connection, with or without an
-    error) keeps its bytes and the next attempt continues from there. A
-    "416 Range Not Satisfiable" answer to a resume means the partial file is
-    already complete. Client errors such as 403 or 404 stop at once, because
-    retrying cannot fix a wrong or expired URL.
-    """
-    partial = target.with_suffix(target.suffix + ".part")
-    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
-        offset = partial.stat().st_size if partial.exists() else 0
-        request = urllib.request.Request(
-            url, headers={"Range": f"bytes={offset}-"} if offset else {}
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                if offset and response.status != 206:
-                    log("server ignored the resume request; restarting the download")
-                    offset = 0
-                length = response.headers.get("Content-Length")
-                expected = offset + int(length) if length else None
-                log(
-                    f"downloading from byte {offset} ({length or 'unknown'} bytes to go)"
-                )
-                with partial.open("ab" if offset else "wb") as handle:
-                    shutil.copyfileobj(response, handle, length=16 * 1024 * 1024)
-            received = partial.stat().st_size
-            if expected is not None and received != expected:
-                raise OSError(f"transfer ended at byte {received} of {expected}")
-            os.replace(partial, target)
-            return
-        except urllib.error.HTTPError as error:
-            if error.code == 416 and offset:
-                log("the partial download is already complete")
-                os.replace(partial, target)
-                return
-            if error.code < 500 and error.code not in RETRYABLE_HTTP:
-                raise SystemExit(
-                    f"the data URL answered HTTP {error.code}; check data.url"
-                ) from error
-            problem = f"HTTP {error.code}"
-        except (OSError, http.client.HTTPException) as error:
-            problem = f"{type(error).__name__}: {error}"
-        wait = min(300, 10 * attempt)
-        log(f"download attempt {attempt} failed ({problem}); retrying in {wait}s")
-        time.sleep(wait)
-    raise SystemExit(f"the data download failed {DOWNLOAD_ATTEMPTS} times")
-
-
-def safe_extract(archive: Path, destination: Path) -> None:
-    """Unpack .tar, .tar.gz or .tar.zst, refusing paths that leave the destination."""
-    destination.mkdir(parents=True, exist_ok=True)
-    if archive.name.endswith(".zst"):
-        tar_path = archive.with_name(archive.name[: -len(".zst")])
-        if not tar_path.exists():
-            check(["zstd", "-d", "-f", str(archive), "-o", str(tar_path)])
-        archive = tar_path
-    root = destination.resolve()
-    with tarfile.open(archive) as bundle:
-        for member in bundle.getmembers():
-            target = (destination / member.name).resolve()
-            if root != target and root not in target.parents:
-                raise SystemExit(f"unsafe path in the data archive: {member.name}")
-            if member.issym() or member.islnk():
-                raise SystemExit(
-                    f"links are not allowed in the data archive: {member.name}"
-                )
-        bundle.extractall(destination)
-
-
-def fetch_data(config: dict, state: dict) -> None:
-    """Download, verify and unpack the data archive.
-
-    A marker file holding the archive SHA256 is written once the data is
-    unpacked and checked, before the archive is deleted. A run interrupted
-    after that point finds the marker and does not download again.
-    """
-    data = config["data"]
-    target = data_dir(config)
-    marker = target / UNPACKED_MARKER
-    if marker.exists() and marker.read_text().strip() == data["sha256"].lower():
-        log(f"the data is already unpacked in {target}")
-        return
-    name = (
-        data.get("archive_name") or Path(data["url"].split("?")[0]).name or "data.tar"
-    )
-    archive = WORK / name
-    if not archive.exists():
-        download(data["url"], archive)
-    log("verifying the archive SHA256")
-    if file_sha256(archive) != data["sha256"].lower():
-        archive.rename(archive.with_suffix(archive.suffix + ".bad"))
+def offline_files(check_only: bool = False) -> tuple[Path, Path, Path]:
+    """The bundled CPython archive, wheel folder and requirements file."""
+    archives = sorted((OFFLINE / "python").glob("cpython-*.tar.gz"))
+    wheels = OFFLINE / "wheels"
+    requirements = OFFLINE / "requirements.txt"
+    if (
+        len(archives) != 1
+        or not requirements.is_file()
+        or not any(wheels.glob("*.whl"))
+    ):
         raise SystemExit(
-            "the downloaded archive does not match data.sha256; run again to retry"
+            f"{OFFLINE} must hold python/cpython-*.tar.gz (one), wheels/*.whl and "
+            "requirements.txt; build the bundle with tools/pack_easy_run.py"
         )
-    if target.exists():
-        shutil.rmtree(target)  # a half-unpacked folder from an interrupted run
-    log(f"unpacking into {target}")
-    safe_extract(archive, target)
+    return archives[0], wheels, requirements
+
+
+def probe_torch(python: str) -> dict:
+    """What the given Python's PyTorch sees: version, CUDA and the first GPU."""
+    probe = (
+        "import json, torch; ok = torch.cuda.is_available(); "
+        "p = torch.cuda.get_device_properties(0) if ok else None; "
+        "print(json.dumps({'cuda': ok, 'torch': torch.__version__, "
+        "'cuda_runtime': torch.version.cuda, "
+        "'gpu': p.name if p else None, 'memory_gb': p.total_memory / 1e9 if p else 0}))"
+    )
+    result = subprocess.run([python, "-c", probe], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"PyTorch does not import in {python}:\n{result.stderr[-2000:]}"
+        )
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def install(config: dict, state: dict) -> None:
+    """Install the bundled Python and the pinned packages without network access.
+
+    The bundled CPython (a relocatable python-build-standalone build) is
+    unpacked into easy_run_work/python, a venv is created from it and pip
+    installs offline/requirements.txt from offline/wheels with --no-index.
+    The project itself is not installed: every command runs with the project
+    folder on PYTHONPATH. Each part is skipped when it is already in place,
+    so an interrupted install simply runs again.
+    """
+    archive, wheels, requirements = offline_files()
+    python_home = WORK / "python"
+    if not (python_home / "bin" / "python3").exists():
+        staging = WORK / "python.partial"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        check(["tar", "-xzf", str(archive), "-C", str(staging)])
+        shutil.rmtree(python_home, ignore_errors=True)
+        os.replace(staging / "python", python_home)
+        shutil.rmtree(staging)
+    venv_python = VENV / "bin" / "python"
+    if not venv_python.exists():
+        shutil.rmtree(VENV, ignore_errors=True)
+        check([str(python_home / "bin" / "python3"), "-m", "venv", str(VENV)])
+    check([str(venv_python), "-m", "pip", "install", "--no-index",
+           "--find-links", str(wheels), "-r", str(requirements)])  # fmt: skip
+    found = probe_torch(str(venv_python))
+    if not found["cuda"]:
+        raise SystemExit(
+            f"PyTorch {found['torch']} does not see a CUDA GPU; check the NVIDIA driver "
+            f"(it must support CUDA {found['cuda_runtime']})"
+        )
+    state["python"] = str(venv_python)
+    state.setdefault("host", {}).update(found)
+    use_python(state)
+    log(f"installed: {found}")
+
+
+def verify_data(config: dict, state: dict) -> None:
+    """Check every bundled data file against its SHA256 list (once per list).
+
+    The list is sha256sum format ("<sha256>  <path>"), so the operator can
+    also run `sha256sum -c SHA256SUMS` inside the data folder by hand.
+    """
+    manifest = data_manifest(config)
+    if not manifest.is_file():
+        raise SystemExit(f"{manifest} is missing; unpack the whole bundle again")
+    digest = file_sha256(manifest)
+    if DATA_MARKER.exists() and DATA_MARKER.read_text().strip() == digest:
+        log("the data was already verified")
+        return
+    folder = manifest.parent
+    entries = [
+        line.split(maxsplit=1) for line in manifest.read_text().splitlines() if line
+    ]
+    log(f"verifying {len(entries)} data files")
+    bad = []
+    for expected, name in entries:
+        path = folder / name.lstrip("*")
+        if not path.is_file() or file_sha256(path) != expected:
+            bad.append(name)
+    if bad:
+        raise SystemExit(
+            f"{len(bad)} data files are missing or damaged (for example {bad[:3]}); "
+            "unpack the bundle again"
+        )
     missing = [path for path in input_paths(config) if not Path(path).exists()]
     if missing:
-        raise SystemExit(f"the archive does not contain: {missing}")
-    marker.write_text(data["sha256"].lower())
-    if data.get("delete_archive_after_unpack", True):
-        archive.unlink()
+        raise SystemExit(f"the bundle data does not contain: {missing}")
+    WORK.mkdir(parents=True, exist_ok=True)
+    DATA_MARKER.write_text(digest)
 
 
 def input_paths(config: dict) -> list[str]:
@@ -831,7 +831,7 @@ def package(config: dict, state: dict, status: str = "complete") -> None:
 STEPS = [
     ("preflight", preflight),
     ("install", install),
-    ("data", fetch_data),
+    ("data", verify_data),
     ("calibrate", calibrate),
     ("plan", make_plan),
     ("train", train_all),
@@ -843,6 +843,12 @@ def main() -> None:
     config = load_config()
     state = load_state()
     save_state(state)
+    use_python(state)
+    # The project runs from this folder without being installed.
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(ROOT), os.environ.get("PYTHONPATH")])
+    )
+    os.environ["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"  # no network on the host
     log(f"easy_run started; finished steps: {state['done'] or 'none'}")
     signal.signal(signal.SIGTERM, on_sigterm)
     try:
