@@ -199,8 +199,13 @@ def test_step_time_uses_the_mean_after_warmup(easy, tmp_path):
     assert easy.seconds_per_step(log) == pytest.approx(0.8)
 
 
-def test_allocation_caps_small_stages_and_gives_the_rest_to_base_dense(easy, tmp_path):
+def test_allocation_caps_small_stages_and_gives_the_rest_to_base_dense(
+    easy, monkeypatch, tmp_path
+):
     make_data(easy.WORK / "data")
+    # A frozen clock: on a slow machine the real time between the start and
+    # the planning call would already cost a step of base-moe.
+    monkeypatch.setattr(easy, "now", lambda: 1000.0)
     config = make_config(b"x", total_hours=10)
     state = {"started_at": easy.now(),
              "seconds_per_step": dict.fromkeys(easy.STAGES, 1.0)}  # fmt: skip
