@@ -260,11 +260,25 @@ controlled comparison.
   parameter names containing "embedding", so the D-024 tables were decayed
   while the canvas position table was not. All position tables are now
   exempt. The D-024 A/B ran with the decay.
-- **Span gradients are always clipped (untested hypothesis).** In the
+- **Span gradients are always clipped (tested, not adopted).** In the
   retained Dense Base log, span-step gradient norms rise from 1.6 to 3.2
   while MLM steps stay near 0.8; with grad_clip 1.0 every span step is
-  scaled down 2-3x, weakening the generation signal into the shared
-  encoder. Span loss stalls between 50% and 75% of training (4.90 -> 4.86).
+  scaled down 2-3x, which could weaken the generation signal into the
+  shared encoder. A from-scratch A/B (Colab T4, 66M model, 2,000 steps,
+  one seed, D-023/D-024/D-025 in both arms) raised the threshold to 3.0:
+
+  | grad_clip | Clipped updates | Train span / MLM loss (last quarter) | Full-mask CE mid / end | S=4 accuracy mid / end | S=4 F1 mid / end | S=4 repeat mid / end |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1.0 (current) | 61% | 6.908 / 5.890 | 8.467 / 7.554 | 0.048 / 0.123 | 0.163 / 0.168 | 0.408 / 0.439 |
+  | 3.0 | 2% | 7.077 / 6.175 | 8.039 / 7.436 | 0.056 / 0.121 | 0.147 / 0.150 | 0.483 / 0.464 |
+
+  The larger updates made both training losses worse (MLM too, so it is
+  not a span-only trade) and the generation metrics split: lower
+  held-out CE but lower F1 and more repetition. No clear gain, so
+  grad_clip stays 1.0 and no code was added. The 1.0 arm repeats the
+  D-025 r50 arm with the weight-decay fix; its held-out CE differs from
+  that run by 0.38 (mid) and 0.13 (end) while training losses agree,
+  which gives a rough idea of how noisy one-seed held-out CE is here.
 - **Confidence order commits punctuation first (amplifier).** After round
   1 of S=4, 85% of kept tokens are '.', ',' or newline, with 5% accuracy;
   the readout hidden states share a direction whose top logits are exactly
