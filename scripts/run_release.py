@@ -81,6 +81,7 @@ TRAIN_SWITCHES = (
     "native_gqa",
     "liger_kernels",
     "select_best",
+    "shuffled_passes",
 )
 KERNEL_FLAGS = ("attention_backend", "vocab_loss_backend", "vocab_chunk_size")
 DATA_FLAGS = {

@@ -21,7 +21,7 @@ from typing import Iterator
 import torch
 
 from .config import NuriConfig
-from .data import (TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
+from .data import (ShuffledPasses, TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
                        build_span_batch, has_mlm_target, usable_instruction)
 from .trainer import Task
 from .recipe import TrainingRecipe
@@ -58,15 +58,19 @@ def _bucket_options(config: NuriConfig, batch_size: int, enabled: bool) -> dict:
 
 def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int,
                   pack_mlm: bool = False, bucket: bool = False,
-                  recipe: TrainingRecipe | None = None) -> dict[str, Task]:
+                  recipe: TrainingRecipe | None = None, shuffled_passes: bool = False) -> dict[str, Task]:
     """MLM and span batches drawn from the corpus, skipping documents they cannot use.
 
     pack_mlm fills each MLM row with several documents (no padding waste for
     short documents); span batches always hold one document per row. bucket
     groups span samples of similar length, so short samples are not padded to
-    the longest one in the batch.
+    the longest one in the batch. shuffled_passes draws pieces of at most N
+    tokens without replacement (data.ShuffledPasses) instead of random
+    documents with replacement; MLM and span share one pass.
     """
     rng = random.Random(seed)
+    sampler = ShuffledPasses(corpus, config.max_input_len, seed) if shuffled_passes else None
+    source = sampler if sampler is not None else corpus
     generator = torch.Generator().manual_seed(seed)
     mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
     controls = recipe.corruption if recipe is not None else {}
@@ -76,14 +80,14 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
 
     def mlm_batch() -> dict:
         if pack_mlm:
-            return build_packed_mlm_batch(lambda: corpus.sample(1, rng, usable=mlm_usable)[0], batch_size,
+            return build_packed_mlm_batch(lambda: source.sample(1, rng, usable=mlm_usable)[0], batch_size,
                                           config, rng, generator, **mlm_options)
-        docs = corpus.sample(batch_size, rng, usable=mlm_usable)
+        docs = source.sample(batch_size, rng, usable=mlm_usable)
         return build_mlm_batch(docs, config, rng, generator, **mlm_options)
 
     def span_batch() -> dict:
         count = batch_size * BUCKET_POOL if bucket else batch_size
-        docs = corpus.sample(count, rng, usable=lambda d: len(d) >= 2)  # one token on each side
+        docs = source.sample(count, rng, usable=lambda d: len(d) >= 2)  # one token on each side
         return build_span_batch(docs, config, rng, generator,
                                 bucket=_bucket(config, batch_size) if bucket else None, **span_options)
 
@@ -91,8 +95,10 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
                "corpus_weights": getattr(corpus, "weights", None),  # set for a MixedCorpus
                "pack_mlm": pack_mlm, "bucket": bucket,
                **_bucket_options(config, batch_size, bucket)}
-    return {"mlm": Task("mlm", mlm_batch, rng, generator, options),
-            "span": Task("span", span_batch, rng, generator, options)}
+    if sampler is not None:
+        options["sampling"] = {"kind": "shuffled_passes", "piece_len": sampler.piece_len, "pieces": len(sampler)}
+    return {"mlm": Task("mlm", mlm_batch, rng, generator, options, sampler),
+            "span": Task("span", span_batch, rng, generator, options, sampler)}
 
 
 def _usable_examples(examples: list, config: NuriConfig, name: str) -> list:
@@ -136,8 +142,9 @@ def _apply_recipe(tasks, mix, recipe, config, stage, apply_recipe_mix):
 
 
 def base_stage(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed: int = 0, pack_mlm: bool = False,
-               bucket: bool = False, *, recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True):
-    tasks = _corpus_tasks(corpus, config, batch_size, seed, pack_mlm, bucket, recipe)
+               bucket: bool = False, *, recipe: TrainingRecipe | None = None, apply_recipe_mix: bool = True,
+               shuffled_passes: bool = False):
+    tasks = _corpus_tasks(corpus, config, batch_size, seed, pack_mlm, bucket, recipe, shuffled_passes)
     return _apply_recipe(tasks, {"mlm": 0.5, "span": 0.5}, recipe, config, "base", apply_recipe_mix)
 
 

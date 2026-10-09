@@ -145,7 +145,7 @@ def test_train_script_seeds_before_scratch_initialization(monkeypatch):
     captured = []
 
     monkeypatch.setattr(script, "open_corpus", lambda _: object())
-    monkeypatch.setattr(script, "base_stage", lambda *args: ({}, {"mlm": 1.0}))
+    monkeypatch.setattr(script, "base_stage", lambda *args, **kwargs: ({}, {"mlm": 1.0}))
 
     def capture_initialization(model, *args, **kwargs):
         captured.append(model.embedding.weight.detach().clone())

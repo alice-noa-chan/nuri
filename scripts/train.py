@@ -246,6 +246,12 @@ def parse_args(argv=None):
         help="base stage: fill each MLM row with several documents (attention stays inside each one)",
     )
     p.add_argument(
+        "--shuffled-passes",
+        action="store_true",
+        help="base stage: draw corpus pieces of at most N tokens without replacement, "
+        "so every piece is trained on once per pass (nuri.data.ShuffledPasses)",
+    )
+    p.add_argument(
         "--bucket",
         action="store_true",
         help="base/it stages: group span and instruction samples of similar length (less padding)",
@@ -281,6 +287,8 @@ def parse_args(argv=None):
         p.error("--stop-after-completed-steps must be below --steps")
     if args.valid_every is not None and not args.holdout_config:
         p.error("--valid-every requires --holdout-config")
+    if args.shuffled_passes and args.stage != "base":
+        p.error("--shuffled-passes applies to the base stage only")
     if args.select_best and not args.holdout_config:
         p.error("--select-best requires --holdout-config")
     if args.patience and not args.select_best:
@@ -855,6 +863,7 @@ def main(argv=None):
             args.seed,
             args.pack_mlm,
             args.bucket,
+            shuffled_passes=args.shuffled_passes,
             **recipe_options,
         )
     elif args.stage == "it":

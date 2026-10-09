@@ -151,6 +151,84 @@ class MixedCorpus(_DocumentSampler):
         return rng.choices(self.corpora, self.weights)[0].random_document(rng)
 
 
+class ShuffledPasses(_DocumentSampler):
+    """Every piece of a corpus once per pass, in a new random order each pass.
+
+    Drawing documents at random with replacement leaves about e^-k of them
+    unseen after k passes' worth of draws (27% at 1.3). Here each source
+    corpus is cut into pieces of at most piece_len tokens (a long document
+    gives several pieces, so its later parts are trained on too), and the
+    pieces are drawn without replacement: a pass ends only after every piece
+    was drawn once. A MixedCorpus still picks the source of each draw by its
+    weight, so every source runs its own passes at its own pace.
+
+    The order of pass p of source i is a permutation seeded by (seed, i, p),
+    so the whole state is (pass, position) per source. state_dict() and
+    load_state_dict() save and restore it for an exact resume.
+    """
+
+    def __init__(self, corpus: TokenCorpus | MixedCorpus, piece_len: int, seed: int):
+        if piece_len < 1:
+            raise ValueError("piece_len must be positive")
+        mixed = isinstance(corpus, MixedCorpus)
+        self.sources = corpus.corpora if mixed else [corpus]
+        self.weights = corpus.weights if mixed else [1.0]
+        if any(len(source) == 0 for source in self.sources):
+            raise ValueError("ShuffledPasses needs nonempty corpora")
+        self.piece_len, self.seed = piece_len, seed
+        # piece_ends[i][d]: pieces of source i up to and including document d.
+        self.piece_ends = [
+            np.cumsum(-(-np.diff(source.offsets) // piece_len))
+            for source in self.sources
+        ]
+        self.passes = [0] * len(self.sources)
+        self.positions = [0] * len(self.sources)
+        self._orders = [None] * len(self.sources)
+
+    def __len__(self) -> int:
+        """The number of pieces in one pass over every source."""
+        return sum(int(ends[-1]) for ends in self.piece_ends)
+
+    def state_dict(self) -> dict:
+        return {"passes": list(self.passes), "positions": list(self.positions)}
+
+    def load_state_dict(self, state: dict) -> None:
+        if len(state["passes"]) != len(self.sources):
+            raise ValueError(
+                "the saved pass state is for a different number of corpora"
+            )
+        self.passes = [int(p) for p in state["passes"]]
+        self.positions = [int(p) for p in state["positions"]]
+        self._orders = [None] * len(self.sources)
+
+    def _order(self, source: int) -> np.ndarray:
+        if self._orders[source] is None:
+            generator = np.random.default_rng([self.seed, source, self.passes[source]])
+            pieces = int(self.piece_ends[source][-1])
+            self._orders[source] = generator.permutation(pieces)
+        return self._orders[source]
+
+    def random_document(self, rng: random.Random) -> list[int]:
+        source = (
+            rng.choices(range(len(self.sources)), self.weights)[0]
+            if len(self.sources) > 1
+            else 0
+        )
+        order = self._order(source)
+        piece = int(order[self.positions[source]])
+        self.positions[source] += 1
+        if self.positions[source] == len(order):  # pass complete: reshuffle next time
+            self.passes[source] += 1
+            self.positions[source] = 0
+            self._orders[source] = None
+        ends, corpus = self.piece_ends[source], self.sources[source]
+        doc = int(np.searchsorted(ends, piece, side="right"))
+        first = piece - (int(ends[doc - 1]) if doc else 0)
+        start = int(corpus.offsets[doc]) + first * self.piece_len
+        end = min(start + self.piece_len, int(corpus.offsets[doc + 1]))
+        return corpus.tokens[start:end].astype(np.int64).tolist()
+
+
 def open_corpus(specs: str | list[str]) -> TokenCorpus | MixedCorpus:
     """Open one corpus folder, or mix several given as "folder" or "folder=weight".
 

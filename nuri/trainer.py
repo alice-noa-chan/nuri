@@ -241,6 +241,10 @@ class Task:
     options records how batches are built (batch size, pool sizes, ...). It
     is saved with the training state and must match on resume, because a
     different batch size would silently change the data of a resumed run.
+
+    sampler is an optional document source with its own position (for
+    example data.ShuffledPasses); its state_dict() is saved and restored
+    together with the random sources.
     """
 
     kind: str
@@ -248,6 +252,7 @@ class Task:
     rng: random.Random | None = None
     generator: torch.Generator | None = None
     options: dict = field(default_factory=dict)
+    sampler: object | None = None
 
 
 @dataclass
@@ -578,6 +583,7 @@ def _task_random_state(tasks: dict[str, Task]) -> dict:
             "generator": task.generator.get_state()
             if task.generator is not None
             else None,
+            "sampler": task.sampler.state_dict() if task.sampler is not None else None,
         }
         for name, task in tasks.items()
     }
@@ -589,6 +595,8 @@ def _restore_task_random(tasks: dict[str, Task], states: dict) -> None:
             tasks[name].rng.setstate(state["rng"])
         if state["generator"] is not None:
             tasks[name].generator.set_state(state["generator"])
+        if state.get("sampler") is not None:
+            tasks[name].sampler.load_state_dict(state["sampler"])
 
 
 def _digest_tensor(digest, name: str, tensor: torch.Tensor) -> None:
@@ -1472,6 +1480,7 @@ def _random_state(rng: random.Random, tasks: dict[str, Task]) -> dict:
             "generator": task.generator.get_state()
             if task.generator is not None
             else None,
+            "sampler": task.sampler.state_dict() if task.sampler is not None else None,
         }
     if torch.cuda.is_available():
         state["cuda_rng"] = torch.cuda.get_rng_state_all()
@@ -1636,6 +1645,8 @@ def _resume(
             tasks[name].rng.setstate(saved["rng"])
         if saved["generator"] is not None:
             tasks[name].generator.set_state(saved["generator"])
+        if saved.get("sampler") is not None:
+            tasks[name].sampler.load_state_dict(saved["sampler"])
     if "cuda_rng" in extra["random"] and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(extra["random"]["cuda_rng"])
     return state["step"], dict(extra["totals"])
