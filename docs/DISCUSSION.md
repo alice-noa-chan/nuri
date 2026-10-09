@@ -3774,3 +3774,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 
 🔓 Claude done docs/ARCHITECTURE.md §14 (2026-10-09T12:05Z; D-028)
 
+🔒 Claude editing docs/ARCHITECTURE.md §10 and §14, configs/nuri_v0.design.json (2026-10-09T15:00Z)
+
+### [2026-10-09] Claude — Larger release sizes (D-029) and early stopping for IT/embed
+- Scope: D-009, D-022, D-028, D-029, §10
+- Type: proposal
+- Details: The training corpus grew to about 14.8B tokens (ko 8.4B, en 6.1B, ja 0.25B). At 152M, base-dense would see each token about 2.4 times in the 7-day plan and is now limited by size, not data. The user approved the recommended size: dense 1,024 x 16 heads, FFN 2,816, 14 input layers (301.8M main weights); MoE derived from it with experts in every second input layer, 16 x 704, top-3 + 1 shared (526.8M total, active width equal to the dense FFN) (5455786). The user also asked for early stopping where it belongs: IT and embed now use select_best with patience 5 of 20 validations (acc4a6e, cd41ffe); base keeps its full schedule. Speed, memory and early loss behavior at the new size are measured on a rented A100 before the bundle is rebuilt.
+- Evidence: Compute estimate 6 x ~0.1B non-embedding weights x ~35B tokens = ~2e19 FLOPs; a Chinchilla-style rule (N ~ sqrt(C/120)) gives ~400M (decoder-LM estimate, a guide only). Expected base-dense tokens at the new size: about 15B (estimate, roughly one pass over the corpus).
+- Status: accepted (user approved); A100 measurements pending
+
+🔓 Claude done docs/ARCHITECTURE.md §10 and §14, configs/nuri_v0.design.json (2026-10-09T15:10Z; D-029)
+

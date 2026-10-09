@@ -62,8 +62,8 @@ The full design, with every decision and its reason, is in
 | Name | What it is |
 |---|---|
 | `nuri-tokenizer` | byte-level BPE tokenizer for Korean, English and Japanese |
-| `nuri-base` | ~150M dense model, pretraining only |
-| `nuri-base-moe` | ~242M MoE model (~150M active per token), pretraining only |
+| `nuri-base` | ~300M dense model, pretraining only |
+| `nuri-base-moe` | ~525M MoE model (~300M active per token), pretraining only |
 | `nuri-base-it` / `nuri-base-moe-it` | instruction-tuned versions |
 | `nuri-base-embed` | sentence embedding model built from `nuri-base` |
 

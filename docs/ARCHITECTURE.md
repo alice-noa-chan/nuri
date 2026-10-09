@@ -59,23 +59,25 @@ flowchart TD
 
 The 32,768 vocabulary does not mean a tokenizer was chosen. It is decided after checking the Korean/English mix and whether an existing checkpoint is reused. When a pretrained model is reused, its vocabulary, hidden size, norm, FFN and position scheme are kept, and the parameter counts in this table do not apply.
 
-### Release model sizes (D-009)
+### Release model sizes (D-009, D-029)
 
 The table above is the structure-check reference (49.8M). The public models use the same topology at the larger settings below. Names and formulas are the same as above.
 
 | Item | reference | **release dense** | **release MoE** |
 |---|---:|---:|---:|
-| `D` / heads | 512 / 8 | 768 / 12 | 768 / 12 |
-| `F` | 1,408 | 2,048 | dense layers 2,048 / MoE layers 16 experts × 512, top-3 + 1 shared |
-| input layers `L` | 6 | 10 | 10 (even layers are MoE) |
+| `D` / heads | 512 / 8 | 1,024 / 16 | 1,024 / 16 |
+| `F` | 1,408 | 2,816 | dense layers 2,816 / MoE layers 16 experts × 704, top-3 + 1 shared |
+| input layers `L` | 6 | 14 | 14 (even layers are MoE) |
 | readout layers `J` | 2 | 2 | 2 (layer 2 is MoE) |
 | slots `K` | 16 | 32 | 32 |
 | `V` | 32,768 | 65,536 | 65,536 |
 | `N` / `M` | 512 / 64 | 1,024 / 256 | 1,024 / 256 |
-| total parameters | 49.8M | ≈ 150M | ≈ 242M |
-| active parameters | same | same | ≈ 150M |
+| total parameters | 49.8M | ≈ 300M | ≈ 525M |
+| active parameters | same | same | ≈ 300M |
 
-Release dense breakdown: embedding 50.3M + input 10 × 7.08M + core 9.44M + readout 2 × 9.44M + embedding head 0.79M.
+Release dense breakdown: embedding 67.1M + input 14 × 12.85M + core 17.1M + readout 36.5M + small heads and projections 1.8M.
+
+D-029 (2026-10-09) doubled the release size from 768 × 10 layers (≈150M dense, ≈242M MoE) after the training corpus grew to about 14.8B tokens; the older numbers below are kept as the history of D-009, D-019 and D-024.
 
 - **V = 65,536** (decided, D-016): on held-out text, 64k needs about 9-10% fewer tokens than 32k for Korean and Japanese and about 2.5% fewer for English (48k: about 5.6-5.9% and 1.7%). The cost is a 50M instead of 25M tied embedding and an estimated ~4% more training compute per byte of text from the larger vocabulary head. Korean is the primary language, so the difference counts as not small (D-012).
 - **K = 32**: the core costs `T·K` slots per sample, small compared to the whole model (§10). The public models get generous slot capacity.
@@ -350,7 +352,7 @@ Training processes one corruption, so the inference S=4 formula is not simply mu
 
 ### Release cost
 
-Main weights excluding norms, gates, length and classification heads are **152,002,560** for dense and **244,088,832** for MoE. These include D-019's 196,608 canvas position weights and D-024's 1,572,864 readout memory position weights (2 × 1,024 × 768); without D-024 they were 150,429,696 and 242,515,968, and the legacy counts were 150,233,088 and 242,319,360. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
+Under D-029, main weights excluding norms, gates, length and classification heads are **301,760,512** for dense and **526,811,136** for MoE. Before D-029 (768 × 10 layers) they were **152,002,560** for dense and **244,088,832** for MoE. These include D-019's 196,608 canvas position weights and D-024's 1,572,864 readout memory position weights (2 × 1,024 × 768); without D-024 they were 150,429,696 and 242,515,968, and the legacy counts were 150,233,088 and 242,319,360. The length head `2D→256` adds 393,216 weights. "≈150M/242M" are rounded values. The MoE's 150M active count converts the experts chosen per token into dense terms; it is not the number of distinct weights one request uses. A long input can use every expert through different tokens.
 
 Release inference at N1024/M256/K32/T4/S4, all-global input, 1 MAC = 2, with the same exclusions:
 
@@ -481,6 +483,7 @@ User decisions (D-001 to D-008, D-012 to D-014) are never changed without user a
 | D-026 | 2026-10-08 | The D-022 run ships as one offline zstd bundle (`tools/pack_easy_run.py bundle`): committed code, the private `easy_run.json`, a bundled CPython 3.11, pinned cp311 wheels (PyTorch 2.10.0+cu128) installed with `pip --no-index`, and the data with a SHA256 list; `easy_run.py` never uses the network | The A100 host has no internet access and matches the user's other GPU environment (Linux x86_64, CUDA 12.8, PyTorch 2.10.0+cu128) | user |
 | D-027 | 2026-10-08 | The D-022 plan keeps 1 hour (was 8) for evaluation, export and packing and uses a 0.95 safety factor (was 0.9); calibration measures 100 steps logged every 10 steps | On the A100 check, evaluation and export of all five stages took under 10 minutes, 30-step calibration overestimated step time by about 21%, and the deadline stop protects the archive; about 14 more training hours | user (recommended by Claude) |
 | D-028 | 2026-10-09 | The IT stages release the weights with the lowest validation score (mean aggregate objective loss, checked at the 20 validations per stage and the last step) instead of the last weights; base and embed keep releasing the last weights; no early stop | IT runs up to 3 passes over a small set and can overfit; base sees each token about 1.5 to 3 times with a schedule fitted to its full step count | user |
+| D-029 | 2026-10-09 | Release sizes grow to dense ≈300M (D 1,024, 16 heads, F 2,816, 14 input layers) and MoE ≈525M total / ≈300M active (16 experts × 704, top-3 + 1 shared, every second input layer); V, K, N, M and depths unchanged; supersedes the sizes of D-009 | with about 14.8B training tokens the 7-day base-dense compute (≈2e19 FLOPs) fits a ≈300-400M model by a Chinchilla-style estimate; an A100 check measures speed and memory before the release run | user (recommended by Claude) |
 
 ## 15. Release plan
 
