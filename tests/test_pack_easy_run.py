@@ -3,8 +3,10 @@ import json
 import subprocess
 import tarfile
 
+import numpy as np
 import pytest
 
+from nuri.data import TokenCorpus, write_corpus
 from test_easy_run import ROOT, load_easy_run, make_config, make_data
 
 zstandard = pytest.importorskip("zstandard")
@@ -49,6 +51,10 @@ def is_git_checkout() -> bool:
 def test_bundle_holds_code_config_offline_packages_and_checked_data(tmp_path):
     packer = load_packer()
     make_data(tmp_path / "local")
+    # An older uint32 corpus is packed as uint16 with the same documents.
+    train = tmp_path / "local" / "train" / "corpus"
+    documents = [TokenCorpus(train).document(i) for i in range(40)]
+    write_corpus(train, documents, dtype=np.uint32)
     make_offline(tmp_path / "offline")
     spec = tmp_path / "spec.json"
     spec.write_text(json.dumps({"entries": {
@@ -72,6 +78,10 @@ def test_bundle_holds_code_config_offline_packages_and_checked_data(tmp_path):
                  "data/train/corpus/tokens.bin"):  # fmt: skip
         assert (top / name).is_file(), name
     assert not (top / ".private").exists()
+    packed = TokenCorpus(top / "data" / "train" / "corpus")
+    assert packed.tokens.dtype == np.uint16
+    assert [packed.document(i) for i in range(40)] == documents
+    assert TokenCorpus(train).tokens.dtype == np.uint32  # the local file is unchanged
 
     # The unpacked bundle passes easy_run's own checks.
     easy = load_easy_run()
@@ -110,3 +120,24 @@ def test_bundle_inputs_are_checked_before_packing(tmp_path):
     (tmp_path / "offline" / "requirements.txt").unlink()
     with pytest.raises(SystemExit, match="requirements.txt"):
         packer.offline_files(tmp_path / "offline")
+
+
+def test_narrowing_keeps_ids_and_refuses_ids_above_uint16(tmp_path):
+    packer = load_packer()
+    ids = np.arange(0, 65536, 7, dtype=np.uint32)
+    write_corpus(tmp_path / "ok", [ids.tolist()], dtype=np.uint32)
+    assert packer.stored_as_uint32(tmp_path / "ok" / "tokens.bin")
+    write_corpus(tmp_path / "small", [ids.tolist()])
+    assert not packer.stored_as_uint32(tmp_path / "small" / "tokens.bin")
+    assert not packer.stored_as_uint32(tmp_path / "ok" / "offsets.npy")
+
+    packer.BLOCK = 12  # several blocks, and reads that cross block borders
+    with (tmp_path / "ok" / "tokens.bin").open("rb") as stream:
+        reader = packer.NarrowingReader(stream)
+        narrowed = b"".join(iter(lambda: reader.read(5), b""))
+    assert np.array_equal(np.frombuffer(narrowed, dtype="<u2"), ids)
+
+    np.array([5, 65536], dtype=np.uint32).tofile(tmp_path / "big.bin")
+    with (tmp_path / "big.bin").open("rb") as stream:
+        with pytest.raises(SystemExit, match="above 65535"):
+            packer.NarrowingReader(stream).read(4)

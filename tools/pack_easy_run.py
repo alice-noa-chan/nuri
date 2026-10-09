@@ -14,7 +14,9 @@ The GPU host has no internet access, so the bundle carries everything:
   (offline/wheels/*.whl) and offline/requirements.txt;
 - data/: the inputs named in the data spec, which is private JSON
   {"entries": {"<path inside data/>": "<local file or folder>", ...}},
-  plus data/SHA256SUMS (sha256sum format) for every data file.
+  plus data/SHA256SUMS (sha256sum format) for every data file. A corpus
+  tokens.bin stored as uint32 (older corpora) is packed as uint16, which
+  halves the biggest part of the bundle; the local file is not changed.
 
 Everything sits under one top folder, nuri/, compressed with zstd
 (the zstandard Python package). The SHA256 of the bundle is printed and
@@ -37,6 +39,8 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 TOP = "nuri"  # the folder the bundle unpacks into
@@ -62,6 +66,51 @@ class HashingReader:
         block = self.stream.read(size)
         self.digest.update(block)
         return block
+
+
+class NarrowingReader:
+    """Read a uint32 tokens.bin as the same ids in uint16 (little-endian).
+
+    Every block is checked before it is narrowed, so an id above 65535
+    stops the packing instead of being wrapped around silently.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.pending = memoryview(b"")
+
+    def next_block(self) -> memoryview:
+        block = self.stream.read(BLOCK)  # BLOCK is a multiple of 4 bytes
+        if len(block) % 4:
+            raise SystemExit("a uint32 tokens.bin ended inside a token id")
+        ids = np.frombuffer(block, dtype="<u4")
+        if ids.size and int(ids.max()) > np.iinfo(np.uint16).max:
+            raise SystemExit(
+                "a tokens.bin holds an id above 65535; it cannot be uint16"
+            )
+        return memoryview(ids.astype("<u2").tobytes())
+
+    def read(self, size=-1):
+        pieces, wanted = [], size if size >= 0 else float("inf")
+        while wanted > 0:
+            if not self.pending:
+                self.pending = self.next_block()
+                if not self.pending:
+                    break
+            piece = self.pending[: min(wanted, len(self.pending))]
+            self.pending = self.pending[len(piece) :]
+            pieces.append(piece)
+            wanted -= len(piece)
+        return b"".join(pieces)
+
+
+def stored_as_uint32(path: Path) -> bool:
+    """True for a corpus tokens.bin whose size is 4 bytes per token of its offsets."""
+    offsets_path = path.with_name("offsets.npy")
+    if path.name != "tokens.bin" or not offsets_path.is_file():
+        return False
+    token_count = int(np.load(offsets_path, mmap_mode="r", allow_pickle=False)[-1])
+    return token_count > 0 and path.stat().st_size == 4 * token_count
 
 
 def data_files(spec_path: Path) -> list[tuple[str, Path]]:
@@ -116,13 +165,20 @@ def check_config(config_path: Path) -> None:
         raise SystemExit("easy_run.json names a data URL; the bundle carries the data")
 
 
-def add_file(bundle: tarfile.TarFile, path: Path, name: str) -> str:
-    """Add one file under TOP/name; returns its SHA256."""
+def add_file(
+    bundle: tarfile.TarFile, path: Path, name: str, narrow: bool = False
+) -> str:
+    """Add one file under TOP/name; returns the SHA256 of the packed bytes.
+
+    narrow=True packs a uint32 tokens.bin as uint16 (half the size).
+    """
     info = bundle.gettarinfo(str(path), arcname=f"{TOP}/{name}")
     info.uid = info.gid = 0
     info.uname = info.gname = ""
+    if narrow:
+        info.size //= 2
     with path.open("rb") as stream:
-        reader = HashingReader(stream)
+        reader = HashingReader(NarrowingReader(stream) if narrow else stream)
         bundle.addfile(info, reader)
     return reader.digest.hexdigest()
 
@@ -164,11 +220,14 @@ def pack_bundle(
                 add_file(bundle, path, f"offline/{name}")
             sums = []
             for name, path in data:
+                narrow = stored_as_uint32(path)
                 print(
-                    f"adding data/{name} ({path.stat().st_size / 1e9:.2f} GB)",
+                    f"adding data/{name} ({path.stat().st_size / 1e9:.2f} GB"
+                    + (", uint32 -> uint16)" if narrow else ")"),
                     flush=True,
                 )
-                sums.append(f"{add_file(bundle, path, f'data/{name}')}  {name}\n")
+                digest = add_file(bundle, path, f"data/{name}", narrow)
+                sums.append(f"{digest}  {name}\n")
             add_bytes(bundle, "".join(sums).encode("utf-8"), "data/SHA256SUMS")
     temporary.replace(out)
     digest = file_sha256(out)
