@@ -115,7 +115,8 @@ python scripts/tokenize_corpus.py `
   --out $env:NURI_TEXT_CORPUS $env:NURI_RAW_TEXT
 ```
 
-The corpus consists of `tokens.bin` (`uint32` token IDs) and `offsets.npy`
+The corpus consists of `tokens.bin` (`uint16` token IDs; older corpora use
+`uint32`, and the reader tells them apart by size) and `offsets.npy`
 (`int64` document boundaries). Prefix/span splitting uses these boundaries;
 documents are not packed together for attention. Keep token corpora under
 ignored `data/` and provenance only under `.private/`.

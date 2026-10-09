@@ -1,9 +1,15 @@
 """Training data: an on-disk token corpus and the batch builders for each objective.
 
 Corpus format (a folder):
-- tokens.bin   all token ids of all documents, back to back, as uint32
+- tokens.bin   all token ids of all documents, back to back, as uint16
+               (older corpora: uint32)
 - offsets.npy  int64 array of length num_docs + 1; document i is
                tokens[offsets[i]:offsets[i + 1]]
+
+The token width needs no extra file: offsets[-1] is the token count, so
+the size of tokens.bin divided by it is 2 (uint16) or 4 (uint32). uint16
+holds every id of the 65,536-entry vocabulary and halves the disk and
+bundle size.
 
 Several corpus folders can be mixed with weights (MixedCorpus), for example
 one folder per language with the planned language ratios.
@@ -24,6 +30,9 @@ import torch
 
 from .config import NuriConfig
 from .corruption import corrupt_canvas, mask_for_mlm, pad_batch, split_span
+
+# Token widths a corpus may use; write_corpus uses the first one.
+TOKEN_DTYPES = (np.uint16, np.uint32)
 
 ROLE_TOKENS = {"system": "<|system|>", "user": "<|user|>", "assistant": "<|assistant|>"}
 
@@ -53,6 +62,16 @@ class _DocumentSampler:
         raise ValueError("the corpus has too few usable documents for this batch")
 
 
+def token_dtype(token_bytes: int, token_count: int):
+    """The width that makes token_bytes hold exactly token_count ids, or None."""
+    if token_count == 0:
+        return TOKEN_DTYPES[0] if token_bytes == 0 else None
+    for dtype in TOKEN_DTYPES:
+        if token_bytes == token_count * np.dtype(dtype).itemsize:
+            return dtype
+    return None
+
+
 class TokenCorpus(_DocumentSampler):
     """Read-only view of a tokenized corpus folder (memory-mapped, so it can be huge)."""
 
@@ -60,17 +79,20 @@ class TokenCorpus(_DocumentSampler):
         folder = Path(folder)
         token_file = folder / "tokens.bin"
         token_bytes = token_file.stat().st_size
-        if token_bytes % np.dtype(np.uint32).itemsize:
-            raise ValueError("tokens.bin must contain complete uint32 token IDs")
+        if token_bytes % np.dtype(np.uint16).itemsize:
+            raise ValueError(
+                "tokens.bin must contain complete uint16 or uint32 token IDs"
+            )
         offsets = np.load(folder / "offsets.npy", allow_pickle=False)
         if offsets.dtype != np.int64 or offsets.ndim != 1 or offsets.size < 1:
             raise ValueError(
                 "offsets.npy must be a nonempty one-dimensional int64 array"
             )
-        token_count = token_bytes // np.dtype(np.uint32).itemsize
-        if offsets[0] != 0 or offsets[-1] != token_count:
+        dtype = token_dtype(token_bytes, int(offsets[-1]))
+        if offsets[0] != 0 or dtype is None:
             raise ValueError(
-                "corpus offsets must cover tokens.bin exactly, starting at zero"
+                "corpus offsets must cover tokens.bin exactly (uint16 or uint32 ids), "
+                "starting at zero"
             )
         # Bound temporary comparisons even for a very large document index.
         for start in range(0, offsets.size - 1, 1024 * 1024):
@@ -81,9 +103,9 @@ class TokenCorpus(_DocumentSampler):
                 )
         self.offsets = offsets
         self.tokens = (
-            np.memmap(token_file, dtype=np.uint32, mode="r")
-            if token_count
-            else np.empty(0, dtype=np.uint32)
+            np.memmap(token_file, dtype=dtype, mode="r")
+            if token_bytes
+            else np.empty(0, dtype=dtype)
         )
 
     def __len__(self) -> int:
@@ -145,8 +167,17 @@ def open_corpus(specs: str | list[str]) -> TokenCorpus | MixedCorpus:
     return MixedCorpus(sources)
 
 
-def write_corpus(folder: str | Path, documents: Iterable[Sequence[int]]) -> int:
-    """Write documents (token id lists) in the corpus format. Returns the number written."""
+def write_corpus(
+    folder: str | Path, documents: Iterable[Sequence[int]], dtype=TOKEN_DTYPES[0]
+) -> int:
+    """Write documents (token id lists) in the corpus format. Returns the number written.
+
+    Ids are stored as uint16 by default. An id that does not fit the chosen
+    width raises ValueError instead of wrapping around silently.
+    """
+    if dtype not in TOKEN_DTYPES:
+        raise ValueError("corpus tokens must be stored as uint16 or uint32")
+    largest = np.iinfo(dtype).max
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     offsets = [0]
@@ -154,7 +185,12 @@ def write_corpus(folder: str | Path, documents: Iterable[Sequence[int]]) -> int:
         for doc in documents:
             if len(doc) == 0:
                 continue
-            out.write(np.asarray(doc, dtype=np.uint32).tobytes())
+            ids = np.asarray(doc, dtype=np.int64)
+            if ids.min() < 0 or ids.max() > largest:
+                raise ValueError(
+                    f"token ids must be in 0..{largest} for {np.dtype(dtype).name}"
+                )
+            out.write(ids.astype(dtype).tobytes())
             offsets.append(offsets[-1] + len(doc))
     np.save(folder / "offsets.npy", np.asarray(offsets, dtype=np.int64))
     return len(offsets) - 1

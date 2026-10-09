@@ -62,7 +62,7 @@ def tokenize_splits(plan_path: str, repo: str = ".", progress: bool = True) -> d
     import numpy as np
     from tokenizers import Tokenizer
     from tqdm import tqdm
-    from nuri.data import TokenCorpus
+    from nuri.data import TOKEN_DTYPES, TokenCorpus
 
     root = Path(repo).resolve()
     private = _local_path(".private", root)
@@ -135,7 +135,7 @@ def tokenize_splits(plan_path: str, repo: str = ".", progress: bool = True) -> d
                     _write_json(folder / "stats.json", stats)
                 corpus = TokenCorpus(folder)
                 if (stats["documents_seen"] != source_entry["rows"] or len(corpus) != stats["documents_written"]
-                        or int(corpus.offsets[-1]) != stats["tokens"] or corpus.tokens.dtype != np.uint32):
+                        or int(corpus.offsets[-1]) != stats["tokens"] or corpus.tokens.dtype not in TOKEN_DTYPES):
                     raise PreparationError("A token corpus does not match its recorded document/token counts.")
                 for start in range(0, len(corpus.offsets) - 1, 262144):
                     differences = np.diff(corpus.offsets[start:start + 262145])

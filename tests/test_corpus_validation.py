@@ -71,3 +71,24 @@ def test_valid_corpus_keeps_sampling_reproducible(tmp_path):
     expected = random.Random(2)
     for _ in range(20):
         assert corpus.random_document(rng) == corpus.document(expected.randrange(3))
+
+
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32])
+def test_both_token_widths_read_the_same_documents(tmp_path, dtype):
+    documents = [[5], [6, 65535], [8, 9, 10]]
+    write_corpus(tmp_path, documents, dtype=dtype)
+    corpus = TokenCorpus(tmp_path)
+    assert corpus.tokens.dtype == dtype
+    assert (tmp_path / "tokens.bin").stat().st_size == 6 * np.dtype(dtype).itemsize
+    assert [corpus.document(i) for i in range(3)] == documents
+
+
+def test_writer_defaults_to_uint16_and_refuses_ids_that_do_not_fit(tmp_path):
+    write_corpus(tmp_path / "small", [[5, 6]])
+    assert TokenCorpus(tmp_path / "small").tokens.dtype == np.uint16
+    with pytest.raises(ValueError, match="0..65535"):
+        write_corpus(tmp_path / "big", [[5, 65536]])
+    with pytest.raises(ValueError, match="0..65535"):
+        write_corpus(tmp_path / "negative", [[-1]])
+    with pytest.raises(ValueError, match="uint16 or uint32"):
+        write_corpus(tmp_path / "wide", [[5]], dtype=np.int64)
