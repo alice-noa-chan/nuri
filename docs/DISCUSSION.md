@@ -3763,3 +3763,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 
 🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json (2026-10-08T08:35Z; D-027)
 
+🔒 Claude editing docs/ARCHITECTURE.md §14 (2026-10-09T12:00Z)
+
+### [2026-10-09] Claude — Best validated checkpoint for the IT stages (D-028)
+- Scope: D-022, D-028, docs/HOLDOUT_MONITORING.md, docs/EASY_RUN.md
+- Type: proposal
+- Details: The user asked for best-checkpoint selection in the IT stages. Training with --select-best keeps the weights of the lowest validation score (mean aggregate objective loss) in best-step<N>/, named atomically by best.json; run_release evaluates and exports that folder and records selected_checkpoint (2c701c5); easy_run sets it for it-dense and it-moe (d16115f). There is no early stop: the planned steps still run, because the learning-rate schedule is fitted to them and the time would otherwise be unused. Base stays on the last weights: with the expanded corpus (about 14.8B training tokens) base-dense sees each token about 1.5 to 3 times (estimate), where overfitting is unlikely. Caveat: validation now selects the checkpoint, so the validation curve is optimistic for the released IT weights; the test assessment still describes the last weights.
+- Evidence: tests/test_select_best.py (6 tests) and the end-to-end easy_run test; full Windows suite 1334 passed.
+- Status: accepted (user request)
+
+🔓 Claude done docs/ARCHITECTURE.md §14 (2026-10-09T12:05Z; D-028)
+

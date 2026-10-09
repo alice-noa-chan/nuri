@@ -95,7 +95,9 @@ Bring back `easy_run_output.tar`. It contains:
 
 - `models/`: the five release folders (`nuri-base`, `nuri-base-moe`,
   `nuri-base-it`, `nuri-base-moe-it`, `nuri-base-embed`) with tokenizer
-  files and verification records;
+  files and verification records. The two IT models are the step with the
+  best validation score (D-028; `selected_checkpoint` in
+  `run_summary.json`), the others the last step;
 - `eval/`: evaluation results per stage;
 - `logs/<stage>/`: training and holdout logs and TensorBoard events;
 - `run_summary.json`, `plan.json`, `state.json` (measured step times,

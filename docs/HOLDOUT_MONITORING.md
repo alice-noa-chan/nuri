@@ -172,3 +172,22 @@ serve as an all-capability retention gate. Use the separate multilingual
 classification, generation and fixed-candidate retrieval packet in
 [QUALITY_IMPROVEMENT.md](QUALITY_IMPROVEMENT.md) to check other capabilities.
 No language quality gain follows from adding monitoring alone.
+
+## Best validated checkpoint (`--select-best`)
+
+With `--select-best` (plan key `"select_best": true`), training also keeps
+the weights of the best validation so far. After each recorded validation
+the score is the mean objective loss of the aggregate tasks; language
+groups are left out because they repeat those objectives on subsets. A
+lower score saves the weights to `best-step<N>/` and then replaces
+`best.json` (step, score, folder, processed tokens, per-task losses)
+atomically; a tie keeps the earlier step. Older `best-step*` folders are
+removed after that, so a crash leaves either the previous or the new best.
+
+`final/` and the test assessment are unchanged: test still describes the
+last weights. run_release evaluates and exports the folder `best.json`
+names and records it as `selected_checkpoint` in `run_summary.json`.
+Validation chooses the checkpoint, so its curve is no longer an unbiased
+estimate for the released weights; use the separate release evaluation.
+easy_run turns this on for the IT stages only (D-028).
+
