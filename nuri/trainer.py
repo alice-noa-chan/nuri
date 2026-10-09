@@ -226,6 +226,8 @@ class TrainSettings:
     select_best: bool = (
         False  # keep the weights with the best validation score in best-step<N>/
     )
+    # With select_best: stop after this many validations without a new best (0 = off).
+    patience: int = 0
 
 
 @dataclass
@@ -934,6 +936,10 @@ def train(
         raise ValueError("valid_every requires explicit validation tasks")
     if settings.select_best and validation is None:
         raise ValueError("select_best requires explicit validation tasks")
+    if type(settings.patience) is not int or settings.patience < 0:
+        raise ValueError("patience must be a nonnegative integer")
+    if settings.patience and not (settings.select_best and settings.valid_every):
+        raise ValueError("patience requires select_best and periodic validation")
     training_sources = {id(task) for task in tasks.values()}
     if any(
         id(task) in training_sources
@@ -1310,6 +1316,7 @@ def train(
                 reason = "step_boundary" if boundary_reached else "requested"
                 raise TrainingInterrupted(step + 1, path, reason=reason)
 
+            stopped_early = False
             if validation is not None and (
                 finished
                 or (settings.valid_every and (step + 1) % settings.valid_every == 0)
@@ -1317,7 +1324,10 @@ def train(
                 assess(validation, "valid", step)
                 if settings.select_best:
                     _update_best(model, settings, step, totals, out)
-            if finished and test is not None:
+                # Early stop: the run ends here as if this were the last step,
+                # so the test assessment and final/ follow and the stage is complete.
+                stopped_early = not finished and _patience_spent(settings, step, out)
+            if (finished or stopped_early) and test is not None:
                 assess(test, "test", step)
             if _stop.requested and (validation is not None or test is not None):
                 path = _save_state(
@@ -1332,6 +1342,10 @@ def train(
                     LATEST_STATE,
                 )
                 raise TrainingInterrupted(step + 1, path)
+            if stopped_early:
+                monitor.phase("saving final (early stop)", force=True)
+                _finish_early(model, optimizer, settings, step, totals, out, rng, tasks)
+                break
             saved = _maybe_save(
                 model,
                 optimizer,
@@ -1480,6 +1494,7 @@ RESUME_FREE_SETTINGS = (
     "valid_every",
     "stop_after_completed_steps",
     "select_best",
+    "patience",
 )
 
 
@@ -1824,6 +1839,38 @@ def _update_best(model, settings, step: int, totals: dict, out: Path) -> None:
     for folder in out.glob("best-step*"):
         if folder.name != best["folder"]:
             shutil.rmtree(folder)
+
+
+def _patience_spent(settings, step: int, out: Path) -> bool:
+    """True when `patience` validations in a row after the best one brought no new best.
+
+    Derived only from best.json and the step, so a resumed run stops at the
+    same step without extra saved state.
+    """
+    if not settings.patience or not (out / BEST_RECORD).exists():
+        return False
+    best = json.loads((out / BEST_RECORD).read_text(encoding="utf-8"))
+    return step + 1 - best["step"] >= settings.patience * settings.valid_every
+
+
+def _finish_early(model, optimizer, settings, step, totals, out, rng, tasks) -> None:
+    """Write final/ at an early-stop step and record why the stage ended there."""
+    _save_state(model, optimizer, settings, step, totals, out, rng, tasks, "final")
+    save_pretrained(model, out / "final", tokenizer_dir=settings.tokenizer_dir)
+    best = json.loads((out / BEST_RECORD).read_text(encoding="utf-8"))
+    record = {
+        "stopped_after_step": step + 1,
+        "planned_steps": settings.total_steps,
+        "best_step": best["step"],
+        "patience_validations": settings.patience,
+        "valid_every": settings.valid_every,
+    }
+    atomic_write(
+        out / "early_stop.json",
+        lambda temporary: temporary.write_text(
+            json.dumps(record, indent=2), encoding="utf-8"
+        ),
+    )
 
 
 def _checkpoint_names(schedule, settings, step: int) -> list[str]:

@@ -113,3 +113,60 @@ def test_runner_evaluates_and_exports_the_selected_checkpoint(tmp_path):
     (stage / "best-step6" / "model.safetensors").unlink()
     with pytest.raises(ValueError, match="missing checkpoint"):
         runner.release_checkpoint(stage, spec)
+
+
+def test_patience_counts_validations_since_the_best_step(tmp_path):
+    settings = trainer.TrainSettings(
+        str(tmp_path), 40, select_best=True, patience=2, valid_every=4
+    )
+    assert not trainer._patience_spent(settings, 7, tmp_path)  # no best.json yet
+    (tmp_path / "best.json").write_text(json.dumps({"step": 8}))
+    assert not trainer._patience_spent(settings, 11, tmp_path)  # one validation later
+    assert trainer._patience_spent(settings, 15, tmp_path)  # two validations later
+    off = trainer.TrainSettings(str(tmp_path), 40, select_best=True, valid_every=4)
+    assert not trainer._patience_spent(off, 39, tmp_path)
+
+
+def test_training_cli_stops_early_and_writes_a_complete_final(tmp_path, monkeypatch):
+    # Every validation is worse than the first, so patience 1 ends the run at
+    # the second validation (step 4 of 12, validations every 2 steps).
+    monkeypatch.setattr(trainer, "holdout_score", lambda report: report["step"])
+    inputs(tmp_path)
+    run = args(tmp_path, extra=["--select-best", "--patience", "1"])
+    run[run.index("--steps") + 1] = "12"
+    cli.main(run)
+    out = tmp_path / "base"
+    stop = json.loads((out / "early_stop.json").read_text())
+    assert stop == {
+        "stopped_after_step": 4,
+        "planned_steps": 12,
+        "best_step": 2,
+        "patience_validations": 1,
+        "valid_every": 2,
+    }
+    splits = [
+        (entry["split"], entry["step"])
+        for entry in map(
+            json.loads, (out / "holdout_log.jsonl").read_text().splitlines()
+        )
+    ]
+    assert splits == [("valid", 2), ("valid", 4), ("test", 4)]
+    assert (out / "final" / "model.safetensors").is_file()
+    assert (
+        out / "training_state" / "final.pt"
+    ).is_file()  # run_release sees it as done
+    assert json.loads((out / "best.json").read_text())["step"] == 2
+    assert load_script()._finished(out)
+
+
+def test_patience_needs_select_best():
+    with pytest.raises(SystemExit) as error:
+        cli.parse_args(
+            ["--stage", "it", "--out", "x", "--steps", "1", "--holdout-config", "h.json",
+             "--patience", "2"]
+        )  # fmt: skip
+    assert error.value.code == 2
+    plan = {"stages": {"it": {"stage": "it", "steps": 4, "holdout_config": "h.json",
+                              "patience": 2}}}  # fmt: skip
+    with pytest.raises(ValueError, match="needs select_best"):
+        load_script().validate_holdout_settings(plan)

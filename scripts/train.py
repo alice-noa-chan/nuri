@@ -177,6 +177,13 @@ def parse_args(argv=None):
         "(named by <out>/best.json); requires --holdout-config",
     )
     p.add_argument(
+        "--patience",
+        type=nonnegative_int,
+        default=0,
+        help="with --select-best: end the stage after this many validations without a "
+        "new best; final/ is written at that step (0 = off)",
+    )
+    p.add_argument(
         "--save-every-minutes",
         type=float,
         default=0.0,
@@ -276,6 +283,8 @@ def parse_args(argv=None):
         p.error("--valid-every requires --holdout-config")
     if args.select_best and not args.holdout_config:
         p.error("--select-best requires --holdout-config")
+    if args.patience and not args.select_best:
+        p.error("--patience requires --select-best")
     if args.assessment_recipe_config and not args.holdout_config:
         p.error("--assessment-recipe-config requires --holdout-config")
     return args
@@ -949,6 +958,7 @@ def main(argv=None):
         valid_every=holdout_config["valid_every"] if holdout_config else 0,
         stop_after_completed_steps=args.stop_after_completed_steps,
         select_best=args.select_best,
+        patience=args.patience,
     )
     print(
         f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}",

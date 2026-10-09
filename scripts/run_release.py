@@ -66,6 +66,7 @@ TRAIN_FLAGS = (
     "stop_after_completed_steps",
     "recipe_config",
     "assessment_recipe_config",
+    "patience",
 )
 # scripts/train.py exits with this code after saving on SIGTERM (nuri.trainer.INTERRUPTED_EXIT_CODE).
 INTERRUPTED_EXIT_CODE = 75
@@ -124,6 +125,14 @@ def validate_holdout_settings(plan: dict) -> None:
                 )
         if spec.get("select_best") and not spec.get("holdout_config"):
             raise ValueError(f"{name}: select_best requires an explicit holdout_config")
+        if "patience" in spec and (
+            type(spec["patience"]) is not int
+            or spec["patience"] < 0
+            or (spec["patience"] and not spec.get("select_best"))
+        ):
+            raise ValueError(
+                f"{name}: patience must be an integer >= 0 and needs select_best"
+            )
         if "stop_after_completed_steps" in spec:
             boundary, steps = spec["stop_after_completed_steps"], spec.get("steps")
             if (
