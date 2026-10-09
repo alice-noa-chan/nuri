@@ -265,13 +265,13 @@ def reference_config(**overrides) -> NuriConfig:
 
 
 def release_dense_config(**overrides) -> NuriConfig:
-    """≈150M public dense model (D-009, D-013)."""
+    """≈300M public dense model (D-029; was ≈150M, 768 x 10, under D-009/D-013)."""
     base = dict(
         vocab_size=65536,
-        hidden_size=768,
-        num_heads=12,
-        ffn_size=2048,
-        input_layers=10,
+        hidden_size=1024,
+        num_heads=16,
+        ffn_size=2816,
+        input_layers=14,
         readout_layers=2,
         latent_slots=32,
         max_input_len=1024,
@@ -286,8 +286,16 @@ def release_dense_config(**overrides) -> NuriConfig:
 
 
 def release_moe_config(**overrides) -> NuriConfig:
-    """≈242M total / ≈150M active public MoE model (D-011)."""
-    overrides.setdefault("moe", MoEConfig())
+    """≈525M total / ≈300M active public MoE model (D-011, sized by D-029).
+
+    Every second input layer (and the second readout layer) uses experts.
+    The four active experts (top-3 routed + 1 shared) of 704 units together
+    match the dense FFN width of 2816, so per-token compute stays close to
+    the dense model.
+    """
+    overrides.setdefault(
+        "moe", MoEConfig(expert_ffn_size=704, input_layers=(2, 4, 6, 8, 10, 12, 14))
+    )
     return release_dense_config(**overrides)
 
 

@@ -11,12 +11,13 @@ def test_presets_build():
 
 def test_release_overrides_match_architecture():
     dense = PRESETS["release-dense"]()
-    assert (dense.hidden_size, dense.num_heads, dense.ffn_size) == (768, 12, 2048)
-    assert (dense.input_layers, dense.latent_slots, dense.max_response_len) == (10, 32, 256)
+    assert (dense.hidden_size, dense.num_heads, dense.ffn_size) == (1024, 16, 2816)
+    assert (dense.input_layers, dense.latent_slots, dense.max_response_len) == (14, 32, 256)
     assert dense.qk_norm and dense.train_depths == (2, 4, 8)
     moe = PRESETS["release-moe"]()
     active_width = moe.moe.expert_ffn_size * (moe.moe.top_k + moe.moe.num_shared_experts)
     assert active_width == dense.ffn_size
+    assert moe.moe.input_layers == (2, 4, 6, 8, 10, 12, 14)  # every second layer
 
 
 def test_roundtrip(tmp_path):
