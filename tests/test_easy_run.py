@@ -185,7 +185,15 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     plan = json.loads((easy.WORK / "plan.json").read_text())
     assert plan["stages"]["base-dense"]["recipe_config"].endswith("recipe-base.json")
     assert plan["stages"]["it-dense"]["init"] == "base-dense"
+    # IT releases its best validated step; the other stages release final/.
+    assert [n for n, s in plan["stages"].items() if s.get("select_best")] == [
+        "it-dense",
+        "it-moe",
+    ]
     output = easy.OUTPUT
+    summary = json.loads((output / "run_summary.json").read_text())
+    assert summary["it-dense"]["selected_checkpoint"]["folder"].startswith("best-step")
+    assert "selected_checkpoint" not in summary["base-dense"]
     for name in (
         "nuri-base",
         "nuri-base-moe",

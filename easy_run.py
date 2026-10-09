@@ -749,6 +749,9 @@ def make_plan(config: dict, state: dict) -> None:
             stage["init"] = spec["init"]
         if kind == "it":
             stage["bucket"] = True
+            # IT runs up to max_epochs passes over a small set and can overfit,
+            # so it releases the step with the best validation score.
+            stage["select_best"] = True
         if kind in recipes:
             stage["recipe_config"] = recipes[kind]
         stages[name] = stage
