@@ -107,6 +107,7 @@ TRAIN_ATTEMPTS = 4  # run_release restarts after failures (each resumes)
 OOM_MARKERS = ("out of memory", "outofmemoryerror")
 MIN_BASE_STEPS = 100  # a base stage shorter than this is not worth running
 MIN_FREE_DISK_GB = 300
+PATIENCE = 5  # validations without a new best (a quarter of an IT/embed stage)
 STOP_GRACE_SECONDS = 20 * 60  # a stopped child that has not exited by then is killed
 
 
@@ -749,9 +750,12 @@ def make_plan(config: dict, state: dict) -> None:
             stage["init"] = spec["init"]
         if kind == "it":
             stage["bucket"] = True
-            # IT runs up to max_epochs passes over a small set and can overfit,
-            # so it releases the step with the best validation score.
+        if kind in ("it", "embed"):
+            # These stages run up to max_epochs passes over a small set and can
+            # overfit: they release the step with the best validation score and
+            # end early once PATIENCE validations in a row bring no new best.
             stage["select_best"] = True
+            stage["patience"] = PATIENCE
         if kind in recipes:
             stage["recipe_config"] = recipes[kind]
         stages[name] = stage
