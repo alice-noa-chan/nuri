@@ -745,7 +745,12 @@ def make_plan(config: dict, state: dict) -> None:
         if kind == "it" and "reasoning_examples" in train:
             stage["reasoning_examples"] = train["reasoning_examples"]
         if "preset" in spec:
-            stage.update(preset=spec["preset"], pack_mlm=True, bucket=True)
+            # Base stages see every corpus piece once per pass instead of
+            # random documents with replacement (about 27% never seen at 1.3
+            # passes' worth of draws).
+            stage.update(
+                preset=spec["preset"], pack_mlm=True, bucket=True, shuffled_passes=True
+            )
         if "init" in spec:
             stage["init"] = spec["init"]
         if kind == "it":

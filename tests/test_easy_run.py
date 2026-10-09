@@ -190,6 +190,11 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     assert {
         n: s.get("patience") for n, s in plan["stages"].items() if s.get("select_best")
     } == {"it-dense": 5, "embed": 5, "it-moe": 5}
+    # Base stages draw every corpus piece once per pass.
+    assert [n for n, s in plan["stages"].items() if s.get("shuffled_passes")] == [
+        "base-dense",
+        "base-moe",
+    ]
     output = easy.OUTPUT
     summary = json.loads((output / "run_summary.json").read_text())
     assert summary["it-dense"]["selected_checkpoint"]["folder"].startswith("best-step")
