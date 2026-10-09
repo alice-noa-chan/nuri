@@ -44,7 +44,9 @@ page explains the three sides of that flow.
    It contains the committed tree (git archive HEAD), `easy_run.json`,
    `offline/` and `data/` with `data/SHA256SUMS`, all under one folder
    `nuri/`. It also writes `nuri-easy-run.tar.zst.sha256`. Hand over both
-   files.
+   files. Token corpora go in as uint16: a corpus still stored as uint32
+   on this PC is narrowed while it is packed (the local file is not
+   changed), which halves the largest part of the bundle.
 
 ## 2. Run (GPU host)
 
