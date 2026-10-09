@@ -212,6 +212,8 @@ def test_end_to_end_on_cpu_with_tiny_presets(easy, monkeypatch, tmp_path):
     assert (output / "logs" / "base-dense" / "holdout_log.jsonl").is_file()
     with tarfile.open(easy.ARCHIVE) as bundle:
         assert "easy_run_output/models/nuri-base/model.safetensors" in bundle.getnames()
+        status = json.load(bundle.extractfile("easy_run_output/status.json"))
+    assert status["status"] == "complete" and status["unfinished_stages"] == []
     assert easy.DATA_MARKER.is_file()  # the data is checked only once
 
     # A second run finds every step finished and does nothing.
@@ -396,6 +398,7 @@ def test_a_failed_run_still_packages_what_is_finished(easy, monkeypatch):
     assert "easy_run_output/easy_run_logs/train.log" in names
     assert status["status"].startswith("stopped early: SystemExit: training kept")
     assert status["released_models"] == ["nuri-base"]
+    assert status["unfinished_stages"] == ["it-dense", "embed", "base-moe", "it-moe"]
     state = json.loads(easy.STATE_PATH.read_text())
     assert state["done"] == []  # the next run tries training again
 
@@ -522,3 +525,18 @@ def test_install_check_names_every_module_that_does_not_import(easy):
     assert "no_such_module_for_nuri: ModuleNotFoundError" in str(stop.value)
     assert "json:" not in str(stop.value)
     assert "transformers" in easy.RELEASE_MODULES  # export needs it
+
+
+def test_a_run_cut_by_the_deadline_is_not_reported_complete(easy):
+    for name in ("nuri-base", "nuri-base-it", "nuri-base-embed"):
+        model = easy.WORK / "runs" / "release" / name
+        model.mkdir(parents=True)
+        (model / "model.safetensors").write_bytes(b"weights")
+    easy.package(make_config("data"), {"done": ["train"], "deadline_reached": True})
+    with tarfile.open(easy.ARCHIVE) as bundle:
+        status = json.load(bundle.extractfile("easy_run_output/status.json"))
+    assert status["status"] == (
+        "incomplete: the time budget ran out before base-moe, it-moe"
+    )
+    assert status["unfinished_stages"] == ["base-moe", "it-moe"]
+    assert status["deadline_reached"] is True

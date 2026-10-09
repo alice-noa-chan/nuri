@@ -874,11 +874,18 @@ def package(config: dict, state: dict, status: str = "complete") -> None:
         shutil.copytree(WORK / "logs", OUTPUT / "easy_run_logs")
     models = OUTPUT / "models"
     released = sorted(p.name for p in models.iterdir()) if models.exists() else []
+    missing = [
+        name for name, spec in STAGES.items() if spec["release_name"] not in released
+    ]
+    if status == "complete" and missing:
+        # A run that ran out of time has no error, but it did not finish.
+        status = "incomplete: the time budget ran out before " + ", ".join(missing)
     summary = {
         "status": status,
         "finished_steps": state.get("done", []),
         "deadline_reached": state.get("deadline_reached", False),
         "released_models": released,
+        "unfinished_stages": missing,
     }
     (OUTPUT / "status.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     with tarfile.open(ARCHIVE, "w") as bundle:
