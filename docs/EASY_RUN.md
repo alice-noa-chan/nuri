@@ -128,6 +128,15 @@ stage is unfinished, so the output archive is written inside the window.
 
 The margins are small on purpose (D-027). On the A100 check, evaluation
 and export of all five stages took under 10 minutes, and calibration over
-100 steps measures within about 5% of the real step time (30 steps
-overestimated it by about 21%). Measured there: base-dense 0.51 s, base-moe
-0.67 s per optimizer step with micro-batch 32 x 2.
+100 steps measures within about 10% of the real step time (30 steps
+overestimated it by about 21%). Measured at the D-029 sizes (about 300M
+dense, 525M MoE) with micro-batch 32 x 2, including validations: base-dense
+0.97 s per optimizer step (peak 48 GB), base-moe 1.25 s (peak 61 GB;
+micro-batch 64 does not fit). At the 768-wide sizes before D-029 they were
+0.51 s and 0.67 s.
+
+Base stages draw corpus pieces without replacement (D-031): every piece of
+at most 1,024 tokens is trained on once per pass, and the 7-day plan makes
+about 1.3 passes at the D-029 size (estimate). IT and embed release the step
+with the best validation score and end early after 5 validations without a
+new best (D-028, D-030); time saved that way ends the run sooner.

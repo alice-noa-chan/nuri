@@ -3785,3 +3785,14 @@ Corrected only the architecture status line to link the newly measured diagnosti
 
 🔓 Claude done docs/ARCHITECTURE.md §10 and §14, configs/nuri_v0.design.json (2026-10-09T15:10Z; D-029)
 
+🔒 Claude editing docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json, docs/EASY_RUN.md (2026-10-09T16:00Z)
+
+### [2026-10-09] Claude — A100 check of the D-029 sizes; D-030 early stop; D-031 sampling without replacement
+- Scope: D-022, D-028, D-029, D-030, D-031
+- Type: review
+- Details: A rented A100 80GB (about 1.2 USD for the hour) ran the offline flow at the D-029 sizes on a small data subset. Offline install, data check, calibration (MoE fell back from micro-batch 64 to 32 as designed), base-dense, it-dense and embed trained, evaluated and exported; the 1-hour test budget ran out during base-moe, so the two MoE models were not exported. That exposed a reporting defect: status.json said "complete"; it now says "incomplete: the time budget ran out before ..." and lists unfinished_stages (006d67c). Losses fell without non-finite values (base-dense 11.26 to 4.25 in 1,666 steps). best.json chose the last step in both short IT/embed stages, so the early stop did not trigger there; it is covered by a CPU integration test. The user also asked to train by epochs to avoid wasting data: D-031 keeps the time-based step count but draws base pieces without replacement (ba35987, 1285362), so one pass covers every piece of at most 1,024 tokens.
+- Evidence: Real step times with validations: base-dense 0.974 s, base-moe 1.251 s (was 0.513 and 0.665 at 768 x 10); calibration 1.058 and 1.349. Peak allocated 48.4 GB and 60.5 GB. On the full expanded mixture (145 sources, 28.7M pieces) ShuffledPasses builds in 0.3 s with about 0.4 GB; with tokens in memory it draws about 86k pieces/s versus 43k documents/s for the old sampler. Unseen share with replacement after 1.3 passes' worth of draws: e^-1.3, about 27% (estimate).
+- Status: accepted (user approved D-029, D-030, D-031)
+
+🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json, docs/EASY_RUN.md (2026-10-09T16:10Z)
+
