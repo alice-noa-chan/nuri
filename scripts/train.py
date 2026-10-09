@@ -171,6 +171,12 @@ def parse_args(argv=None):
         "omit on resume to continue the original full schedule",
     )
     p.add_argument(
+        "--select-best",
+        action="store_true",
+        help="keep the weights with the best validation score in <out>/best-step<N>/ "
+        "(named by <out>/best.json); requires --holdout-config",
+    )
+    p.add_argument(
         "--save-every-minutes",
         type=float,
         default=0.0,
@@ -268,6 +274,8 @@ def parse_args(argv=None):
         p.error("--stop-after-completed-steps must be below --steps")
     if args.valid_every is not None and not args.holdout_config:
         p.error("--valid-every requires --holdout-config")
+    if args.select_best and not args.holdout_config:
+        p.error("--select-best requires --holdout-config")
     if args.assessment_recipe_config and not args.holdout_config:
         p.error("--assessment-recipe-config requires --holdout-config")
     return args
@@ -940,6 +948,7 @@ def main(argv=None):
         save_every_minutes=args.save_every_minutes,
         valid_every=holdout_config["valid_every"] if holdout_config else 0,
         stop_after_completed_steps=args.stop_after_completed_steps,
+        select_best=args.select_best,
     )
     print(
         f"stage={args.stage} mix={mix} params={sum(p.numel() for p in model.parameters()):,}",

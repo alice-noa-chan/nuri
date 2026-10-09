@@ -13,10 +13,14 @@ configs/release_plan.example.json). For each stage, in order, the runner:
    Plan-wide switches in "train" (for example {"tensorboard": true,
    "gradient_checkpointing": true}) apply to every stage unless the stage
    sets its own value.
-2. evaluates the final checkpoint (scripts/evaluate.py) when the plan asks,
-   reusing only a matching successful receipt and intact result;
+2. evaluates the released checkpoint (scripts/evaluate.py) when the plan
+   asks, reusing only a matching successful receipt and intact result;
 3. exports a release folder (scripts/export_release.py) with the measured
    GPU-hours of that stage.
+
+The released checkpoint is <stage>/final, or, for a stage with
+"select_best": true, the weights with the best validation score that
+training kept in <stage>/best-step<N>/ (named by <stage>/best.json).
 
 Wall time per stage is stored in <out>/run_summary.json, so a re-run after a
 crash keeps the hours already spent. Paths in the plan are used as given;
@@ -75,6 +79,7 @@ TRAIN_SWITCHES = (
     "bucket",
     "native_gqa",
     "liger_kernels",
+    "select_best",
 )
 KERNEL_FLAGS = ("attention_backend", "vocab_loss_backend", "vocab_chunk_size")
 DATA_FLAGS = {
@@ -117,6 +122,8 @@ def validate_holdout_settings(plan: dict) -> None:
                 raise ValueError(
                     f"{name}: valid_every requires an explicit holdout_config"
                 )
+        if spec.get("select_best") and not spec.get("holdout_config"):
+            raise ValueError(f"{name}: select_best requires an explicit holdout_config")
         if "stop_after_completed_steps" in spec:
             boundary, steps = spec["stop_after_completed_steps"], spec.get("steps")
             if (
@@ -127,6 +134,25 @@ def validate_holdout_settings(plan: dict) -> None:
                 raise ValueError(
                     f"{name}: stop_after_completed_steps must be an integer between 1 and steps - 1"
                 )
+
+
+def best_record(stage_dir: Path, spec: dict) -> dict | None:
+    """The best-validation record of a select_best stage, or None."""
+    path = stage_dir / "best.json"
+    if not spec.get("select_best") or not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def release_checkpoint(stage_dir: Path, spec: dict) -> Path:
+    """The weights a stage evaluates and exports: final/ or its best validated step."""
+    best = best_record(stage_dir, spec)
+    if best is None:
+        return stage_dir / "final"
+    folder = stage_dir / best["folder"]
+    if not (folder / "model.safetensors").is_file():
+        raise ValueError(f"{stage_dir.name}: best.json names a missing checkpoint")
+    return folder
 
 
 def newest_state(stage_dir: Path) -> Path | None:
@@ -224,7 +250,7 @@ def evaluate_command(name: str, spec: dict, plan: dict, out: Path) -> list[str]:
         PYTHON,
         str(ROOT / "scripts" / "evaluate.py"),
         "--checkpoint",
-        str(out / name / "final"),
+        str(release_checkpoint(out / name, spec)),
         "--suites",
         *spec["evaluate"],
         "--output",
@@ -331,7 +357,8 @@ def evaluation_manifest_hashes(plan: dict, spec: dict) -> dict:
 def evaluation_binding(
     command: list[str], stage_dir: Path, plan: dict, spec: dict
 ) -> dict:
-    """Describe the actual final checkpoint and evaluator runtime for reuse."""
+    """Describe the actual released checkpoint and evaluator runtime for reuse."""
+    checkpoint = release_checkpoint(stage_dir, spec)
     versions = {}
     for package in (
         "torch",
@@ -346,16 +373,16 @@ def evaluation_binding(
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
     return {
-        "checkpoint_sha256": file_sha256(stage_dir / "final" / "model.safetensors"),
-        "config_sha256": file_sha256(stage_dir / "final" / "config.json"),
+        "checkpoint_sha256": file_sha256(checkpoint / "model.safetensors"),
+        "config_sha256": file_sha256(checkpoint / "config.json"),
         "tokenizer_sha256": {
-            name: file_sha256(stage_dir / "final" / name)
+            name: file_sha256(checkpoint / name)
             for name in (
                 "tokenizer.json",
                 "tokenizer_config.json",
                 "special_tokens_map.json",
             )
-            if (stage_dir / "final" / name).is_file()
+            if (checkpoint / name).is_file()
         },
         "input_sha256": evaluation_input_hashes(command),
         "manifest_sha256": evaluation_manifest_hashes(plan, spec),
@@ -463,7 +490,7 @@ def export_command(
         PYTHON,
         str(ROOT / "scripts" / "export_release.py"),
         "--checkpoint",
-        str(out / name / "final"),
+        str(release_checkpoint(out / name, spec)),
         "--out",
         str(out / "release" / spec["release_name"]),
         "--name",
@@ -475,7 +502,8 @@ def export_command(
     ]
     if release.get("gpu"):
         command += ["--gpu", release["gpu"]]
-    tokens = _trained_tokens(out / name)
+    best = best_record(out / name, spec)
+    tokens = best["tokens"] if best else _trained_tokens(out / name)
     if tokens:
         command += ["--tokens", f"{tokens:.3g}"]
     return command
@@ -629,6 +657,17 @@ def main(argv=None):
                 flush=True,
             )
             sys.exit(INTERRUPTED_EXIT_CODE)
+        best = None if args.dry_run else best_record(out / name, spec)
+        if best is not None:
+            record["selected_checkpoint"] = {
+                key: best[key] for key in ("folder", "step", "score")
+            }
+            print(
+                f"[{name}] releasing {best['folder']} "
+                f"(best validation score {best['score']:.4f})",
+                flush=True,
+            )
+            write_summary(summary_path, summary)
         if spec.get("release_name"):
             command = export_command(
                 name, spec, plan, out, record["train_seconds"] / 3600

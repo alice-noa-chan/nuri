@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import random
+import shutil
 import signal
 import threading
 import time
@@ -221,6 +222,9 @@ class TrainSettings:
     )
     stop_after_completed_steps: int | None = (
         None  # runtime gate; preserves the full optimizer schedule
+    )
+    select_best: bool = (
+        False  # keep the weights with the best validation score in best-step<N>/
     )
 
 
@@ -928,6 +932,8 @@ def train(
         raise ValueError("valid_every must be nonnegative")
     if settings.valid_every and validation is None:
         raise ValueError("valid_every requires explicit validation tasks")
+    if settings.select_best and validation is None:
+        raise ValueError("select_best requires explicit validation tasks")
     training_sources = {id(task) for task in tasks.values()}
     if any(
         id(task) in training_sources
@@ -1122,6 +1128,8 @@ def train(
                 reassessed |= assess(
                     validation, "valid", start_step - 1, skip_recorded=True
                 )
+                if settings.select_best:
+                    _update_best(model, settings, start_step - 1, totals, out)
             if test is not None:
                 reassessed |= assess(test, "test", start_step - 1, skip_recorded=True)
             if _stop.requested:
@@ -1307,6 +1315,8 @@ def train(
                 or (settings.valid_every and (step + 1) % settings.valid_every == 0)
             ):
                 assess(validation, "valid", step)
+                if settings.select_best:
+                    _update_best(model, settings, step, totals, out)
             if finished and test is not None:
                 assess(test, "test", step)
             if _stop.requested and (validation is not None or test is not None):
@@ -1469,6 +1479,7 @@ RESUME_FREE_SETTINGS = (
     "save_every_minutes",
     "valid_every",
     "stop_after_completed_steps",
+    "select_best",
 )
 
 
@@ -1753,6 +1764,66 @@ def _cuda_peaks(device: torch.device) -> dict:
         "cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
         "cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
     }
+
+
+BEST_RECORD = "best.json"
+
+
+def holdout_score(report: dict) -> float:
+    """Mean objective loss of the aggregate validation tasks; lower is better.
+
+    Language groups ("ko/instruction", ...) repeat the aggregate objectives on
+    subsets, so they are left out and every objective counts once.
+    """
+    losses = [
+        task["metrics"]["loss"]
+        for name, task in report["tasks"].items()
+        if "/" not in name
+    ]
+    return sum(losses) / len(losses)
+
+
+def _update_best(model, settings, step: int, totals: dict, out: Path) -> None:
+    """Keep the weights with the lowest validation score in <out>/best-step<N>/.
+
+    Called right after the validation of optimizer step `step` was recorded.
+    best.json names the kept folder and is replaced atomically only after
+    that folder is complete, so a crash leaves the old or the new best, never
+    a half-written one. A tie keeps the earlier step. Folders that best.json
+    does not name are removed afterwards.
+    """
+    receipt = out / "holdout" / f"valid-step{step + 1}.json"
+    report = json.loads(receipt.read_text(encoding="utf-8"))
+    score = holdout_score(report)
+    record_path = out / BEST_RECORD
+    best = (
+        json.loads(record_path.read_text(encoding="utf-8"))
+        if record_path.exists()
+        else None
+    )
+    if best is None or score < best["score"]:
+        best = {
+            "step": step + 1,
+            "score": score,
+            "folder": f"best-step{step + 1}",
+            "tokens": totals["tokens"],
+            "losses": {
+                name: task["metrics"]["loss"] for name, task in report["tasks"].items()
+            },
+        }
+        folder = out / best["folder"]
+        if folder.exists():  # left over from a crash before best.json named it
+            shutil.rmtree(folder)
+        save_pretrained(model, folder, tokenizer_dir=settings.tokenizer_dir)
+        atomic_write(
+            record_path,
+            lambda temporary: temporary.write_text(
+                json.dumps(best, indent=2), encoding="utf-8"
+            ),
+        )
+    for folder in out.glob("best-step*"):
+        if folder.name != best["folder"]:
+            shutil.rmtree(folder)
 
 
 def _checkpoint_names(schedule, settings, step: int) -> list[str]:
