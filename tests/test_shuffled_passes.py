@@ -85,8 +85,10 @@ def test_base_stage_uses_one_shared_pass_and_records_it(tmp_path):
     assert tasks["mlm"].sampler is tasks["span"].sampler
     assert tasks["mlm"].options["sampling"] == {
         "kind": "shuffled_passes",
+        "version": 2,
         "piece_len": config.max_input_len,
         "pieces": len(tasks["mlm"].sampler),
+        "candidate_capacity": 4 * 8,
     }
     tasks["mlm"].next_batch()
     tasks["span"].next_batch()
@@ -113,7 +115,7 @@ def test_interrupted_training_resumes_the_same_pass_exactly(tmp_path):
         torch.manual_seed(17)
         model = NuriModel(config)
         tasks, mix = base_stage(TokenCorpus(folder), config, 3, seed=9, pack_mlm=True,
-                                shuffled_passes=True)  # fmt: skip
+                                bucket=True, shuffled_passes=True)  # fmt: skip
         settings = TrainSettings(str(tmp_path / name), 8, warmup_steps=2, mix=mix,
                                  progress=False, embed_dims=(4, 8),
                                  stop_after_completed_steps=boundary)  # fmt: skip

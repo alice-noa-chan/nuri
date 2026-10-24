@@ -229,6 +229,74 @@ class ShuffledPasses(_DocumentSampler):
         return corpus.tokens[start:end].astype(np.int64).tolist()
 
 
+class BufferedShuffledPasses(ShuffledPasses):
+    """Preserve unused bucket candidates and packed tails across task calls.
+
+    Pass counters describe source draws. Pending pieces may still await a
+    training batch, so counters alone are not completed training epochs.
+    Buffers are bounded by one candidate pool and one source piece, and are
+    part of the private exact-resume state.
+    """
+
+    def __init__(self, corpus, piece_len: int, seed: int, candidate_capacity: int,
+                 vocab_size: int):
+        if type(candidate_capacity) is not int or candidate_capacity < 1:
+            raise ValueError("candidate capacity must be a positive integer")
+        super().__init__(corpus, piece_len, seed)
+        self.candidate_capacity = candidate_capacity
+        self.vocab_size = vocab_size
+        self.span_candidates: list[list[int]] = []
+        self.mlm_tail: list[int] = []
+
+    def state_dict(self) -> dict:
+        return {**super().state_dict(), "buffer_version": 1,
+                "span_candidates": [list(doc) for doc in self.span_candidates],
+                "mlm_tail": list(self.mlm_tail)}
+
+    def load_state_dict(self, state: dict) -> None:
+        if type(state.get("buffer_version")) is not int or state["buffer_version"] != 1:
+            raise ValueError("buffered sampling needs its saved buffers; use --init for legacy states")
+        candidates, tail = state.get("span_candidates"), state.get("mlm_tail")
+        if (not isinstance(candidates, list) or len(candidates) > self.candidate_capacity
+                or not isinstance(tail, list)):
+            raise ValueError("invalid buffered sampling state")
+        for doc in [*candidates, tail]:
+            if (not isinstance(doc, list) or len(doc) > self.piece_len
+                    or any(type(t) is not int or not 0 <= t < self.vocab_size for t in doc)):
+                raise ValueError("invalid buffered sampling tokens")
+        if any(len(doc) < 2 for doc in candidates):
+            raise ValueError("span candidates need at least two tokens")
+        super().load_state_dict(state)
+        self.span_candidates = [list(doc) for doc in candidates]
+        self.mlm_tail = list(tail)
+
+    def packed_piece(self, room: int, rng: random.Random, usable) -> list[int]:
+        """Take a prefix that fits, retaining every remaining usable token.
+
+        Special-only windows cannot carry MLM targets and are filtered, just
+        as wholly unmaskable documents are filtered by the ordinary sampler.
+        """
+        if type(room) is not int or room < 1:
+            raise ValueError("packed room must be a positive integer")
+        while True:
+            if not self.mlm_tail:
+                self.mlm_tail = self.sample(1, rng, usable=usable)[0]
+            piece, self.mlm_tail = self.mlm_tail[:room], self.mlm_tail[room:]
+            if usable(piece):
+                return piece
+
+    def span_batch(self, config, rng, generator, bucket, **options) -> dict:
+        if not self.span_candidates:
+            self.span_candidates = self.sample(self.candidate_capacity, rng,
+                                               usable=lambda doc: len(doc) >= 2)
+        batch = build_span_batch(self.span_candidates, config, rng, generator,
+                                 bucket=bucket, return_indices=True, **options)
+        selected = set(batch.pop("source_indices").tolist())
+        self.span_candidates = [doc for i, doc in enumerate(self.span_candidates)
+                                if i not in selected]
+        return batch
+
+
 def open_corpus(specs: str | list[str]) -> TokenCorpus | MixedCorpus:
     """Open one corpus folder, or mix several given as "folder" or "folder=weight".
 
@@ -334,13 +402,16 @@ def build_packed_mlm_batch(
     generator: torch.Generator | None = None,
     rate: float = 0.3,
     min_piece: int = 16,
+    *,
+    draw_window=None,
 ) -> dict:
     """MLM rows filled with several documents, so short documents waste no padding.
 
     draw_document() returns one usable document. Each row takes document
     windows until less than min_piece tokens of room are left. "segments"
     numbers the documents of a row (1, 2, ...; 0 = padding); the encoder uses
-    it to stop attention between documents.
+    it to stop attention between documents. An optional draw_window(room)
+    supplies a maskable piece that fits, preserving any unused tail itself.
     """
     special = (config.pad_id, config.mask_id, config.eos_id)
     sequences, segment_rows = [], []
@@ -349,9 +420,9 @@ def build_packed_mlm_batch(
         while config.max_input_len - len(tokens) >= min(
             min_piece, config.max_input_len
         ):
-            piece = _mlm_window(
-                draw_document(), config.max_input_len - len(tokens), special, rng
-            )
+            room = config.max_input_len - len(tokens)
+            piece = (draw_window(room) if draw_window is not None else
+                     _mlm_window(draw_document(), room, special, rng))
             segments += [segments[-1] + 1 if segments else 1] * len(piece)
             tokens += piece
         sequences.append(tokens)

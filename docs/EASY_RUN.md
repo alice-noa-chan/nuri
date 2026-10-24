@@ -135,8 +135,14 @@ dense, 525M MoE) with micro-batch 32 x 2, including validations: base-dense
 micro-batch 64 does not fit). At the 768-wide sizes before D-029 they were
 0.51 s and 0.67 s.
 
-Base stages draw corpus pieces without replacement (D-031): every piece of
-at most 1,024 tokens is trained on once per pass, and the 7-day plan makes
-about 1.3 passes at the D-029 size (estimate). IT and embed release the step
+Base stages draw corpus pieces of at most 1,024 tokens without replacement
+(D-031). Sampling policy version 2 retains unused span-bucket candidates
+and packed-MLM tails in bounded, checkpointed queues. Pass counters count
+source draws: pending queues can still contain pieces awaiting training,
+so a draw pass is not a completed training epoch. The earlier estimate of
+1.3 passes used the old policy and must be recalibrated. Legacy shuffled
+training states cannot resume exactly under version 2; use `--init` to
+start a fresh optimizer/schedule from their checkpoint weights.
+IT and embed release the step
 with the best validation score and end early after 5 validations without a
 new best (D-028, D-030); time saved that way ends the run sooner.

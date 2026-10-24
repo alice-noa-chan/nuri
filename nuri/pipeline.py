@@ -21,7 +21,7 @@ from typing import Iterator
 import torch
 
 from .config import NuriConfig
-from .data import (ShuffledPasses, TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
+from .data import (BufferedShuffledPasses, TokenCorpus, build_instruction_batch, build_mlm_batch, build_packed_mlm_batch, build_pair_batch,
                        build_span_batch, has_mlm_target, usable_instruction)
 from .trainer import Task
 from .recipe import TrainingRecipe
@@ -69,7 +69,9 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
     documents with replacement; MLM and span share one pass.
     """
     rng = random.Random(seed)
-    sampler = ShuffledPasses(corpus, config.max_input_len, seed) if shuffled_passes else None
+    sampler = (BufferedShuffledPasses(corpus, config.max_input_len, seed,
+                                     batch_size * BUCKET_POOL, config.vocab_size)
+               if shuffled_passes else None)
     source = sampler if sampler is not None else corpus
     generator = torch.Generator().manual_seed(seed)
     mlm_usable = lambda d: has_mlm_target(d, config)  # noqa: E731
@@ -80,12 +82,16 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
 
     def mlm_batch() -> dict:
         if pack_mlm:
+            window_options = ({"draw_window": lambda room: sampler.packed_piece(room, rng, mlm_usable)}
+                              if sampler is not None else {})
             return build_packed_mlm_batch(lambda: source.sample(1, rng, usable=mlm_usable)[0], batch_size,
-                                          config, rng, generator, **mlm_options)
+                                          config, rng, generator, **mlm_options, **window_options)
         docs = source.sample(batch_size, rng, usable=mlm_usable)
         return build_mlm_batch(docs, config, rng, generator, **mlm_options)
 
     def span_batch() -> dict:
+        if sampler is not None and bucket:
+            return sampler.span_batch(config, rng, generator, _bucket(config, batch_size), **span_options)
         count = batch_size * BUCKET_POOL if bucket else batch_size
         docs = source.sample(count, rng, usable=lambda d: len(d) >= 2)  # one token on each side
         return build_span_batch(docs, config, rng, generator,
@@ -96,7 +102,9 @@ def _corpus_tasks(corpus: TokenCorpus, config: NuriConfig, batch_size: int, seed
                "pack_mlm": pack_mlm, "bucket": bucket,
                **_bucket_options(config, batch_size, bucket)}
     if sampler is not None:
-        options["sampling"] = {"kind": "shuffled_passes", "piece_len": sampler.piece_len, "pieces": len(sampler)}
+        options["sampling"] = {"kind": "shuffled_passes", "version": 2,
+                               "piece_len": sampler.piece_len, "pieces": len(sampler),
+                               "candidate_capacity": sampler.candidate_capacity}
     return {"mlm": Task("mlm", mlm_batch, rng, generator, options, sampler),
             "span": Task("span", span_batch, rng, generator, options, sampler)}
 
