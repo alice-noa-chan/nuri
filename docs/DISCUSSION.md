@@ -3796,3 +3796,113 @@ Corrected only the architecture status line to link the newly measured diagnosti
 
 🔓 Claude done docs/ARCHITECTURE.md §14, configs/nuri_v0.design.json, docs/EASY_RUN.md (2026-10-09T16:10Z)
 
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T05:15:46+00:00)
+
+### [2026-10-24] Codex — Initial inspection of the returned seven-day training results
+- Scope: D-022, D-029, D-030, Q-17, §12
+- Type: review
+- Details: The returned archive's status records complete, no unfinished stages and no deadline stop. The five evaluation JSON files match the SHA-256 values in their run-summary receipts. Dense Base trained for 97.43 hours (358,402 updates; 16.52B logged processed tokens) and MoE Base for 43.55 hours (125,830 updates; 5.80B logged processed tokens); these unequal training amounts do not establish a controlled architecture comparison. Both IT stages select step 4,688; embedding selects step 200 and stops early.
+- Evidence: Saved Korean held-out MLM accuracy is 0.7032 dense / 0.6894 MoE (34,516 targets). Full-mask span token accuracy at T=4 is 0.0490 / 0.0480 (500 spans, 47,721 targets), so natural-language generation quality remains unresolved. Synthetic shared-split predicted-length exact match is 0.6867 / 0.6900 (300 examples), unchanged across T=1/2/4/8/16 and when R is zeroed or shuffled; this assessment does not demonstrate a useful recurrent-core contribution. Embedding fast-mode R@1 is 0.7749 versus token TF-IDF 0.7545 on 2,977 held-out pairs; reasoning mode is 0.7733. The IT reports contain synthetic assessments but no natural-language instruction assessment. Extracted records and evaluation tables are in ignored private storage. Inspection stopped before model weights; full archive integrity and local inference have not been verified.
+- Status: open
+
+🔓 Codex done docs/DISCUSSION.md
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T05:25:01+00:00)
+
+### [2026-10-24] Codex — Matched evaluation of the returned five models
+- Scope: D-022, D-029, Q-17, §12
+- Type: proposal
+- Details: The user requested performance measurements for every returned model against external references, and explicitly chose the Colab CLI. One new T4 session is used. Freeze the same three existing sentence-classification panels (1,024 fitting / 256 previously consulted validation rows), content-token mean features, separate sentence-pair combination and a common 17-value ridge grid from 0.01 to 1,000,000. Compare all five Nuri input encoders with English BERT, ModernBERT, RoBERTa, DeBERTa and ELECTRA, plus multilingual BERT, Korean ELECTRA and Korean RoBERTa on compatible language panels. Add matched full-pool held-out pair retrieval against multilingual E5 small/base and multilingual MiniLM. Compare generation with Qwen3 0.6B, Qwen2.5 0.5B Instruct and SmolLM2 360M Instruct on balanced synthetic tasks and fresh grounded short-answer checks. Base models use a declared fixed canvas as a diagnostic; IT models predict length. Keep inputs, source identities, examples, receipts and detailed outputs private. No production training or model changes.
+- Evidence: The protocol and scripts are frozen under ignored private storage before scoring. Reference revisions are resolved to immutable commits; local weights and all evaluation inputs are hash-bound. The GPU worker has a 115-minute process deadline. Validation-selected probes are diagnostic selection scores, and earlier model-training exposure is not established as absent. Different-tokenizer MLM accuracies are not directly ranked; narrow synthetic scores do not establish general chat quality.
+- Status: open
+
+🔓 Codex done docs/DISCUSSION.md
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T05:53:27+00:00)
+
+### [2026-10-24] Codex — Completed comparison against fourteen external models
+- Scope: D-022, D-029, Q-17, §12
+- Type: review
+- Details: All five returned Nuri checkpoints and fourteen external references completed the applicable matched assessments on the user-requested Colab T4. The strongest result is Korean frozen-feature topic classification: on 256 separate completion rows, Dense Base / MoE Base / Dense IT / MoE IT / Embed accuracy is 85.16 / 85.16 / 77.73 / 79.30 / 85.94 percent, versus Korean RoBERTa Base 84.38 and multilingual BERT 70.31. Dense Base minus Korean RoBERTa has a paired 95-percent row interval of -3.13 to +4.69 points, so the small observed lead is not an established advantage. These scores fit only a small ridge head on frozen features, not the whole encoder. English sentiment uses 256 previously consulted validation rows and remains a selection diagnostic: the same Nuri order scores 77.73 / 74.61 / 80.08 / 71.09 / 77.34, versus BERT 84.77, RoBERTa and DeBERTa 85.94, ELECTRA 88.67 and ModernBERT 78.52. No claim of an uncontaminated pretraining holdout is made.
+- Evidence: On the same 2,977-pair document pool, Embed fast R@1 is 77.49 percent versus multilingual E5 small/base 76.79/76.69; the paired intervals include zero. On semantic sentence similarity, Embed fast Spearman x100 is 60.64 Korean (519 pairs) / 65.55 English (1,379), versus E5 small 75.76/84.11 and base 78.01/85.65. Embed reasoning mode is 60.63/65.46, so this assessment finds no added benefit. Fresh grounded extraction (40 per language) scores Dense IT 37.5/50.0 percent and MoE IT 25.0/27.5 versus Qwen3 0.6B non-thinking 90/100. Natural explanations repeat heavily, including sampled FP32 controls. Synthetic shared/stress exact match is 66.67/61.33 percent for Dense IT and 66.33/60.67 for MoE IT; Nuri trained on those templates, while external models often fail the answer-only format or exhaust the 128-token cap, so those numbers do not establish superior general reasoning. Qwen2.5 was fully reassessed in FP32 after a matched replay demonstrated an FP16 numerical failure; DeBERTa also required FP32. All model sources match the exported code, all transferred weight hashes match the archive extraction, and 169 retrieved evidence files passed hash verification. Detailed protocols, reference revisions, predictions, intervals and REPORT.md remain under ignored private storage. The owned Colab session was terminated and the server session listing is empty. No model or architecture was changed or published.
+- Status: merged (assessment only; Q-17 remains open)
+
+🔓 Codex done docs/DISCUSSION.md
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T06:08:19+00:00)
+
+### [2026-10-24] Codex — Generation-cause diagnostic and sampler coverage defect
+- Scope: Q-17, D-022, D-031, §7, §8, §12
+- Type: proposal
+- Details: The user requested a code/results analysis of weak generation and whether more training time is sufficient. A new owned Colab T4 will run bounded, read-only diagnostics on the completed Dense Base and IT models: gold versus all-MASK/model-draft context, prompt/R interventions, fixed versus predicted lengths, refinement and blockwise decoding, position-table geometry and memory attention. Original models and architecture remain unchanged. Recipe hashes in the returned logs match the current base and IT controls exactly: full_mask_prob remains the default 0.1. Base validation span loss still improves during the final LR decay, while IT instruction loss improves and span reconstruction degrades; this separates remaining learning headroom from objective tradeoffs.
+- Evidence: A CPU reproduction of production base_stage with shuffled_passes and bucketing consumes 64 distinct synthetic pieces from ShuffledPasses but retains only 8 in the span batch. _corpus_tasks draws BUCKET_POOL times the nominal batch, build_span_batch keeps one length window, and unselected candidates are not returned. Packed MLM can also consume a piece but use only a window fitting its row remainder. Thus a sampler pass counts candidate draws, not exhaustive trained-piece coverage, contrary to the intended D-031 claim. Actual logged processed-token counts remain valid; the measured contribution of this coverage defect to generation quality is unknown. A correction should retain pending pieces/tails and bind their state on resume, followed by a coverage regression and matched training comparison. No sampler change or new architecture decision is adopted in this entry.
+- Status: open
+
+🔓 Codex done docs/DISCUSSION.md
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T06:24:21+00:00)
+
+### [2026-10-24] Codex — Completed generation-cause probes: objective gap and decoding amplifiers
+- Scope: Q-17, D-022, D-031, §7, §8, §12
+- Type: review
+- Details: Read-only FP32 probes on the completed Dense Base and IT separate learning headroom from objective/decoding failures. On 38 eligible natural validation responses (17 Korean, 21 English; 4-128 target tokens, input at most 512), IT CE is 1.922 with a matched random half of the gold answer visible, 5.263 on a full-MASK canvas and 7.888 when the visible half is replaced with first-fill model predictions. Content accuracy is 63.0 / 13.49 / 11.67 percent. Different mask conditions have different conditional uncertainty, so the gap does not prove that one recipe change will fix it; the matched wrong-draft result directly shows sensitivity to erroneous visible predictions. Production corruption exposes gold context or MASK, not model-generated errors. Swapping the source raises full-mask CE to 8.936, hiding X to 9.390, and hiding R only to 5.461: the current model uses X, while recurrence contributes little in this assessment. Both learned position mechanisms are present; the old absent-position bug is not the diagnosis for these checkpoints.
+- Evidence: With unchanged IT weights, predicted lengths and cap 128, natural token F1 / adjacent repetition are 0.401 / 0.409 at S=4, 0.489 / 0.093 at S=16 and 0.475 / 0.030 with S=4 and block size 4. Total readout calls rise from 20 to 80 / 624. The two explanation samples remain circular and factually weak, and decoded extraction exact match stays 43.75 / 42.50 / 43.75 percent on 80 cases. Adjacent-token repetition misses repeated phrases; lower repetition alone is not repaired generation. Natural predicted-length MAE is 28.82 tokens, but giving the true length only raises S=4 token F1 from 0.396 to 0.425, with heavy repetition remaining. EOS is present in all these natural IT outputs. Matched span reconstruction gets worse after IT (full-mask end CE 6.380 to 6.631; mid 6.995 to 7.250), while instruction reconstruction improves. Base validation still improves during final LR decay (span 5.757 to 5.186), so more training may help; its causal benefit requires a compute-only continuation control. Sampled Base logs suggest about 0.74B generation-path masked targets out of 4.26B total masked targets (estimate), rather than treating all 16.52B processed input/output positions as generative labels. The controlled sampler fixture completes 256 candidate draws but trains only 30 pieces, and packed MLM drops an unused piece tail; actual corpus loss fraction is unmeasured and processed-token counters remain valid. All 47 retrieved files, source/input bytes and model transfer hashes were verified. The owned T4 session was stopped and the server session list is empty.
+- Proposal: fix candidate/tail retention with versioned resume state and coverage tests; monitor all-MASK natural generation, source conditioning and predicted lengths separately from mixed teacher-context loss; compare short continuations from the same checkpoint using the current mask recipe versus full-mask probabilities 0.3/0.5 before longer training; then test training matched to small blocks or erroneous drafts and consistent teacher responses. The latter are hypotheses, not adopted fixes. Existing S=16/block flags are measured diagnostic options only. Detailed English report, curve figure, code and raw results remain in ignored private storage. No architecture, production code, default, model weights or training schedule was changed.
+- Status: open (Q-17; sampler correction and training comparisons pending)
+
+🔓 Codex done docs/DISCUSSION.md
+
+🔒 Codex editing nuri/data.py, nuri/pipeline.py, tests/test_shuffled_passes.py, tests/test_sampler_coverage.py (2026-10-24T06:30:29+00:00)
+
+### [2026-10-24] Codex — Authorized sampler correction and matched masking continuation
+- Scope: D-031, Q-17, §8, §12
+- Type: proposal
+- Details: The user explicitly authorized correcting the sampler first, then a short Colab CLI comparison of full-mask probabilities 0.1/0.3/0.5, retaining only effective changes. New shuffled-pass runs will preserve unused raw span candidates in a bounded buffer and packed-MLM token tails. Both buffers share the pass source and are persisted in the full resume state; a versioned sampling-policy binding rejects silent legacy exact resume. Raw pass counters still describe draws and pending buffers remain explicit. Unshuffled legacy paths are unchanged. Test piece/token retention, document isolation, bounded buffers, mixed-source proportions and exact interrupted resume before GPU work.
+- Evidence: The prior production-code fixture drew 64 candidates and trained 8; a complete 256-piece draw pass retained only 30. The short masking comparison will warm-start the completed Dense IT model, keep its architecture and original IT mixture, and vary only full-mask probability under a common continuation schedule/data stream. Selection uses fixed natural generation, extraction and encoder/reconstruction checks, with equal updates and actual target/time accounting. Short-run gains do not justify a full release-quality claim; an inconclusive result leaves the default at 0.1.
+- Status: accepted (user request; implementation and evidence pending)
+
+🔒 Codex editing docs/EASY_RUN.md (2026-10-24T06:45:00+00:00)
+
+### [2026-10-24] Codex — Sampler coverage correction and frozen continuation protocol
+- Scope: D-031, Q-17, §11, §12
+- Type: response
+- Details: The corrected shuffled-pass source retains unselected raw span candidates until they are all used, and packed MLM retains its unused source-piece tail. Queues are bounded and saved with RNG state. Sampling policy version 2 rejects legacy exact resume; warm-starting old weights with --init is supported. Source pass counters describe draws, including pending queues, rather than completed training epochs. The EASY_RUN wording is corrected accordingly; previous throughput/pass estimates do not establish coverage after this policy change. Architecture and declaration are unchanged.
+- Evidence: All 27 targeted sampler, packing, bucketing and resume tests pass. The fixed fixture trains every one of 256 distinct pieces before replacing its pools, preserves the 48-token packed tail, and reproduces 60 interleaved task batches exactly after serialization. Full-suite validation is running. Before scoring, the private matched Colab protocol fixes 300 optimizer updates per arm, micro-batch 2 x accumulation 2, LR 5e-5, 15 warmup updates, original IT task mixture, identical input stream/seed and initial Dense IT weights. Only full-mask probability differs (0.1/0.3/0.5). This is an IT continuation screen, not a retrain measuring the base-sampler fix's quality effect. Adoption requires actual predicted-length generation gains, grounded extraction and encoder/span safeguards, and manual output review. Inconclusive findings keep the default and release weights.
+- Status: accepted (sampler correction); open (mask comparison)
+
+🔓 Codex done nuri/data.py, nuri/pipeline.py, tests/test_shuffled_passes.py, tests/test_sampler_coverage.py, docs/EASY_RUN.md
+
+🔒 Codex editing docs/DISCUSSION.md (2026-10-24T07:14:00+00:00)
+
+### [2026-10-24] Codex — Matched Colab masking screen completed; retain only sampler correction
+- Scope: D-031, Q-17, §8, §11, §12
+- Type: response
+- Details: The user-authorized full-mask comparison completed on an owned Colab CLI T4. All three arms warm-started the same completed Dense IT weights, reset optimizer/schedule, and ran 300 full-model updates with micro-batch 2 x accumulation 2, peak LR 5e-5, warmup 15, the original IT task mixture and identical per-task source/target streams (all SHA-256 digests match). Only full_mask_prob differed. This bounded, small-batch IT continuation screen does not measure the repaired Base sampler's quality effect or reproduce the full release training regime. The corrected shuffled-pass sampler is retained; 0.3/0.5 recipes and all continuation weights are rejected. The production default remains 0.1 and release weights are unchanged.
+- Evidence: Predicted-length greedy generation with T=4, S=4 and cap 128 gives natural token F1 / duplicate 4-gram fraction / grounded decoded exact match: untouched initializer 0.3998 / 0.1923 / 0.335; 0.1 continuation 0.3643 / 0.2669 / 0.325; 0.3 continuation 0.3529 / 0.2626 / 0.235; 0.5 continuation 0.3523 / 0.2854 / 0.210. Natural n=128 and grounded n=200. The 0.3/0.5 versus 0.1 natural-F1 differences have paired bootstrap 95% intervals [-0.0265,+0.0035] / [-0.0270,+0.0028], so they do not establish an improvement; extraction drops by 9.0/11.5 percentage points. Both predeclared numerical adoption gates fail. S=16 also worsens in all continuations versus initialization. Fixed natural/open output review still shows circular explanations, repeated phrases, missing details and incorrect calculations; one 0.3 math final answer improves but its reasoning stays garbled. Natural full-mask CE is 5.0327 initially and 5.3570/5.3388/5.3101 after continuation. A slightly lower CE versus the continuation control is not repaired generation.
+- Assessment: Merely adding these short warm-start updates did not improve generation; this does not show that every longer or better-tuned run would fail. Equal training presentations (1,200 rows; 336,488 valid input/canvas positions) use 80,478 /92,589 /106,251 masked targets and 433.5 /417.0 /488.5 seconds including checkpoint work. A reporting audit found four Japanese references incorrectly tagged English by a preparation fallback; the original 128 examples and aggregate scoring are preserved, with corrected descriptive script groups (64 Korean, 60 mainly English, 4 Japanese). Both Korean and English subgroup F1 also decline. The fixed review IDs were unaffected. This deviation and all private inputs/output records remain in ignored storage; no dataset identity is recorded here.
+- Validation: 27 targeted tests pass; the full suite has 1,351 passes and 7 skips. Candidate/tail retention, bounded saved buffers, document isolation, mixed-source draws and exact interrupted resume are covered. All 29 evidence files, 45 input/source file hashes, the original model transfer hash and frozen protocol/code were verified. The owned T4 was terminated; the server reports no active sessions. Only the sampler correctness fix and coverage guidance are applied. No architecture/declaration decision is changed, and no generation-quality gain from a complete corrected-sampler Base retrain is claimed.
+- Status: accepted (sampler correction); rejected (0.3/0.5 masking changes in this screen); open (Q-17, broader generation repair)
+
+🔓 Codex done docs/DISCUSSION.md
+
+
+
+🔒 Codex editing README.md, docs/RELEASE_RESULTS.md, docs/assets/nuri.png (start 2026-10-24T07:23:19.754796+00:00)
+
+### [2026-10-24] Codex — User-authorized Nuri publication
+- Scope: §15, D-004, D-005, D-007, D-008
+- Type: response
+- Details: The user authorized publishing the original completed model family to Hugging Face in a Nuri collection, adding measured performance and model links to GitHub, and placing the supplied character artwork at the top of the README/model cards. Follow the existing Ayaka presentation style, with self-contained usage and explicit generation limitations. Publish the five original exported checkpoints plus their shared tokenizer; do not adopt the rejected masking continuations. Keep training dataset identities, raw records and optimizer/resume states private.
+- Evidence: Original export verification receipts and all matched comparison/masking-screen evidence are verified locally. Cards will distinguish frozen-probe validation from the separate Korean completion test, and semantic similarity from near-duplicate document recovery. Hugging Face authentication is missing and requested while the reviewable bundles are prepared. GitHub CLI has authenticated access; the existing GitHub repository is private, and this task does not silently change its visibility.
+- Status: accepted (user publication request; preparation in progress)
+
+
+### [2026-10-24] Codex — Publication bundles verified; Hub authentication pending
+- Scope: §15, D-008
+- Type: response
+- Details: Prepared allowlisted publication folders for all five original models and the shared tokenizer. The supplied character image is byte-identical in every card and at the top of the GitHub README. RELEASE_RESULTS separates test/validation, semantic similarity/near-duplicate recovery and the rejected masking screen. GitHub visibility remains private. The README explicitly labels Hub links as planned while authentication is missing; no claim of completed upload is made.
+- Evidence: 118 package files hashed; all five original weight hashes and export round-trip receipts match; the six tokenizers are identical. All six Hub model-card metadata validations pass. Public contents have zero matches against 200 local private provenance markers. The documented custom generation and unit-normalized 256d embedding calls run on CPU with explicit FP32 in Transformers 5.18.0. No raw records, optimizer state, resume state or private source metadata are included.
+- Status: accepted (GitHub documentation and prepared bundles); open (Hugging Face login and remote publication verification)
+
+🔓 Codex done README.md, docs/RELEASE_RESULTS.md, docs/assets/nuri.png (2026-10-24T07:35:20.260516+00:00)

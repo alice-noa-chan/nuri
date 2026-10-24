@@ -1,5 +1,7 @@
 # Nuri
 
+<p align="center"><img src="docs/assets/nuri.png" width="256" alt="Nuri"></p>
+
 Nuri is an **encoder-only language model** that can also reason in a hidden
 "scratchpad" and write text, without an autoregressive decoder.
 
@@ -13,17 +15,9 @@ Nuri is an **encoder-only language model** that can also reason in a hidden
 
 Languages: Korean and English first, some Japanese. License: MIT.
 
-> Status: the model code, training loop and tests are implemented. A100/H100
-> training calibration is available in [GPU comparison](docs/GPU_COMPARISON.md)
-> and [A100 batch capacity](docs/GPU_CAPACITY.md).
-> The first Dense Base completed training. Its [measured evaluation](docs/DENSE_BASE_EVALUATION.md)
-> found learned masked-token patterns, inadequate text generation and an all-MASK
-> position defect. New presets correct that position path; corrected language
-> quality still requires repair training and evaluation. Design numbers remain
-> estimates unless explicitly identified as measured.
+> Status: The five completed model checkpoints and shared tokenizer are prepared for Hugging Face publication. Upload is pending authentication; the Hub links below are planned release locations until publication is confirmed. Korean frozen encoder features are the strongest measured result. English classification and semantic similarity trail stronger references; generated explanations remain repetitive and unreliable. These are not general chat assistants.
 
-See [performance expectations](docs/PERFORMANCE_EXPECTATIONS.md) for the
-first uses to test, current limits and the proposed quality evaluation.
+See [measured release results](docs/RELEASE_RESULTS.md) for comparisons, assessment sizes, limitations and the rejected 30%/50% masking screen. Earlier architecture and repair documents are historical records.
 
 ## How it works
 
@@ -57,20 +51,42 @@ The full design, with every decision and its reason, is in
 (tokenizer comparison, benchmark, training, inference) is in
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 
-## Models we plan to release
+## Model family
 
-| Name | What it is |
-|---|---|
-| `nuri-tokenizer` | byte-level BPE tokenizer for Korean, English and Japanese |
-| `nuri-base` | ~300M dense model, pretraining only |
-| `nuri-base-moe` | ~525M MoE model (~300M active per token), pretraining only |
-| `nuri-base-it` / `nuri-base-moe-it` | instruction-tuned versions |
-| `nuri-base-embed` | sentence embedding model built from `nuri-base` |
+[Hugging Face collection](https://huggingface.co/collections/alice-noa-chan/nuri)
 
-The historical plan used about one GPU-day for all stages. The current spending
-limit and Dense-priority allocation are recorded in the architecture decision
-log. Dense Base is retained; the interrupted MoE Base has an intermediate state.
-IT and embedding stages remain pending, along with corrected generation quality.
+| Model | Parameters | Purpose |
+| --- | --- | --- |
+| [nuri-base](https://huggingface.co/alice-noa-chan/nuri-base) | 302.3M | Pretraining; explicit generation canvas length |
+| [nuri-base-it](https://huggingface.co/alice-noa-chan/nuri-base-it) | 302.3M | Instruction tuning; predicted generation length |
+| [nuri-base-moe](https://huggingface.co/alice-noa-chan/nuri-base-moe) | 527.4M total /302.5M active | Pretraining; explicit generation canvas length |
+| [nuri-base-moe-it](https://huggingface.co/alice-noa-chan/nuri-base-moe-it) | 527.4M total /302.5M active | Instruction tuning; predicted generation length |
+| [nuri-base-embed](https://huggingface.co/alice-noa-chan/nuri-base-embed) | 302.3M | Contrastive sentence embeddings |
+| [nuri-tokenizer](https://huggingface.co/alice-noa-chan/nuri-tokenizer) | 65,536 tokens | Shared byte-level BPE tokenizer |
+
+The release bundles contain the original completed BF16 exports, custom inference code, tokenizer files, MIT license, model cards and SHA256SUMS. The 30%/50% masking continuations were not adopted. The current sampler fix preserves candidates and packed tails for future fresh training; these weights were trained before that correction.
+
+## Measured performance
+
+| Model | KO topic: test accuracy % | EN sentiment: validation accuracy % | EN inference: validation accuracy % |
+| --- | --- | --- | --- |
+| nuri-base | 85.16 | 77.73 | 54.30 |
+| nuri-base-it | 77.73 | 80.08 | 54.69 |
+| nuri-base-moe | 85.16 | 74.61 | 53.52 |
+| nuri-base-moe-it | 79.30 | 71.09 | 51.95 |
+| nuri-base-embed | 85.94 | 77.34 | 57.03 |
+| KLUE RoBERTa Base | 84.38 | - | - |
+| BERT Base uncased | - | 84.77 | 53.12 |
+| ELECTRA Base | - | 88.67 | 53.12 |
+| RoBERTa Base | - | 85.94 | 58.20 |
+| DeBERTa Base | - | 85.94 | 58.59 |
+| ModernBERT Base | - | 78.52 | 56.25 |
+
+The Korean column is a separate 256-row completion test. English columns are **consulted validation scores**, with 1,024 probe-fitting and 256 validation rows. All encoders stay frozen while a ridge classifier is fitted; these are not native untrained classifier-head results.
+
+Nuri Embed fast 256d reaches semantic-similarity Spearman x100 **60.64 KO /65.55 EN**, versus multilingual E5 small **75.76 /84.11**. Dense IT grounded extraction is **43.75%** over 80 questions, versus Qwen3 0.6B **95.00%** under the matched short-answer protocol. Explanation quality remains poor. These small task results do not support overall model rankings.
+
+Read [the full results and protocol](docs/RELEASE_RESULTS.md). No raw evaluation records or training source identities are published.
 
 ## Install
 
