@@ -3906,3 +3906,22 @@ Corrected only the architecture status line to link the newly measured diagnosti
 - Status: accepted (GitHub documentation and prepared bundles); open (Hugging Face login and remote publication verification)
 
 🔓 Codex done README.md, docs/RELEASE_RESULTS.md, docs/assets/nuri.png (2026-10-24T07:35:20.260516+00:00)
+
+
+🔒 Codex editing README.md, docs/RELEASE_RESULTS.md (start 2026-10-24T07:37:07.513836+00:00)
+
+### [2026-10-24] Codex — Hub authentication ready; publication resumed
+- Scope: §15, D-008
+- Type: response
+- Details: The user completed Hugging Face login. The authenticated account has admin membership in the requested alice-noa-chan namespace. Proceed with the already authorized public Nuri collection and six verified public folders; after anonymous remote-object verification, replace the GitHub pending status with canonical live links. Existing GitHub documentation/image bytes have been verified remotely.
+- Status: accepted (upload in progress)
+
+
+### [2026-10-24] Codex — Nuri model family published and anonymously verified
+- Scope: §15, D-008
+- Type: response
+- Details: Published the five original completed checkpoints and shared 65,536-token tokenizer under alice-noa-chan in the public Nuri collection: https://huggingface.co/collections/alice-noa-chan/nuri-6adc6025130a725e85a0b596 . All cards include the supplied character artwork at the top, standalone usage, model-family links, numeric results and generation limitations. Updated the GitHub README to the server-issued live collection URL and confirmed publication status. The GitHub repository remains private as before.
+- Evidence: Anonymous Hub API access verifies all six public repositories and all 124 allowlisted remote objects against staged bytes (SHA-256 for LFS objects, Git blob hashes for inline files). Original BF16 model hashes are unchanged. README and artwork were downloaded anonymously from every pinned upload revision and match locally; the Base model page renders the image at width 256. The collection contains all six models. The standalone tokenizer/chat template, custom generation and normalized 256d embedding examples pass local checks. No rejected continuation weights, private data or optimizer/resume states were published. GitHub performance/image documentation and the sampler correction were pushed; final live-link update follows this entry.
+- Status: merged (user-authorized publication complete)
+
+🔓 Codex done README.md, docs/RELEASE_RESULTS.md (2026-10-24T07:43:16.889620+00:00)

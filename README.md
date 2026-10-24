@@ -15,7 +15,7 @@ Nuri is an **encoder-only language model** that can also reason in a hidden
 
 Languages: Korean and English first, some Japanese. License: MIT.
 
-> Status: The five completed model checkpoints and shared tokenizer are prepared for Hugging Face publication. Upload is pending authentication; the Hub links below are planned release locations until publication is confirmed. Korean frozen encoder features are the strongest measured result. English classification and semantic similarity trail stronger references; generated explanations remain repetitive and unreliable. These are not general chat assistants.
+> Status: The five completed model checkpoints and shared tokenizer are available in the [Nuri Hugging Face collection](https://huggingface.co/collections/alice-noa-chan/nuri-6adc6025130a725e85a0b596). Korean frozen encoder features are the strongest measured result. English classification and semantic similarity trail stronger references; generated explanations remain repetitive and unreliable. These are not general chat assistants.
 
 See [measured release results](docs/RELEASE_RESULTS.md) for comparisons, assessment sizes, limitations and the rejected 30%/50% masking screen. Earlier architecture and repair documents are historical records.
 
@@ -53,7 +53,7 @@ The full design, with every decision and its reason, is in
 
 ## Model family
 
-[Hugging Face collection](https://huggingface.co/collections/alice-noa-chan/nuri)
+[Hugging Face collection](https://huggingface.co/collections/alice-noa-chan/nuri-6adc6025130a725e85a0b596)
 
 | Model | Parameters | Purpose |
 | --- | --- | --- |
